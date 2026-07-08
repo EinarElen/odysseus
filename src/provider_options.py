@@ -101,7 +101,7 @@ def _sanitize_harness_options(raw: Any) -> Dict[str, Any]:
     if workspace:
         out["workspace"] = workspace
 
-    for key in ("agent_dir", "agentDir", "session_dir", "sessionDir", "session_file", "sessionFile"):
+    for key in ("agent_dir", "session_dir", "session_file"):
         value = _clean_text(raw.get(key), max_len=2048, allow_path=True)
         if value:
             out[key] = value

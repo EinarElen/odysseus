@@ -228,7 +228,7 @@ function _defaultHarnessProviderOptions(harness) {
 
 function _stripHarnessSessionIdentity(config) {
   const out = { ...(config || {}) };
-  ['session_file', 'sessionFile'].forEach(k => { delete out[k]; });
+  delete out.session_file;
   out.resume = false;
   out.resume_mode = 'create';
   out.new_session = true;
@@ -240,8 +240,8 @@ function _currentHarnessSessionIdentity(harnessId) {
   const cfg = ctx && ctx.config ? ctx.config : null;
   if (!cfg) return null;
   if (harnessId && String(cfg.id || '').toLowerCase() !== String(harnessId || '').toLowerCase()) return null;
-  const file = cfg.session_file || cfg.sessionFile;
-  const dir = cfg.session_dir || cfg.sessionDir;
+  const file = cfg.session_file;
+  const dir = cfg.session_dir;
   return file || dir ? { file, dir } : null;
 }
 
@@ -254,13 +254,13 @@ function _applyHarnessSessionChoice(providerOptions) {
     return options;
   }
   cfg.new_session = false;
-  if (existing && existing.file && !cfg.session_file && !cfg.sessionFile) {
+  if (existing && existing.file && !cfg.session_file) {
     cfg.session_file = existing.file;
   }
-  if (existing && existing.dir && !cfg.session_dir && !cfg.sessionDir) {
+  if (existing && existing.dir && !cfg.session_dir) {
     cfg.session_dir = existing.dir;
   }
-  if (cfg.session_file || cfg.sessionFile) {
+  if (cfg.session_file) {
     cfg.resume_mode = 'open';
     cfg.resume = true;
   } else {
@@ -447,7 +447,7 @@ function _renderHarnessRuntimeStrip() {
   stateBtn.addEventListener('click', async () => {
     try {
       const state = await _sendHarnessCommand(ctx.sessionId, 'get_state');
-      uiModule.showToast(state && state.sessionFile ? `Harness state: ${state.sessionFile}` : 'Harness state loaded');
+      uiModule.showToast(state && state.session_file ? `Harness state: ${state.session_file}` : 'Harness state loaded');
       console.debug('[harness state]', state);
     } catch (e) {
       uiModule.showError(e.message || 'Harness is not running');
@@ -554,7 +554,7 @@ function _initModelPickerDropdown() {
   }
   const harnessSessionEl = document.createElement('div');
   harnessSessionEl.className = 'mp-harness-session hidden';
-  harnessSessionEl.innerHTML = '<span class="mp-harness-session-label">Pi session</span><div class="mp-harness-session-toggle" role="group" aria-label="Pi session mode"><button type="button" data-harness-session-choice="resume">Resume</button><button type="button" data-harness-session-choice="new">New</button></div>';
+  harnessSessionEl.innerHTML = '<span class="mp-harness-session-label">Harness session</span><div class="mp-harness-session-toggle" role="group" aria-label="Harness session mode"><button type="button" data-harness-session-choice="resume">Resume</button><button type="button" data-harness-session-choice="new">New</button></div>';
   if (providerOptionsEl && providerOptionsEl.parentNode) {
     providerOptionsEl.parentNode.insertBefore(harnessSessionEl, providerOptionsEl.nextSibling);
   }
@@ -675,8 +675,8 @@ function _initModelPickerDropdown() {
       button.disabled = disabled;
       button.classList.toggle('active', choice === _harnessSessionChoice);
       button.title = choice === 'resume'
-        ? (hasExisting ? 'Use the Pi session attached to this chat' : 'No Pi session is attached to this chat')
-        : 'Create a fresh Pi session for this chat';
+        ? (hasExisting ? 'Use the harness session attached to this chat' : 'No harness session is attached to this chat')
+        : 'Create a fresh harness session for this chat';
     });
   }
 
