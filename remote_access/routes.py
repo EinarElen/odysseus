@@ -153,12 +153,13 @@ def setup_remote_access_routes() -> APIRouter:
             endpoint_url=endpoint_url,
             expires_at=pairing.expiry_from_ttl(body.get("ttl_minutes")),
         )
+        invite_payload = pairing.serialize_invite(invite, include_secret=raw_secret, pairing_url=pairing_url)
         with get_db_session() as db:
             db.add(invite)
 
         qr = pairing.qr_png_data_uri(pairing_url)
         return {
-            "invite": pairing.serialize_invite(invite, include_secret=raw_secret, pairing_url=pairing_url),
+            "invite": invite_payload,
             "qr": qr if qr and qr.startswith("data:image/png;base64,") else None,
         }
 
