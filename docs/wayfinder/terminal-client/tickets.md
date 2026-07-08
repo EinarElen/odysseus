@@ -106,11 +106,11 @@ Work the **frontier**: any ticket whose blockers are all done. The two survey ti
 
 **Blocked by:** Create Run Identity Compatibility Layer For Chat Runs.
 
-- [ ] Agent Runs use the same Run list, status, attach, and stop model as chat Runs.
-- [ ] Harness-linked Runs include Odysseus Session, Run, harness adapter, and Harness Session identity where known.
-- [ ] Harness operations are capability-gated by adapter support and report unsupported actions clearly.
-- [ ] Heartbeats and activity updates are visible as Event Envelopes.
-- [ ] Session history and Run events remain separate user-facing concepts.
+- [x] Agent Runs use the same Run list, status, attach, and stop model as chat Runs.
+- [x] Harness-linked Runs include Odysseus Session, Run, harness adapter, and Harness Session identity where known.
+- [x] Harness operations are capability-gated by adapter support and report unsupported actions clearly.
+- [x] Heartbeats and activity updates are visible as Event Envelopes.
+- [x] Session history and Run events remain separate user-facing concepts.
 
 ## Expose Managed Lifecycle Targets
 

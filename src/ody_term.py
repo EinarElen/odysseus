@@ -240,6 +240,7 @@ def _parse_command_options(args: list[str]) -> tuple[dict[str, str | bool], list
         "--session-id",
         "--run-id",
         "--harness-session-id",
+        "--harness-adapter",
         "--span-id",
         "--parent-id",
         "--tag",
@@ -815,6 +816,7 @@ def _append_run_event(
 ) -> dict[str, object]:
     run_id = str(run["run_id"])
     session_id = str(run["session_id"])
+    source = str(run.get("event_source") or run.get("kind") or "run")
     events_by_run = _events_payload(state)
     events = events_by_run.setdefault(run_id, [])
     seq = len(events) + 1
@@ -825,7 +827,7 @@ def _append_run_event(
         "time": _utc_now(),
         "session_id": session_id,
         "run_id": run_id,
-        "source": "chat",
+        "source": source,
         "kind": kind,
         "level": level,
         "summary": summary,
@@ -836,6 +838,12 @@ def _append_run_event(
             "body": payload,
         },
     }
+    harness_session_id = run.get("harness_session_id")
+    if isinstance(harness_session_id, str) and harness_session_id:
+        event["harness_session_id"] = harness_session_id
+    harness_adapter_id = run.get("harness_adapter_id")
+    if isinstance(harness_adapter_id, str) and harness_adapter_id:
+        event["harness_adapter_id"] = harness_adapter_id
     events.append(event)
     return event
 
@@ -884,8 +892,10 @@ def _run_start(request: CommandRequest) -> CommandResponse:
     if positionals:
         raise CommandError("unexpected_run_args", f"unexpected run start args: {' '.join(positionals)}")
     kind = str(options.get("kind") or "chat")
-    if kind != "chat":
-        raise CommandError("unsupported_run_kind", f"run start currently supports chat Runs, not {kind}")
+    if kind not in {"chat", "agent", "harness"}:
+        raise CommandError("unsupported_run_kind", f"run start supports chat, agent, and harness Runs, not {kind}")
+    if kind == "harness" and not isinstance(options.get("harness_adapter"), str):
+        raise CommandError("missing_harness_adapter", "harness Runs require --harness-adapter")
     state = _load_run_state()
     runs = _runs_payload(state)
     run_id = _new_identity("run")
@@ -895,11 +905,16 @@ def _run_start(request: CommandRequest) -> CommandResponse:
         "run_id": run_id,
         "session_id": session_id,
         "kind": kind,
+        "event_source": "harness" if kind == "harness" else kind,
         "status": "running",
         "started_at": now,
         "updated_at": now,
         "finished_at": None,
     }
+    if isinstance(options.get("harness_adapter"), str):
+        run["harness_adapter_id"] = str(options["harness_adapter"])
+    if isinstance(options.get("harness_session_id"), str):
+        run["harness_session_id"] = str(options["harness_session_id"])
     runs[run_id] = run
     message = str(options.get("message") or "")
     _append_run_event(
@@ -907,15 +922,31 @@ def _run_start(request: CommandRequest) -> CommandResponse:
         run,
         kind="run.status",
         level="info",
-        summary="chat Run started",
-        payload={"status": "running", "message": message},
+        summary=f"{kind} Run started",
+        payload={
+            "status": "running",
+            "message": message,
+            "kind": kind,
+            "harness_adapter_id": run.get("harness_adapter_id"),
+            "harness_session_id": run.get("harness_session_id"),
+        },
     )
+    if kind in {"agent", "harness"}:
+        _append_run_event(
+            state,
+            run,
+            kind="heartbeat",
+            level="info",
+            summary=f"{kind} Run heartbeat",
+            payload={"status": "running", "activity": "started"},
+        )
     _save_run_state(state)
+    event_count = len(_run_events(state, run_id))
     return CommandResponse(
         ok=True,
         command=["run", "start"],
-        message=f"Started chat Run {run_id}",
-        data={"run": _run_summary(state, run), "cursor": {"after": None, "next": "1", "count": 1}},
+        message=f"Started {kind} Run {run_id}",
+        data={"run": _run_summary(state, run), "cursor": {"after": None, "next": str(event_count), "count": event_count}},
     )
 
 
@@ -1003,7 +1034,7 @@ def _run_stop(request: CommandRequest) -> CommandResponse:
         run,
         kind="run.status",
         level="warn",
-        summary="chat Run stopped",
+        summary=f"{run.get('kind', 'Run')} Run stopped",
         payload={"status": "stopped"},
     )
     _save_run_state(state)
@@ -1013,6 +1044,91 @@ def _run_stop(request: CommandRequest) -> CommandResponse:
         message=f"Stopped Run {run['run_id']}",
         data={"run": _run_summary(state, run), "confirmation": confirmation},
     )
+
+
+def _harness_capabilities() -> list[dict[str, object]]:
+    try:
+        from src.harness import list_harness_capabilities
+    except Exception:
+        from harness import list_harness_capabilities  # type: ignore[no-redef]
+
+    return cast(list[dict[str, object]], list_harness_capabilities())
+
+
+def _harness_capability(adapter_id: str) -> dict[str, object]:
+    for capability in _harness_capabilities():
+        if capability.get("id") == adapter_id:
+            return capability
+    raise CommandError("unknown_harness_adapter", f"unknown harness adapter: {adapter_id}", exit_code=1)
+
+
+def _harness_list(request: CommandRequest) -> CommandResponse:
+    _require_capability("harness:read", request)
+    options, positionals = _parse_command_options(request.args)
+    if positionals:
+        raise CommandError("unexpected_harness_args", f"unexpected harness list args: {' '.join(positionals)}")
+    capabilities = _harness_capabilities()
+    return CommandResponse(
+        ok=True,
+        command=["harness", "list"],
+        message=f"{len(capabilities)} Harness adapter(s)",
+        data={"harnesses": capabilities},
+    )
+
+
+def _harness_status(request: CommandRequest) -> CommandResponse:
+    _require_capability("harness:read", request)
+    options, positionals = _parse_command_options(request.args)
+    if len(positionals) > 1:
+        raise CommandError("unexpected_harness_args", f"unexpected harness status args: {' '.join(positionals[1:])}")
+    adapter_id = positionals[0] if positionals else str(options.get("harness_adapter") or "")
+    if not adapter_id:
+        raise CommandError("missing_harness_adapter", "harness status requires an adapter id")
+    capability = _harness_capability(adapter_id)
+    state = _load_run_state()
+    linked_runs = [
+        _run_summary(state, run)
+        for run in _runs_payload(state).values()
+        if run.get("harness_adapter_id") == adapter_id or (run.get("kind") == "harness" and not run.get("harness_adapter_id"))
+    ]
+    return CommandResponse(
+        ok=True,
+        command=["harness", "status"],
+        message=f"Harness adapter {adapter_id}",
+        data={"harness": capability, "runs": linked_runs},
+    )
+
+
+def _harness_stop(request: CommandRequest) -> CommandResponse:
+    _require_capability("harness:control", request)
+    options, positionals = _parse_command_options(request.args)
+    if len(positionals) > 1:
+        raise CommandError("unexpected_harness_args", f"unexpected harness stop args: {' '.join(positionals[1:])}")
+    state = _load_run_state()
+    run_id = positionals[0] if positionals else (str(options["run_id"]) if isinstance(options.get("run_id"), str) else None)
+    session_id = str(options["session_id"]) if isinstance(options.get("session_id"), str) else None
+    run = _resolve_run_reference(state, run_id=run_id, session_id=session_id)
+    if run.get("kind") != "harness" or not run.get("harness_adapter_id"):
+        raise CommandError(
+            "not_harness_run",
+            f"Run {run.get('run_id')} is not a harness-linked Run",
+            exit_code=1,
+            details={"run_id": run.get("run_id"), "kind": run.get("kind")},
+        )
+    adapter_id = str(run.get("harness_adapter_id") or options.get("harness_adapter") or "")
+    if not adapter_id:
+        raise CommandError("missing_harness_adapter", "harness stop requires a harness-linked Run or --harness-adapter")
+    capability = _harness_capability(adapter_id)
+    session_caps = capability.get("session") if isinstance(capability.get("session"), dict) else {}
+    if not bool(cast(dict[str, object], session_caps).get("abort")):
+        raise CommandError(
+            "unsupported_harness_action",
+            f"harness adapter {adapter_id} does not support abort",
+            exit_code=1,
+            details={"adapter": adapter_id, "action": "abort", "supported": False},
+        )
+    request.args = ["--run-id", str(run["run_id"]), *request.args]
+    return _run_stop(request)
 
 
 def _inspect_events(request: CommandRequest) -> CommandResponse:
@@ -1320,6 +1436,14 @@ def execute(request: CommandRequest) -> CommandResponse:
         return _run_attach(request)
     if request.domain == "run" and request.verb == "stop":
         return _run_stop(request)
+    if request.domain == "harness" and request.verb == "list":
+        return _harness_list(request)
+    if request.domain == "harness" and request.verb == "status":
+        return _harness_status(request)
+    if request.domain == "harness" and request.verb == "stop":
+        return _harness_stop(request)
+    if request.domain == "harness" and request.verb == "attach":
+        return _run_attach(request)
     if request.domain == "service" and request.verb in {"stop", "restart"}:
         options, positionals = _parse_command_options(request.args)
         if not positionals:

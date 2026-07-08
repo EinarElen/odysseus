@@ -148,13 +148,13 @@ def test_jsonl_format_emits_one_object_per_line() -> None:
 
 
 def test_registered_but_unimplemented_commands_have_structured_baseline() -> None:
-    exit_code, stdout, stderr = run_cli(["harness", "list"])
+    exit_code, stdout, stderr = run_cli(["service", "list"])
 
     assert exit_code == 1
     assert stderr == ""
     payload = json.loads(stdout)
     assert payload["ok"] is False
-    assert payload["command"] == ["harness", "list"]
+    assert payload["command"] == ["service", "list"]
     assert payload["data"]["implemented"] is False
 
 
@@ -603,6 +603,117 @@ def test_run_attach_emits_chat_run_event_envelopes_as_jsonl(
     assert events[0]["session_id"] == "ses_chat"
     assert events[0]["run_id"] == run_id
     assert events[0]["payload"]["message"] == "hi"
+
+
+def test_agent_runs_use_same_run_lifecycle_and_heartbeat_events(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+
+    exit_code, stdout, stderr = run_cli(["run", "start", "--kind", "agent", "--message", "work", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    data = json.loads(stdout)["data"]
+    run = data["run"]
+    assert run["kind"] == "agent"
+    assert run["status"] == "running"
+    assert data["cursor"] == {"after": None, "next": "2", "count": 2}
+
+    run_id = run["run_id"]
+    exit_code, stdout, stderr = run_cli(["run", "attach", run_id, "--format=jsonl"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    events = [json.loads(line) for line in stdout.splitlines()]
+    assert [event["source"] for event in events] == ["agent", "agent"]
+    assert [event["kind"] for event in events] == ["run.status", "heartbeat"]
+    assert events[0]["session_id"] == run["session_id"]
+    assert events[0]["run_id"] == run_id
+    assert events[1]["payload"] == {"activity": "started", "status": "running"}
+
+    exit_code, stdout, stderr = run_cli(["run", "stop", run_id, "--yes", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert json.loads(stdout)["data"]["run"]["status"] == "stopped"
+
+
+def test_harness_linked_runs_include_odysseus_and_harness_identities(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+
+    exit_code, stdout, stderr = run_cli(
+        [
+            "run",
+            "start",
+            "--kind",
+            "harness",
+            "--session-id",
+            "ses_ody",
+            "--harness-adapter",
+            "pi",
+            "--harness-session-id",
+            "pi-session-1",
+            "--message",
+            "observe",
+            "--format=json",
+        ]
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    run = json.loads(stdout)["data"]["run"]
+    assert run["kind"] == "harness"
+    assert run["session_id"] == "ses_ody"
+    assert run["harness_adapter_id"] == "pi"
+    assert run["harness_session_id"] == "pi-session-1"
+
+    exit_code, stdout, stderr = run_cli(["run", "attach", run["run_id"], "--format=jsonl"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    events = [json.loads(line) for line in stdout.splitlines()]
+    assert [event["source"] for event in events] == ["harness", "harness"]
+    assert all(event["session_id"] == "ses_ody" for event in events)
+    assert all(event["run_id"] == run["run_id"] for event in events)
+    assert all(event["harness_session_id"] == "pi-session-1" for event in events)
+    assert all(event["harness_adapter_id"] == "pi" for event in events)
+    assert events[0]["payload"]["harness_adapter_id"] == "pi"
+    assert events[0]["payload"]["harness_session_id"] == "pi-session-1"
+
+
+def test_harness_commands_report_adapter_capabilities(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+
+    exit_code, stdout, stderr = run_cli(["harness", "list", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    harnesses = json.loads(stdout)["data"]["harnesses"]
+    assert harnesses[0]["id"] == "pi"
+    assert harnesses[0]["session"]["abort"] is True
+
+
+def test_harness_stop_refuses_non_harness_runs_even_with_adapter_flag(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    _, stdout, _ = run_cli(["run", "start", "--kind", "agent", "--session-id", "ses_agent", "--format=json"])
+    run_id = json.loads(stdout)["data"]["run"]["run_id"]
+
+    exit_code, stdout, stderr = run_cli(
+        ["harness", "stop", run_id, "--harness-adapter", "pi", "--yes", "--format=json"]
+    )
+
+    assert exit_code == 1
+    assert stdout == ""
+    error = json.loads(stderr)["error"]
+    assert error["code"] == "not_harness_run"
+    assert error["details"] == {"kind": "agent", "run_id": run_id}
 
 
 def test_run_attach_by_session_fails_when_multiple_active_runs_match(
