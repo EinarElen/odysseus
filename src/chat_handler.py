@@ -331,11 +331,7 @@ class ChatHandler:
             message
         )
         if is_memory_cmd and memory_text:
-            mem = self.memory_manager.load()
-            if not self.memory_manager.find_duplicates(memory_text, mem):
-                new_entry = self.memory_manager.add_entry(memory_text)
-                mem.append(new_entry)
-                self.memory_manager.save(mem)
+            self.memory_manager.append_if_unique(memory_text)
 
             session.add_message(ChatMessage("user", message))
             session.add_message(
