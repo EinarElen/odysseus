@@ -30,6 +30,32 @@ function Fail($msg) {
     exit 1
 }
 
+function Get-ProbeHost($hostName) {
+    if ($hostName -eq "0.0.0.0" -or $hostName -eq "::") { return "127.0.0.1" }
+    return $hostName
+}
+
+function Test-PortInUse($hostName, $port) {
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $async = $client.BeginConnect($hostName, $port, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne(200)) { return $false }
+        $client.EndConnect($async)
+        return $true
+    } catch {
+        return $false
+    } finally {
+        $client.Close()
+    }
+}
+
+function Find-AvailablePort($hostName, $startPort) {
+    for ($candidate = $startPort; $candidate -le 65535; $candidate++) {
+        if (-not (Test-PortInUse $hostName $candidate)) { return $candidate }
+    }
+    return $null
+}
+
 function Test-WindowsBashStub($path) {
     if (-not $path) { return $false }
     $lowered = $path.ToLowerInvariant()
@@ -163,6 +189,19 @@ if (Test-Path $cudaBase) {
 }
 
 # 7. Start the server (use `python -m uvicorn` - bare `uvicorn` may not be on PATH)
+$probeHost = Get-ProbeHost $BindHost
+$requestedPort = $Port
+$selectedPort = Find-AvailablePort $probeHost $requestedPort
+if (-not $selectedPort) {
+    Fail ("No available port found from {0} through 65535 on {1}." -f $requestedPort, $probeHost)
+}
+if ($selectedPort -ne $requestedPort) {
+    Write-Host ("Port {0} is already in use on {1}; using {2} instead." -f $requestedPort, $probeHost, $selectedPort) -ForegroundColor Yellow
+}
+$Port = $selectedPort
+$env:APP_PORT = [string]$Port
+$env:APP_BIND = $BindHost
+
 Write-Step ("Starting Odysseus at http://{0}:{1}" -f $BindHost, $Port)
 Write-Host "Press Ctrl+C to stop."
 Write-Host ""

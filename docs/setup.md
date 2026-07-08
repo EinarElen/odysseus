@@ -365,6 +365,14 @@ uv pip sync requirements.lock                          # reproduce it exactly la
 
 `requirements.lock` is gitignored and platform-specific (compile it on the OS you deploy to). Regenerate it deliberately when you want to take upgrades. The plain `uv pip install -r requirements.txt` keeps following the unpinned requirements like pip does.
 
+For local dependency advisory checks, the repository includes a small wrapper
+that lets `uv audit` inspect the existing requirements files without converting
+the project to a uv-managed lockfile:
+
+```bash
+python .github/scripts/uv_audit_requirements.py
+```
+
 ### Outlook / Office 365 email
 Odysseus email accounts currently use IMAP/SMTP username-password auth. Outlook
 and Microsoft 365 generally require OAuth instead, so normal Microsoft mailbox

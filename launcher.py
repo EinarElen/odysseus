@@ -126,8 +126,11 @@ def open_browser(url):
 
 if __name__ == "__main__":
     import uvicorn
-    # Import the FastAPI app from app.py
-    from app import app
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(encoding="utf-8-sig")
+    except Exception:
+        pass
 
     bind_host = os.getenv("APP_BIND", "127.0.0.1")
     bind_port = int(os.getenv("APP_PORT", "7000"))
@@ -139,4 +142,18 @@ if __name__ == "__main__":
         # Start system tray manager thread
         threading.Thread(target=setup_system_tray, args=(url,), daemon=True).start()
 
-    uvicorn.run(app, host=bind_host, port=bind_port, log_level="info")
+    reload_kwargs = {}
+    try:
+        from src.dev_mode import dev_reload_requested, uvicorn_reload_config
+        if dev_reload_requested():
+            reload_kwargs = uvicorn_reload_config()
+    except Exception:
+        reload_kwargs = {}
+
+    if reload_kwargs:
+        uvicorn.run("app:app", host=bind_host, port=bind_port, log_level="info", **reload_kwargs)
+    else:
+        # Import the FastAPI app from app.py only after deciding whether
+        # uvicorn reload should own the import cycle.
+        from app import app
+        uvicorn.run(app, host=bind_host, port=bind_port, log_level="info")

@@ -10,6 +10,10 @@
 #   - pip-audit: scans the project's current Python requirements against the
 #     advisory database. Advisory only (it never blocks a merge), because it can
 #     flag a pre-existing issue in an already-shipped dependency.
+#   - uv audit: resolves the same requirements through uv's resolver and checks
+#     known vulnerabilities plus adverse package statuses. Advisory while the
+#     command is still experimental and while requirements.txt remains the source
+#     of truth.
 
 name: Dependency review
 
@@ -69,3 +73,30 @@ jobs:
           set -euo pipefail
           pip install pip-audit==2.10.0
           pip-audit -r requirements.txt -r requirements-optional.txt --strict
+
+  uv-audit:
+    name: uv audit (advisory)
+    runs-on: ubuntu-latest
+    # Advisory for parity with pip-audit and because `uv audit` is still
+    # experimental upstream.
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Run uv audit on requirements
+        run: python .github/scripts/uv_audit_requirements.py

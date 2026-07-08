@@ -34,22 +34,52 @@ fi
 # values (APP_PORT / APP_BIND), then built-in defaults.
 PORT="${ODYSSEUS_PORT:-${APP_PORT:-7860}}"   # 7860, not 7000 — macOS AirPlay Receiver holds 7000.
 HOST="${ODYSSEUS_HOST:-${APP_BIND:-127.0.0.1}}" # Set APP_BIND=0.0.0.0 in .env for LAN/Tailscale access.
+if [ -z "${ODYSSEUS_PORT+x}" ] && [ "$PORT" = "7000" ]; then
+    echo "▶ APP_PORT=7000 is unsafe on macOS because AirPlay often owns it — using 7860 instead."
+    PORT="7860"
+fi
 PROBE_HOST="$HOST"
 if [ "$PROBE_HOST" = "0.0.0.0" ] || [ "$PROBE_HOST" = "::" ]; then
     PROBE_HOST="127.0.0.1"
 fi
+
+port_in_use() {
+    (exec 3<>"/dev/tcp/$PROBE_HOST/$1") 2>/dev/null
+}
+
+find_available_port() {
+    local candidate="$1"
+    local max_port=65535
+    while [ "$candidate" -le "$max_port" ]; do
+        if ! port_in_use "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+        candidate=$((candidate + 1))
+    done
+    return 1
+}
 
 # Friendly message on any failure — re-running is safe (every step is idempotent).
 trap 'echo; echo "✗ Setup failed above. It is safe to re-run ./start-macos.sh."; exit 1' ERR
 
 echo "▶ Odysseus quick start for macOS"
 
-# Fail fast if the port is already taken (e.g. a previous run still running).
-if (exec 3<>"/dev/tcp/$PROBE_HOST/$PORT") 2>/dev/null; then
-    echo "✗ Port $PORT is already in use on $PROBE_HOST. Stop what's using it, or pick another port:"
+# Pick the requested/default port when possible; otherwise walk upward to the
+# next available port so a stale dev server does not block launch.
+REQUESTED_PORT="$PORT"
+PORT="$(find_available_port "$REQUESTED_PORT")"
+if [ -z "$PORT" ]; then
+    echo "✗ No available port found from $REQUESTED_PORT through 65535 on $PROBE_HOST."
+    echo "    Stop an old server, or choose a lower starting point:"
     echo "    ODYSSEUS_PORT=7900 ./start-macos.sh"
     exit 1
 fi
+if [ "$PORT" != "$REQUESTED_PORT" ]; then
+    echo "▶ Port $REQUESTED_PORT is already in use on $PROBE_HOST — using $PORT instead."
+fi
+export APP_PORT="$PORT"
+export APP_BIND="$HOST"
 
 # 1. Homebrew — the macOS package manager. We can't safely auto-install it
 #    (it wants its own interactive confirmation), so point the user at it.
@@ -263,4 +293,15 @@ if [ -n "$TAILSCALE_URL" ]; then
 fi
 echo "  (this takes a few seconds; press Ctrl+C here to stop)"
 echo
-"$VENV_PY" -m uvicorn app:app --host "$HOST" --port "$PORT"
+DEV_RELOAD_VALUE="${ODYSSEUS_RELOAD:-${ODYSSEUS_DEV_RELOAD:-}}"
+case "$(printf '%s' "$DEV_RELOAD_VALUE" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on|y)
+        export ODYSSEUS_DEV_MODE="${ODYSSEUS_DEV_MODE:-1}"
+        export ODYSSEUS_RELOAD_ACTIVE=1
+        echo "  Developer reload: on"
+        "$VENV_PY" -m uvicorn app:app --host "$HOST" --port "$PORT" --reload --reload-dir "$REPO_DIR"
+        ;;
+    *)
+        "$VENV_PY" -m uvicorn app:app --host "$HOST" --port "$PORT"
+        ;;
+esac

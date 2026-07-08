@@ -40,6 +40,13 @@ pip install -r requirements.txt
 python -m uvicorn app:app --host 127.0.0.1 --port 7000
 ```
 
+If you have [uv](https://docs.astral.sh/uv/) installed, the dependency install
+step can use the faster pip-compatible path:
+
+```bash
+uv pip install -r requirements.txt
+```
+
 Windows is not actively tested. Docker on Linux or a Linux/macOS manual install is the safer path for now.
 
 ## Running Checks
@@ -49,7 +56,19 @@ Run the smallest relevant checks for your change:
 ```bash
 python -m pytest
 python -m py_compile app.py routes/*.py src/*.py
+uvx --from ruff==0.12.7 ruff check app.py core routes src services scripts tests
+uvx --from ty==0.0.41 ty check
 node --check static/js/<file-you-changed>.js
+```
+
+Ruff and ty are newly integrated and run as advisory CI checks while the existing
+tree is brought to a clean baseline. Do not mix broad lint/type cleanup into an
+unrelated behavior change.
+
+For supply-chain checks:
+
+```bash
+python .github/scripts/uv_audit_requirements.py
 ```
 
 For Docker-related changes:
@@ -130,4 +149,3 @@ Issues with only "help", "does not work", or a screenshot without context may be
 Do not post secrets, API keys, private logs, personal documents, or public IPs in issues or pull requests.
 
 For security reports, follow [SECURITY.md](SECURITY.md).
-

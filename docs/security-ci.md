@@ -18,6 +18,7 @@ not start them.
 | **Workflow security** (actionlint + zizmor) | A broken or insecure automation file that could leak the repo's access token | Yes |
 | **Dependency review** | A pull request that adds a software library with a known security hole | Yes |
 | **pip-audit** | Known security holes in the Python libraries already used | No (advisory) |
+| **uv audit** | Known vulnerabilities and adverse package statuses found through uv's resolver | No (advisory) |
 | **Container scan: hadolint** | Mistakes and insecure patterns in the `Dockerfile` | Yes |
 | **Container scan: Trivy** | Known security holes in the Docker image | No (advisory) |
 | **CodeQL** | Real bugs in the app's own code: injection, auth mistakes, path traversal | No (advisory) |
@@ -74,8 +75,8 @@ This makes the **Merge** button refuse to work until the gating checks pass.
    - `dependency-review (PR gate)`
 
    The first two come from the correctness CI (`ci.yml`); the rest are this
-   security suite. Leave pytest, pip-audit, Trivy, and CodeQL unchecked so they
-   stay advisory.
+   security suite. Leave pytest, pip-audit, uv audit, Trivy, and CodeQL
+   unchecked so they stay advisory.
 7. Also enable **Require a pull request before merging** and **Require review
    from Code Owners** (this uses the `.github/CODEOWNERS` file so every change
    needs your sign-off).

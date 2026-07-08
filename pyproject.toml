@@ -1,3 +1,65 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "odysseus"
+version = "0.0.0"
+description = "Local Odysseus development task and launch runner"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+ody = "odysseus_run_cli:main"
+odysseus = "odysseus_run_cli:main"
+odysseus-run = "odysseus_run_cli:main"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["src/odysseus_run_cli.py"]
+sources = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = [
+    "cache",
+    "data",
+    "logs",
+]
+
+[tool.ruff.lint]
+# Start with Ruff's default correctness-oriented rules plus Bugbear. The
+# existing tree is not yet baseline-clean, so CI runs this advisory for now.
+select = ["E4", "E7", "E9", "F", "B"]
+ignore = ["E501"]
+external = ["WPS"]
+
+[tool.ruff.format]
+line-ending = "lf"
+
+[tool.ty.environment]
+python-version = "3.11"
+root = ["."]
+
+[tool.ty.src]
+# Pilot scope for the initial ty integration. Widen this as packages are made
+# type-check clean.
+include = [
+    "core",
+    "services/search",
+    "src/tool_security.py",
+    "src/url_safety.py",
+]
+
+[tool.ty.rules]
+# Keep the first ty pass report-only; this project has many dynamic imports,
+# optional dependencies, and test stubs to classify before turning on gates.
+all = "warn"
+
+[tool.ty.terminal]
+error-on-warning = false
+output-format = "concise"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
