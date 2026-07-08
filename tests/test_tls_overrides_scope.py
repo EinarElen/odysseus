@@ -30,6 +30,20 @@ import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
+SKIP_TOP_LEVEL = frozenset({
+    ".claude",
+    ".git",
+    ".venv",
+    "__pycache__",
+    "cache",
+    "data",
+    "dist",
+    "logs",
+    "node_modules",
+    "tests",
+    "tmp_pytest_probe",
+    "venv",
+})
 
 
 # Files that legitimately need llm_verify() applied to their outbound
@@ -48,13 +62,9 @@ def _grep_files(pattern: str) -> set[str]:
     scratch dirs."""
     rx = re.compile(pattern)
     hits: set[str] = set()
-    for path in REPO.rglob("*.py"):
+    for path in _project_python_files():
         rel = path.relative_to(REPO).as_posix()
-        if rel.startswith("tests/"):
-            continue
         if rel == "src/tls_overrides.py":  # definition site, not a caller
-            continue
-        if rel.startswith(".claude/") or "/.claude/" in rel:
             continue
         try:
             body = path.read_text(encoding="utf-8", errors="ignore")
@@ -63,6 +73,21 @@ def _grep_files(pattern: str) -> set[str]:
         if rx.search(body):
             hits.add(rel)
     return hits
+
+
+def _project_python_files():
+    """Iterate project Python files without descending into dependency trees."""
+    for child in REPO.iterdir():
+        if child.name in SKIP_TOP_LEVEL:
+            continue
+        if child.is_file() and child.suffix == ".py":
+            yield child
+            continue
+        if not child.is_dir():
+            continue
+        for path in child.rglob("*.py"):
+            if "__pycache__" not in path.parts:
+                yield path
 
 
 def test_llm_verify_only_used_in_allowlisted_files():

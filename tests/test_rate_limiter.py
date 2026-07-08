@@ -1,8 +1,25 @@
 """Tests for the RateLimiter — pure in-memory, no server needed."""
-import time
 import pytest
 
 from src.rate_limiter import RateLimiter
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr("src.rate_limiter.time.monotonic", clock.monotonic)
+    return clock
 
 
 class TestRateLimiterAllow:
@@ -27,20 +44,20 @@ class TestRateLimiterAllow:
 
 
 class TestRateLimiterExpiry:
-    def test_window_expiry(self):
+    def test_window_expiry(self, clock):
         rl = RateLimiter(max_requests=1, window_seconds=1)
         assert rl.check("ip1") is True
         assert rl.check("ip1") is False
-        time.sleep(1.1)
+        clock.advance(1.1)
         assert rl.check("ip1") is True
 
 
 class TestRateLimiterCleanup:
-    def test_cleanup_removes_stale_entries(self):
+    def test_cleanup_removes_stale_entries(self, clock):
         rl = RateLimiter(max_requests=1, window_seconds=1)
         rl._cleanup_interval = 0  # Force cleanup on every check
         rl.check("ip1")
         assert "ip1" in rl._log
-        time.sleep(1.1)
+        clock.advance(1.1)
         rl.check("ip2")  # Triggers cleanup
         assert "ip1" not in rl._log

@@ -60,6 +60,7 @@ def test_providers_probe_exception_maps_to_category():
     assert "sk-secret" not in repr(s) and "http://a" not in repr(s)
 
 
+@pytest.mark.slow
 def test_providers_bounded_marks_slow_as_timeout(monkeypatch):
     import time
     monkeypatch.setattr(sh, "_FANOUT_BUDGET", 1)
@@ -81,6 +82,7 @@ def test_providers_bounded_marks_slow_as_timeout(monkeypatch):
     assert out["status"] == sh.DEGRADED
 
 
+@pytest.mark.slow
 def test_providers_bounded_with_many_slow_endpoints(monkeypatch):
     import time
     monkeypatch.setattr(sh, "_FANOUT_BUDGET", 1)

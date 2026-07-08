@@ -61,6 +61,7 @@ def test_email_connect_exception_maps_to_category():
     assert "hunter2" not in repr(s)
 
 
+@pytest.mark.slow
 def test_email_bounded_marks_slow_as_timeout(monkeypatch):
     import time
     monkeypatch.setattr(sh, "_FANOUT_BUDGET", 1)

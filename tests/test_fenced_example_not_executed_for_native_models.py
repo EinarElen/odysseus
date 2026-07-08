@@ -47,7 +47,12 @@ def _types(chunks):
 def _patch_common(monkeypatch, exec_calls):
     # Skip RAG/tool-index, MCP, and settings lookups; keep the real loop body,
     # _resolve_tool_blocks, and parse_tool_blocks intact.
-    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
+    def fake_get_setting(key, default=None):
+        if key == "agent_input_token_budget":
+            return 0
+        return default
+
+    monkeypatch.setattr(al, "get_setting", fake_get_setting, raising=False)
     monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
     monkeypatch.setattr(al, "estimate_tokens", lambda *a, **k: 10, raising=False)
 
@@ -116,7 +121,7 @@ def test_native_model_real_native_tool_call_is_executed(monkeypatch):
     exec_calls = []
     _patch_common(monkeypatch, exec_calls)
     native_calls = [{"name": "bash", "arguments": json.dumps({"command": "echo hi"})}]
-    events = _run_loop(
+    _run_loop(
         monkeypatch, "gpt-4o",
         ["Sure, let me check that for you."],
         native_calls=native_calls,
@@ -138,7 +143,7 @@ def test_non_native_model_fenced_tool_call_still_executed(monkeypatch):
     # native-capable keyword/host checks, so _is_api_model resolves to False
     # and the model must rely on the textual fenced-block convention to
     # invoke tools at all.
-    events = _run_loop(
+    _run_loop(
         monkeypatch, "llama-2-7b-chat",
         ["```bash\necho hi\n```"],
         max_rounds=2,
@@ -168,7 +173,7 @@ def test_issue_3222_repro_guide_only_response_resolves_no_tool_actions(monkeypat
         "}\n"
         "```\n"
     )
-    events = _run_loop(monkeypatch, "grok-4", [repro])
+    _run_loop(monkeypatch, "grok-4", [repro])
     assert exec_calls == [], f"guide-only example fences must resolve to zero tool actions: {exec_calls}"
 
 
@@ -194,7 +199,7 @@ def test_resolve_tool_blocks_recovers_exact_get_workspace_fence_for_native_model
 def test_native_model_exact_get_workspace_fence_is_executed(monkeypatch):
     exec_calls = []
     _patch_common(monkeypatch, exec_calls)
-    events = _run_loop(
+    _run_loop(
         monkeypatch,
         "gpt-5.5",
         ["```get_workspace\n```"],

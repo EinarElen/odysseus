@@ -420,6 +420,7 @@ _SLOW_AUTH_CONCURRENCY_TESTS = (
 )
 
 
+@pytest.mark.slow
 def test_fast_lane_collects_only_unmarked_auth_concurrency_test():
     """`--fast` collection drops the marked slow tests but keeps the fast one.
 

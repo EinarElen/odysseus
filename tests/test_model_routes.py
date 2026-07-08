@@ -1450,6 +1450,7 @@ def test_api_models_scopes_api_token_to_token_owner(monkeypatch):
     monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
     monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
     monkeypatch.setattr(threading, "Thread", _NoopThread)
+    monkeypatch.setattr(model_routes, "build_chat_url", lambda base: f"{base.rstrip('/')}/chat/completions")
 
     request = SimpleNamespace(
         state=SimpleNamespace(

@@ -18,6 +18,20 @@ import pytest
 from tests.helpers.import_state import clear_module
 
 
+@pytest.fixture(autouse=True)
+def _use_fast_bcrypt_rounds(monkeypatch):
+    """Keep these lock/file stress tests from spending CI time on bcrypt cost."""
+    import bcrypt
+
+    real_gensalt = bcrypt.gensalt
+
+    def fast_gensalt(*args, **kwargs):
+        kwargs.setdefault("rounds", 4)
+        return real_gensalt(*args, **kwargs)
+
+    monkeypatch.setattr(bcrypt, "gensalt", fast_gensalt)
+
+
 class _OwnerColumn:
     def __eq__(self, other):
         return ("owner ==", other)

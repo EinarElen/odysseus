@@ -194,6 +194,7 @@ def _collect_order(sample_suite: Path, seed: int) -> tuple[list[str], str]:
     return ids, result.stdout
 
 
+@pytest.mark.slow
 def test_subprocess_same_seed_is_reproducible(sample_suite):
     first, out = _collect_order(sample_suite, seed=123)
     second, _ = _collect_order(sample_suite, seed=123)
@@ -201,12 +202,14 @@ def test_subprocess_same_seed_is_reproducible(sample_suite):
     assert "[order-report] shuffling test order with seed 123" in out
 
 
+@pytest.mark.slow
 def test_subprocess_different_seeds_change_order(sample_suite):
     first, _ = _collect_order(sample_suite, seed=123)
     second, _ = _collect_order(sample_suite, seed=321)
     assert first != second
 
 
+@pytest.mark.slow
 def test_subprocess_failure_exit_code_and_footer(tmp_path):
     """A real failing pytest run keeps pytest's exit code and reports the seed."""
     (tmp_path / "test_failure.py").write_text(

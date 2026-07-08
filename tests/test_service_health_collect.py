@@ -79,6 +79,7 @@ def test_classify_error_categories():
 
 # ── Concurrent collection and aggregate deadline ──
 
+@pytest.mark.slow
 def test_collect_runs_subsystems_concurrently(monkeypatch):
     # The aggregate is bounded by running the (internally-bounded) subsystems
     # concurrently, so total wall-clock ≈ max(subsystem), not the sum. Each of
@@ -108,6 +109,7 @@ def test_collect_runs_subsystems_concurrently(monkeypatch):
         "chromadb", "searxng", "ntfy", "email", "providers"}
 
 
+@pytest.mark.slow
 def test_collect_aggregate_deadline_yields_controlled_result(monkeypatch):
     # If the gather overruns the aggregate ceiling, the response is still a
     # controlled {overall, services, timestamp} with each network subsystem
