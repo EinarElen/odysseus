@@ -45,6 +45,7 @@ from routes.cookbook_output import (
 )
 
 logger = logging.getLogger(__name__)
+_SERVE_WATCHDOG_TASKS: set[asyncio.Task] = set()
 
 from routes.cookbook_helpers import (
     _SESSION_ID_RE, _validate_repo_id, _validate_serve_model_id, _validate_include, _validate_token,
@@ -2606,13 +2607,15 @@ def setup_cookbook_routes() -> APIRouter:
         # created. Skipped for diffusion (different image-endpoint cleanup
         # path) and pip-install tasks (no endpoint to drop).
         if endpoint_id and not is_diffusion and not is_pip_install:
-            asyncio.create_task(_serve_crash_watchdog(
+            watchdog_task = asyncio.create_task(_serve_crash_watchdog(
                 endpoint_id=endpoint_id,
                 session_id=session_id,
                 remote=remote,
                 ssh_port=req.ssh_port,
                 is_windows=is_windows,
             ))
+            _SERVE_WATCHDOG_TASKS.add(watchdog_task)
+            watchdog_task.add_done_callback(_SERVE_WATCHDOG_TASKS.discard)
 
         # Log to assistant
         try:

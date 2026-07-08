@@ -1,4 +1,7 @@
 import socket
+import tempfile
+from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -9,6 +12,12 @@ from starlette.requests import Request
 import routes.cookbook_routes as cookbook_routes
 from routes.cookbook_helpers import ServeRequest, _validate_serve_cmd
 from src.host_docker_access import HOST_DOCKER_ACCESS_HINT
+
+
+@contextmanager
+def _short_unix_socket_path():
+    with tempfile.TemporaryDirectory(prefix="ody-sock-", dir="/tmp") as directory:
+        yield Path(directory) / "docker.sock"
 
 
 def _model_serve_endpoint():
@@ -59,9 +68,8 @@ async def test_container_cli_only_is_rejected(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_container_opt_in_with_unix_socket_is_allowed(monkeypatch, tmp_path):
     monkeypatch.setattr(cookbook_routes.shutil, "which", lambda binary: "/usr/bin/docker")
-    socket_path = tmp_path / "docker.sock"
 
-    with socket.socket(socket.AF_UNIX) as unix_socket:
+    with _short_unix_socket_path() as socket_path, socket.socket(socket.AF_UNIX) as unix_socket:
         unix_socket.bind(str(socket_path))
         available = await cookbook_routes._binary_available(
             "docker",

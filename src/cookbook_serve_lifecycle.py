@@ -102,15 +102,27 @@ async def _stop_serve(session_id: str, remote_host: str = "", ssh_port: str = ""
     returned 404 and the result was logged as "failed").
     """
     import shlex
+    sid = shlex.quote(session_id)
+    stop_inner = (
+        f"tmux send-keys -t {sid} C-c 2>/dev/null; "
+        "sleep 2; "
+        f"PIDS=$(tmux list-panes -t {sid} -F '#{{pane_pid}}' 2>/dev/null); "
+        'if [ -n "$PIDS" ]; then '
+        'for P in $PIDS; do pkill -TERM -P "$P" 2>/dev/null; kill -TERM "$P" 2>/dev/null; done; '
+        "sleep 1; "
+        'for P in $PIDS; do pkill -KILL -P "$P" 2>/dev/null; kill -KILL "$P" 2>/dev/null; done; '
+        "fi; "
+        f"tmux kill-session -t {sid} 2>/dev/null"
+    )
     if remote_host:
         port_flag = f"-p {shlex.quote(str(ssh_port))} " if ssh_port and str(ssh_port) != "22" else ""
         cmd = (
             f"ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "
             f"{port_flag}{shlex.quote(remote_host)} "
-            f"'tmux kill-session -t {shlex.quote(session_id)}'"
+            f"{shlex.quote(stop_inner)}"
         )
     else:
-        cmd = f"tmux kill-session -t {shlex.quote(session_id)}"
+        cmd = stop_inner
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.post(
