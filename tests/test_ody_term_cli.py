@@ -1170,3 +1170,208 @@ def test_inspect_events_debug_includes_renderer_and_safety_context(
     assert payload["renderer"]["raw_included"] is True
     assert payload["data"]["safety"]["capability"] == "event:raw"
     assert payload["data"]["capability"]["allowed"] is True
+
+
+def test_tui_model_live_view_uses_shared_events_and_service_logs(
+    isolated_term_state: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    log_path = tmp_path / "server.log"
+    log_path.write_text("server ready\nWARNING warmup\n", encoding="utf-8")
+    (tmp_path / "runtime.json").write_text(
+        json.dumps(
+            {
+                "kind": "ody-term-local-server",
+                "pid": 4242,
+                "pgid": 4242,
+                "repo": str(Path(__file__).resolve().parents[1]),
+                "command": ["uv", "run", "ody"],
+                "url": "http://127.0.0.1:7860",
+                "log_path": str(log_path),
+                "started_at": "2026-07-08T12:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ody_term, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(ody_term, "_process_group_matches", lambda pid, pgid: True)
+    _, stdout, _ = run_cli(
+        [
+            "run",
+            "start",
+            "--kind",
+            "harness",
+            "--session-id",
+            "ses_tui",
+            "--harness-adapter",
+            "pi",
+            "--harness-session-id",
+            "pi-tui-1",
+            "--message",
+            "watch",
+            "--format=json",
+        ]
+    )
+    run_id = json.loads(stdout)["data"]["run"]["run_id"]
+
+    exit_code, stdout, stderr = run_cli(["tui", "--format=json"], is_tty=True)
+
+    assert exit_code == 0
+    assert stderr == ""
+    model = json.loads(stdout)["data"]["tui"]
+    assert model["schema"] == "ody.tui.v1"
+    assert model["active_view"] == "Live"
+    assert set(model["views"]) == {"Live", "REPL", "Browse", "Inspect"}
+
+    live = model["views"]["Live"]
+    assert live["selected_event"]["schema"] == "ody.event.v1"
+    assert any("harness.heartbeat" in line for line in live["timeline_lines"])
+    assert any("server.log" in line for line in live["timeline_lines"])
+    assert {event["source"] for event in live["timeline"]} == {"harness", "server"}
+    assert any(event["run_id"] == run_id for event in live["timeline"] if event["source"] == "harness")
+
+
+def test_tui_repl_and_interaction_paths_are_harnessed(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    _, stdout, _ = run_cli(
+        [
+            "run",
+            "start",
+            "--kind",
+            "harness",
+            "--session-id",
+            "ses_tui",
+            "--harness-adapter",
+            "pi",
+            "--harness-session-id",
+            "pi-tui-1",
+            "--message",
+            "watch",
+            "--format=json",
+        ]
+    )
+    run_id = json.loads(stdout)["data"]["run"]["run_id"]
+
+    exit_code, stdout, stderr = run_cli(
+        ["tui", "--view", "REPL", "--key", "f3", "--mouse", "event_click", "--repl", "stop", "--format=json"],
+        is_tty=True,
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    model = json.loads(stdout)["data"]["tui"]
+    assert model["active_view"] == "Browse"
+    assert model["interaction"]["keyboard"]["f1"] == "Live"
+    assert model["interaction"]["keyboard"]["f4"] == "Inspect"
+    assert model["interaction"]["mouse"]["event_click"] == "select-event"
+    assert model["interaction"]["last"]["keyboard_event"] == {"input": "f3", "action": "switch-view", "view": "Browse"}
+    assert model["interaction"]["last"]["mouse_event"]["input"] == "event_click"
+    assert model["interaction"]["last"]["mouse_event"]["selected_event"]["run_id"] == run_id
+
+    repl = model["views"]["REPL"]
+    assert repl["prompt"] == "ody-term>"
+    assert [command["command"] for command in repl["commands"]] == [
+        "status",
+        "tail",
+        "filter",
+        "stop",
+        "harness",
+        "service",
+    ]
+    assert repl["capability_limited"] is True
+    assert repl["history"][0]["command"] == "stop"
+    assert repl["history"][0]["attempted"] is True
+    assert repl["history"][0]["status"] == "confirmation_required"
+    assert repl["history"][0]["result"]["run_id"] == run_id
+
+
+def test_tui_browse_and_inspect_views_expose_shared_model_state(
+    isolated_term_state: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    log_path = tmp_path / "server.log"
+    log_path.write_text("server ready\n", encoding="utf-8")
+    (tmp_path / "runtime.json").write_text(
+        json.dumps(
+            {
+                "kind": "ody-term-local-server",
+                "pid": 4242,
+                "pgid": 4242,
+                "repo": str(Path(__file__).resolve().parents[1]),
+                "command": ["uv", "run", "ody"],
+                "url": "http://127.0.0.1:7860",
+                "log_path": str(log_path),
+                "started_at": "2026-07-08T12:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ody_term, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(ody_term, "_process_group_matches", lambda pid, pgid: True)
+    _, stdout, _ = run_cli(
+        [
+            "run",
+            "start",
+            "--kind",
+            "harness",
+            "--session-id",
+            "ses_tui",
+            "--harness-adapter",
+            "pi",
+            "--harness-session-id",
+            "pi-tui-1",
+            "--message",
+            "watch",
+            "--format=json",
+        ]
+    )
+    run_id = json.loads(stdout)["data"]["run"]["run_id"]
+
+    exit_code, stdout, stderr = run_cli(["tui", "--format=json"], is_tty=True)
+
+    assert exit_code == 0
+    assert stderr == ""
+    model = json.loads(stdout)["data"]["tui"]
+    browse = model["views"]["Browse"]
+    assert browse["tree"][0]["id"] == "ses_tui"
+    assert browse["tree"][0]["children"][0]["id"] == run_id
+    assert browse["tree"][0]["children"][0]["children"][1]["id"] == "pi-tui-1"
+    assert any(target["id"] == "main-server" for target in browse["lifecycle_targets"])
+    assert any(target["id"] == f"run:{run_id}" for target in browse["lifecycle_targets"])
+    assert any(target["id"] == "harness-bridge:pi" for target in browse["lifecycle_targets"])
+
+    inspect = model["views"]["Inspect"]
+    assert inspect["model"]["sessions"] == 1
+    assert inspect["model"]["runs"] == 1
+    assert inspect["model"]["events"] == 3
+    assert inspect["target"]["value"]["source"] == "runtime-state"
+    assert inspect["capabilities"]["auth_facts"]["auth_mode"] == "auth-disabled"
+    assert inspect["event_envelope_sample"]["schema"] == "ody.event.v1"
+    assert inspect["shared_state_sources"] == [
+        "run-state",
+        "event-envelopes",
+        "lifecycle-targets",
+        "terminal-capabilities",
+        "target-resolution",
+    ]
+
+
+def test_tui_human_screen_has_focused_live_repl_browse_and_inspect_views(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    run_cli(["run", "start", "--kind", "agent", "--session-id", "ses_screen", "--message", "render", "--format=json"])
+
+    exit_code, stdout, stderr = run_cli(["tui"], is_tty=True)
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert "ody-term tui" in stdout
+    assert "[Live] | REPL | Browse | Inspect" in stdout
+    assert "agent.heartbeat" in stdout
+    assert "commands: status, tail, filter, stop, harness, service" in stdout
+    assert "Session ses_screen" in stdout
+    assert "sessions=1 runs=1 events=2" in stdout
+    assert "keyboard: F1-F4, 1-4, Tab; mouse: tabs, event rows, tree nodes, controls" in stdout

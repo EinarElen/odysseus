@@ -247,6 +247,11 @@ def _parse_command_options(args: list[str]) -> tuple[dict[str, str | bool], list
         "--tag",
         "--message",
         "--status",
+        "--view",
+        "--key",
+        "--mouse",
+        "--select-event",
+        "--repl",
     }
     bool_flags = {"--default", "--dry-run", "--force"}
     while index < len(args):
@@ -738,6 +743,58 @@ def _filter_events(
 
 
 RUN_ACTIVE_STATUSES = {"queued", "starting", "running", "waiting", "stopping"}
+TUI_VIEWS = ("Live", "REPL", "Browse", "Inspect")
+TUI_KEYBOARD_BINDINGS = {
+    "f1": "Live",
+    "f2": "REPL",
+    "f3": "Browse",
+    "f4": "Inspect",
+    "1": "Live",
+    "2": "REPL",
+    "3": "Browse",
+    "4": "Inspect",
+    "tab": "next-view",
+    "shift+tab": "previous-view",
+    "enter": "activate-selection",
+}
+TUI_MOUSE_BINDINGS = {
+    "tab_click": "switch-view",
+    "event_click": "select-event",
+    "tree_click": "select-node",
+    "control_click": "queue-repl-command",
+}
+TUI_COMMANDS = (
+    {
+        "command": "status",
+        "description": "Show selected Run or Lifecycle Target status",
+        "capability": "run:read",
+    },
+    {
+        "command": "tail",
+        "description": "Follow Event Envelopes for the selected Run",
+        "capability": "event:read",
+    },
+    {
+        "command": "filter",
+        "description": "Filter events by source, kind, level, identity, or tag",
+        "capability": "event:read",
+    },
+    {
+        "command": "stop",
+        "description": "Request bounded Run stop through the Run lifecycle",
+        "capability": "run:stop",
+    },
+    {
+        "command": "harness",
+        "description": "Attempt supported harness adapter controls",
+        "capability": "harness:control",
+    },
+    {
+        "command": "service",
+        "description": "Attempt managed Lifecycle Target controls",
+        "capability": "service:restart",
+    },
+)
 
 
 def _empty_run_state() -> dict[str, object]:
@@ -777,6 +834,27 @@ def _events_payload(state: dict[str, object]) -> dict[str, list[dict[str, object
 def _run_events(state: dict[str, object], run_id: str) -> list[dict[str, object]]:
     events = _events_payload(state).get(run_id, [])
     return [event for event in events if isinstance(event, dict)]
+
+
+def _all_run_events(state: dict[str, object]) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    for run_id in _events_payload(state):
+        events.extend(_run_events(state, run_id))
+    events.sort(key=lambda event: (str(event.get("time") or ""), str(event.get("run_id") or ""), int(event.get("seq") or 0)))
+    return events
+
+
+def _merged_tui_events(state: dict[str, object], *, lifecycle_targets: list[dict[str, object]]) -> list[dict[str, object]]:
+    events = _all_run_events(state)
+    main_server = next((target for target in lifecycle_targets if target.get("id") == "main-server"), None)
+    if main_server is not None:
+        try:
+            payload = _server_log_events(lines=20, cursor=None)
+            events.extend(cast(list[dict[str, object]], payload["events"]))
+        except CommandError:
+            pass
+    events.sort(key=lambda event: (str(event.get("time") or ""), str(event.get("source") or ""), int(event.get("seq") or 0)))
+    return events
 
 
 def _last_activity(state: dict[str, object], run_id: str) -> dict[str, object] | None:
@@ -1614,6 +1692,303 @@ def _start_server(*, host: str, port: str | None, dry_run: bool) -> CommandRespo
     )
 
 
+def _safe_tui_value(label: str, callback: object) -> dict[str, object]:
+    try:
+        if not callable(callback):
+            raise TypeError(f"{label} source is not callable")
+        return {"ok": True, "value": callback()}
+    except CommandError as exc:
+        return {"ok": False, "error": {"code": exc.code, "message": exc.message, "details": exc.details or {}}}
+
+
+def _event_line(event: dict[str, object]) -> str:
+    identity = event.get("run_id") or event.get("session_id") or event.get("id")
+    return (
+        f"{event.get('seq', '?')} {event.get('level', 'info')} "
+        f"{event.get('source', 'system')}.{event.get('kind', 'event')} "
+        f"{identity}: {event.get('summary', '')}"
+    ).strip()
+
+
+def _session_tree(runs: list[dict[str, object]]) -> list[dict[str, object]]:
+    sessions: dict[str, dict[str, object]] = {}
+    for run in runs:
+        session_id = str(run.get("session_id") or "unknown-session")
+        session = sessions.setdefault(
+            session_id,
+            {"id": session_id, "label": f"Session {session_id}", "type": "session", "children": []},
+        )
+        children = cast(list[dict[str, object]], session["children"])
+        run_id = str(run.get("run_id") or "unknown-run")
+        run_node: dict[str, object] = {
+            "id": run_id,
+            "label": f"{run.get('kind', 'run')} Run {run_id} ({run.get('status', 'unknown')})",
+            "type": "run",
+            "children": [
+                {
+                    "id": f"{run_id}:events",
+                    "label": f"{run.get('event_count', 0)} Event Envelope(s)",
+                    "type": "events",
+                }
+            ],
+        }
+        harness_session_id = run.get("harness_session_id")
+        if isinstance(harness_session_id, str) and harness_session_id:
+            cast(list[dict[str, object]], run_node["children"]).append(
+                {"id": harness_session_id, "label": f"Harness Session {harness_session_id}", "type": "harness-session"}
+            )
+        children.append(run_node)
+    return sorted(sessions.values(), key=lambda node: str(node["id"]))
+
+
+def _tui_control_log(
+    *,
+    capabilities: dict[str, object],
+    lifecycle_targets: list[dict[str, object]],
+    attempts: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    restartable = [
+        target.get("id")
+        for target in lifecycle_targets
+        if isinstance(target.get("capabilities"), dict) and cast(dict[str, object], target["capabilities"]).get("restart")
+    ]
+    available = [
+        {
+            "command": descriptor["command"],
+            "capability": descriptor["capability"],
+            "status": "available" if _capability_allowed(capabilities, str(descriptor["capability"])) else "denied",
+            "targets": restartable if descriptor["command"] == "service" else [],
+            "attempted": False,
+        }
+        for descriptor in TUI_COMMANDS
+    ]
+    return [*attempts, *available]
+
+
+def _capability_allowed(capabilities: dict[str, object], capability: str) -> bool:
+    payload = capabilities.get(capability)
+    return bool(payload.get("allowed")) if isinstance(payload, dict) else False
+
+
+def _tui_active_view(options: dict[str, str | bool]) -> str:
+    view = str(options.get("view") or "Live")
+    if view not in TUI_VIEWS:
+        raise CommandError("invalid_tui_view", f"unknown TUI view: {view}")
+    return view
+
+
+def _tui_selected_event(events: list[dict[str, object]], selector: str | None) -> dict[str, object] | None:
+    if not events:
+        return None
+    if not selector:
+        return events[-1]
+    for event in events:
+        if str(event.get("id")) == selector:
+            return event
+    raise CommandError("unknown_tui_event", f"unknown TUI event: {selector}", exit_code=1)
+
+
+def _tui_repl_attempt(
+    command: str,
+    *,
+    runs: list[dict[str, object]],
+    events: list[dict[str, object]],
+    lifecycle_targets: list[dict[str, object]],
+    capabilities: dict[str, object],
+    selected_event: dict[str, object] | None,
+) -> dict[str, object]:
+    descriptor = next((item for item in TUI_COMMANDS if item["command"] == command), None)
+    if descriptor is None:
+        raise CommandError("unknown_tui_repl_command", f"unknown TUI REPL command: {command}")
+    capability = str(descriptor["capability"])
+    allowed = _capability_allowed(capabilities, capability)
+    result: dict[str, object] = {
+        "command": command,
+        "capability": capability,
+        "attempted": True,
+        "status": "available" if allowed else "denied",
+        "result": None,
+    }
+    if not allowed:
+        result["result"] = {"reason": "capability_denied"}
+        return result
+    if command == "status":
+        result["result"] = {"runs": runs[:5], "selected_event": selected_event}
+    elif command == "tail":
+        result["result"] = {"events": events[-10:], "cursor": str(events[-1]["seq"]) if events else None}
+    elif command == "filter":
+        sources = sorted({str(event.get("source")) for event in events if event.get("source")})
+        levels = sorted({str(event.get("level")) for event in events if event.get("level")})
+        result["result"] = {"sources": sources, "levels": levels}
+    elif command == "stop":
+        result["status"] = "confirmation_required"
+        result["result"] = {"requires": "--yes", "run_id": selected_event.get("run_id") if selected_event else None}
+    elif command == "harness":
+        harness_events = [event for event in events if event.get("harness_session_id") or event.get("source") == "harness"]
+        result["result"] = {"supported": bool(harness_events), "events": harness_events[-5:]}
+    elif command == "service":
+        restartable = [
+            target
+            for target in lifecycle_targets
+            if isinstance(target.get("capabilities"), dict) and cast(dict[str, object], target["capabilities"]).get("restart")
+        ]
+        result["status"] = "confirmation_required" if restartable else "unsupported"
+        result["result"] = {"targets": restartable, "requires": "--yes" if restartable else None}
+    return result
+
+
+def _tui_interaction(options: dict[str, str | bool], *, active_view: str, selected_event: dict[str, object] | None) -> dict[str, object]:
+    key = str(options.get("key")) if isinstance(options.get("key"), str) else None
+    mouse = str(options.get("mouse")) if isinstance(options.get("mouse"), str) else None
+    interaction: dict[str, object] = {"keyboard_event": None, "mouse_event": None, "active_view": active_view}
+    if key:
+        action = TUI_KEYBOARD_BINDINGS.get(key.lower())
+        if action in TUI_VIEWS:
+            interaction["keyboard_event"] = {"input": key, "action": "switch-view", "view": action}
+            interaction["active_view"] = action
+        elif action:
+            interaction["keyboard_event"] = {"input": key, "action": action, "selected_event": selected_event}
+        else:
+            raise CommandError("unknown_tui_key", f"unknown TUI key binding: {key}")
+    if mouse:
+        action = TUI_MOUSE_BINDINGS.get(mouse)
+        if not action:
+            raise CommandError("unknown_tui_mouse", f"unknown TUI mouse binding: {mouse}")
+        interaction["mouse_event"] = {"input": mouse, "action": action, "selected_event": selected_event}
+    return interaction
+
+
+def _build_tui_model(request: CommandRequest) -> dict[str, object]:
+    options, positionals = _parse_command_options(request.args)
+    if positionals:
+        raise CommandError("unexpected_tui_args", f"unexpected tui args: {' '.join(positionals)}")
+    run_state = _load_run_state()
+    runs = [_run_summary(run_state, run) for run in _runs_payload(run_state).values()]
+    runs.sort(key=lambda run: str(run.get("updated_at") or ""), reverse=True)
+    lifecycle_result = _safe_tui_value("lifecycle", _lifecycle_targets)
+    lifecycle_targets = (
+        cast(list[dict[str, object]], lifecycle_result["value"])
+        if lifecycle_result.get("ok") and isinstance(lifecycle_result.get("value"), list)
+        else []
+    )
+    run_events = _merged_tui_events(run_state, lifecycle_targets=lifecycle_targets)
+    capability_payload = _capabilities_payload()
+    capabilities = cast(dict[str, object], capability_payload["capabilities"])
+    target = _safe_tui_value("target", lambda: _resolve_target(request))
+    auth = _resolved_auth()
+    active_view = _tui_active_view(options)
+    selected_event = _tui_selected_event(
+        run_events,
+        str(options["select_event"]) if isinstance(options.get("select_event"), str) else None,
+    )
+    attempts = []
+    if isinstance(options.get("repl"), str):
+        attempts.append(
+            _tui_repl_attempt(
+                str(options["repl"]),
+                runs=runs,
+                events=run_events,
+                lifecycle_targets=lifecycle_targets,
+                capabilities=capabilities,
+                selected_event=selected_event,
+            )
+        )
+    interaction = _tui_interaction(options, active_view=active_view, selected_event=selected_event)
+    active_view = str(interaction["active_view"])
+    control_log = _tui_control_log(capabilities=capabilities, lifecycle_targets=lifecycle_targets, attempts=attempts)
+    return {
+        "schema": "ody.tui.v1",
+        "active_view": active_view,
+        "views": {
+            "Live": {
+                "timeline": run_events,
+                "timeline_lines": [_event_line(event) for event in run_events],
+                "selected_event": selected_event,
+                "control_log": control_log,
+                "filters": {"source": None, "kind": None, "level": None, "run_id": None, "tag": None},
+            },
+            "REPL": {
+                "prompt": "ody-term>",
+                "commands": [dict(command) for command in TUI_COMMANDS],
+                "history": control_log,
+                "capability_limited": True,
+            },
+            "Browse": {
+                "tree": _session_tree(runs),
+                "lifecycle_targets": lifecycle_targets,
+                "selected_node": (str(runs[0].get("run_id")) if runs else "sessions"),
+            },
+            "Inspect": {
+                "model": {
+                    "sessions": len({str(run.get("session_id")) for run in runs}),
+                    "runs": len(runs),
+                    "events": len(run_events),
+                    "lifecycle_targets": len(lifecycle_targets),
+                },
+                "auth": auth,
+                "target": target,
+                "capabilities": capability_payload,
+                "event_envelope_sample": selected_event,
+                "shared_state_sources": [
+                    "run-state",
+                    "event-envelopes",
+                    "lifecycle-targets",
+                    "terminal-capabilities",
+                    "target-resolution",
+                ],
+            },
+        },
+        "interaction": {
+            "keyboard": TUI_KEYBOARD_BINDINGS,
+            "mouse": TUI_MOUSE_BINDINGS,
+            "last": interaction,
+        },
+        "state": {
+            "runs": runs,
+            "events": run_events,
+            "lifecycle_targets": lifecycle_targets,
+        },
+        "source_errors": {
+            "lifecycle": lifecycle_result.get("error") if not lifecycle_result.get("ok") else None,
+            "target": target.get("error") if not target.get("ok") else None,
+        },
+    }
+
+
+def _render_tui_screen(model: dict[str, object]) -> str:
+    views = cast(dict[str, object], model["views"])
+    live = cast(dict[str, object], views["Live"])
+    repl = cast(dict[str, object], views["REPL"])
+    browse = cast(dict[str, object], views["Browse"])
+    inspect = cast(dict[str, object], views["Inspect"])
+    timeline_lines = cast(list[str], live["timeline_lines"])
+    commands = cast(list[dict[str, object]], repl["commands"])
+    tree = cast(list[dict[str, object]], browse["tree"])
+    inspect_model = cast(dict[str, object], inspect["model"])
+    tabs = " | ".join(f"[{view}]" if view == model["active_view"] else view for view in TUI_VIEWS)
+    lines = [
+        "ody-term tui",
+        tabs,
+        "",
+        "Live",
+        *(timeline_lines[-6:] or ["No Event Envelopes yet"]),
+        "",
+        "REPL",
+        "commands: " + ", ".join(str(command["command"]) for command in commands),
+        "",
+        "Browse",
+        *(str(node["label"]) for node in tree[:6]),
+        "",
+        "Inspect",
+        (
+            f"sessions={inspect_model['sessions']} runs={inspect_model['runs']} "
+            f"events={inspect_model['events']} lifecycle_targets={inspect_model['lifecycle_targets']}"
+        ),
+        "keyboard: F1-F4, 1-4, Tab; mouse: tabs, event rows, tree nodes, controls",
+    ]
+    return "\n".join(lines)
+
+
 def _help_for_domain(domain: str) -> str:
     if domain == "tui":
         return "usage: ody-term [global-options] tui\n\nOpen the Terminal Client TUI.\n"
@@ -1718,9 +2093,16 @@ def parse_request(argv: list[str], *, stdout_is_tty: bool) -> tuple[CommandReque
         return None, _help_for_domain(domain)
 
     if domain == "tui":
-        if len(positionals) > 1:
-            raise CommandError("unexpected_tui_args", "tui does not accept a verb in the command spine")
-        return CommandRequest(domain=domain, verb=None, globals=options, output_profile=output_profile), None
+        return (
+            CommandRequest(
+                domain=domain,
+                verb=None,
+                args=positionals[1:],
+                globals=options,
+                output_profile=output_profile,
+            ),
+            None,
+        )
 
     if len(positionals) < 2:
         raise CommandError("missing_verb", f"expected a verb for {domain}")
@@ -2058,11 +2440,12 @@ def execute(request: CommandRequest) -> CommandResponse:
     if request.domain == "inspect" and request.verb == "events":
         return _inspect_events(request)
     if request.domain == "tui":
+        model = _build_tui_model(request)
         return CommandResponse(
             ok=True,
             command=command,
-            message="TUI command spine is available; live panes are implemented by a later ticket.",
-            data={"views": ["Live", "REPL", "Browse", "Inspect"]},
+            message=_render_tui_screen(model),
+            data={"tui": model},
         )
     return CommandResponse(
         ok=False,
@@ -2136,6 +2519,8 @@ def render(response: CommandResponse, request: CommandRequest, stdout: TextIO) -
         if events is not None:
             for event in events:
                 stdout.write(f"[{event.get('level')}] {event.get('source')}.{event.get('kind')} #{event.get('seq')}: {event.get('summary', '')}\n")
+        elif response.command == ["tui"]:
+            stdout.write(response.message + "\n")
         else:
             stdout.write(response.message + "\n")
 

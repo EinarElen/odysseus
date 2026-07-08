@@ -131,12 +131,14 @@ Work the **frontier**: any ticket whose blockers are all done. The two survey ti
 
 **Blocked by:** Create Run Identity Compatibility Layer For Chat Runs; Expose Managed Lifecycle Targets.
 
-- [ ] The TUI has focused Live, REPL, Browse/tree, and Inspect views.
-- [ ] TUI panes consume the same Event Envelope, Session, Run, Lifecycle Target, and capability state as CLI commands.
-- [ ] Live view shows merged runtime events with selected-event detail and a local control log.
-- [ ] REPL view can perform status, tail, filter, stop, harness, and lifecycle control attempts within capability limits.
-- [ ] Browse/tree and Inspect views expose structure and current model state without depending on private internals.
-- [ ] Keyboard and mouse interaction paths are both covered by tests or harnessed verification.
+- [x] The TUI has focused Live, REPL, Browse/tree, and Inspect views.
+- [x] TUI panes consume the same Event Envelope, Session, Run, Lifecycle Target, and capability state as CLI commands.
+- [x] Live view shows merged runtime events with selected-event detail and a local control log.
+- [x] REPL view can perform status, tail, filter, stop, harness, and lifecycle control attempts within capability limits.
+- [x] Browse/tree and Inspect views expose structure and current model state without depending on private internals.
+- [x] Keyboard and mouse interaction paths are both covered by tests or harnessed verification.
+
+Implementation note: completed as a dependency-free, harnessable `ody.tui.v1` state model plus human terminal fallback renderer in `ody-term tui`. The model is structured so a future full-screen Textual/curses renderer can consume the same Live, REPL, Browse, Inspect, keyboard, and mouse contracts without changing CLI state seams.
 
 ## Harden Automation, Replay Primitives, And Final Docs
 
