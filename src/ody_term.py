@@ -1061,7 +1061,8 @@ def _run_status(request: CommandRequest) -> CommandResponse:
 
 
 def _run_attach(request: CommandRequest) -> CommandResponse:
-    _require_capability("event:read", request)
+    capability = "event:raw" if request.globals.format in {"raw", "debug"} else "event:read"
+    _require_capability(capability, request)
     options, positionals = _parse_command_options(request.args)
     if len(positionals) > 1:
         raise CommandError("unexpected_run_args", f"unexpected run attach args: {' '.join(positionals[1:])}")
@@ -2428,6 +2429,21 @@ def execute(request: CommandRequest) -> CommandResponse:
                     "payload",
                 ],
                 "event_envelope_field_aliases": {"sequence": "seq"},
+                "clanker": {
+                    "bounded_json": "Command responses are JSON objects with ok, command, message, profile, format, and data.",
+                    "event_jsonl": "Event-stream commands emit one ody.event.v1 Event Envelope per line.",
+                    "raw_debug": "raw/debug are diagnostic capture modes; ody.event.v1 remains the replay contract.",
+                },
+                "exit_codes": {
+                    "0": "command succeeded",
+                    "1": "known runtime or target failure",
+                    "2": "usage, auth, capability, confirmation, or policy failure",
+                },
+                "cursor": {
+                    "flag": "--cursor",
+                    "field": "data.cursor.next",
+                    "reconnect": "pass the last cursor.next value to continue after that event sequence",
+                },
             },
         )
     if request.domain == "inspect" and request.verb == "globals":

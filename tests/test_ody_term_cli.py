@@ -86,6 +86,9 @@ def test_non_tty_defaults_to_clanker_json_contract() -> None:
         "payload",
     ]
     assert payload["data"]["event_envelope_field_aliases"] == {"sequence": "seq"}
+    assert payload["data"]["clanker"]["event_jsonl"] == "Event-stream commands emit one ody.event.v1 Event Envelope per line."
+    assert payload["data"]["cursor"]["field"] == "data.cursor.next"
+    assert payload["data"]["exit_codes"]["2"] == "usage, auth, capability, confirmation, or policy failure"
 
 
 def test_tty_defaults_to_human_output() -> None:
@@ -606,6 +609,64 @@ def test_run_attach_emits_chat_run_event_envelopes_as_jsonl(
     assert events[0]["payload"]["message"] == "hi"
 
 
+def test_run_attach_cursor_continues_after_last_seen_event(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    _, stdout, _ = run_cli(["run", "start", "--kind", "agent", "--session-id", "ses_cursor", "--format=json"])
+    run_id = json.loads(stdout)["data"]["run"]["run_id"]
+
+    exit_code, stdout, stderr = run_cli(["run", "attach", run_id, "--cursor", "1", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    data = json.loads(stdout)["data"]
+    assert data["cursor"] == {"after": "1", "next": "2", "count": 1}
+    assert [event["seq"] for event in data["events"]] == [2]
+    assert data["events"][0]["kind"] == "heartbeat"
+
+
+def test_run_attach_raw_requires_raw_event_capability(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ODY_TERM_TOKEN", "ody_env_secret")
+
+    exit_code, stdout, stderr = run_cli(["run", "attach", "run_missing", "--format=raw"])
+
+    assert exit_code == 2
+    assert stdout == ""
+    error = json.loads(stderr)["error"]
+    assert error["code"] == "capability_denied"
+    assert "event:raw" in error["message"]
+
+
+def test_run_attach_raw_capture_outputs_source_native_diagnostics(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    _, stdout, _ = run_cli(["run", "start", "--kind", "chat", "--message", "raw me", "--format=json"])
+    run_id = json.loads(stdout)["data"]["run"]["run_id"]
+
+    exit_code, stdout, stderr = run_cli(["run", "attach", run_id, "--format=raw"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    raw_events = json.loads(stdout)
+    assert raw_events == [
+        {
+            "body": {
+                "harness_adapter_id": None,
+                "harness_session_id": None,
+                "kind": "chat",
+                "message": "raw me",
+                "status": "running",
+            },
+            "transport": "compat",
+            "type": "run.status",
+        }
+    ]
+
+
 def test_agent_runs_use_same_run_lifecycle_and_heartbeat_events(
     isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1085,6 +1146,27 @@ def test_inspect_events_json_normalizes_server_logs_as_event_envelopes(
     assert events[0]["payload"] == {"message": "WARNING: slow provider"}
     assert events[0]["raw"]["transport"] == "log"
     assert events[0]["raw"]["body"]["line"] == "WARNING: slow provider"
+
+
+def test_inspect_events_cursor_continues_after_last_seen_log_event(
+    isolated_term_state: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    log_path = tmp_path / "server.log"
+    log_path.write_text("one\ntwo\nthree\n", encoding="utf-8")
+    (tmp_path / "runtime.json").write_text(
+        json.dumps({"kind": "ody-term-local-server", "log_path": str(log_path)}),
+        encoding="utf-8",
+    )
+
+    exit_code, stdout, stderr = run_cli(["inspect", "events", "--cursor", "1", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    data = json.loads(stdout)["data"]
+    assert data["cursor"] == {"after": "1", "next": "3", "count": 2}
+    assert [event["seq"] for event in data["events"]] == [2, 3]
+    assert [event["payload"]["message"] for event in data["events"]] == ["two", "three"]
 
 
 def test_inspect_events_jsonl_emits_one_envelope_per_line(

@@ -146,9 +146,11 @@ Implementation note: completed as a dependency-free, harnessable `ody.tui.v1` st
 
 **Blocked by:** Extend Run Surface To Agent And Harness Workflows; Build Shared Live TUI MVP.
 
-- [ ] Clanker JSON/JSONL output is documented and covered by compatibility-style tests.
-- [ ] Event cursor and reconnect behavior is verified across Run attach and inspect flows.
-- [ ] Exit codes and structured error shapes are documented for auth, target resolution, confirmation, capability, and runtime failures.
-- [ ] Raw/debug capture is documented as diagnostic support, not the replay contract.
-- [ ] Examples demonstrate scriptable repeated runs and inspection using ordinary Terminal Client primitives.
-- [ ] Final documentation makes clear that replay, experiment, and self-improvement workflows are external orchestration patterns in v1.
+- [x] Clanker JSON/JSONL output is documented and covered by compatibility-style tests.
+- [x] Event cursor and reconnect behavior is verified across Run attach and inspect flows.
+- [x] Exit codes and structured error shapes are documented for auth, target resolution, confirmation, capability, and runtime failures.
+- [x] Raw/debug capture is documented as diagnostic support, not the replay contract.
+- [x] Examples demonstrate scriptable repeated runs and inspection using ordinary Terminal Client primitives.
+- [x] Final documentation makes clear that replay, experiment, and self-improvement workflows are external orchestration patterns in v1.
+
+Implementation note: finalized in `docs/ody-term.md`, with compatibility metadata exposed by `ody-term inspect contracts` and focused regression coverage for clanker contracts, cursor continuation, raw/debug capture gating, and Event Envelope replay posture.
