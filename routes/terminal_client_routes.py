@@ -188,6 +188,15 @@ def _terminal_chat_stream(
     return _stream()
 
 
+def _ambiguous_run_error(session_id: str, exc: ValueError) -> HTTPException:
+    choices = [
+        terminal_client_runs.run_summary(run)
+        for run in exc.args[0]
+        if isinstance(run, terminal_client_runs.TerminalRun)
+    ]
+    return HTTPException(409, {"code": "ambiguous_run", "session_id": session_id, "choices": choices})
+
+
 def setup_terminal_client_routes(session_manager=None, chat_handler=None, **_deps: Any) -> APIRouter:
     router = APIRouter(prefix="/api/terminal", tags=["terminal_client"])
 
@@ -216,6 +225,34 @@ def setup_terminal_client_routes(session_manager=None, chat_handler=None, **_dep
     @router.get("/runs")
     async def list_runs(kind: str | None = None, status: str | None = None) -> dict[str, Any]:
         return {"runs": terminal_client_runs.list_runs(kind=kind, status=status)}
+
+    @router.get("/runs/by-session/{session_id}")
+    async def run_status_by_session(session_id: str) -> dict[str, Any]:
+        try:
+            run = terminal_client_runs.resolve_run(session_id=session_id)
+        except ValueError as exc:
+            raise _ambiguous_run_error(session_id, exc) from None
+        except KeyError:
+            raise HTTPException(404, "Run not found") from None
+        return {"run": terminal_client_runs.run_summary(run)}
+
+    @router.get("/runs/by-session/{session_id}/events")
+    async def run_events_by_session(session_id: str, cursor: int | None = None) -> dict[str, Any]:
+        try:
+            return await terminal_client_runs.attach_run(session_id=session_id, cursor=cursor)
+        except ValueError as exc:
+            raise _ambiguous_run_error(session_id, exc) from None
+        except KeyError:
+            raise HTTPException(404, "Run not found") from None
+
+    @router.post("/runs/by-session/{session_id}/stop")
+    async def stop_run_by_session(session_id: str) -> dict[str, Any]:
+        try:
+            return await terminal_client_runs.stop_run(session_id=session_id)
+        except ValueError as exc:
+            raise _ambiguous_run_error(session_id, exc) from None
+        except KeyError:
+            raise HTTPException(404, "Run not found") from None
 
     @router.get("/runs/{run_id}")
     async def run_status(run_id: str) -> dict[str, Any]:

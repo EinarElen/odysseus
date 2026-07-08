@@ -1004,6 +1004,35 @@ def _has_local_run(run_id: str | None) -> bool:
         return False
 
 
+def _local_run_kind(run_id: str | None) -> str | None:
+    if not run_id:
+        return None
+    try:
+        run = _runs_payload(_load_run_state()).get(run_id)
+    except CommandError:
+        raise
+    except Exception:
+        return None
+    if isinstance(run, dict) and isinstance(run.get("kind"), str):
+        return str(run["kind"])
+    return None
+
+
+def _chat_run_uses_api(kind: str | None, run_id: str | None) -> bool:
+    return bool(
+        kind == "chat"
+        or (run_id and run_id.startswith("run_") and (not _has_local_run(run_id) or _local_run_kind(run_id) == "chat"))
+    )
+
+
+def _chat_run_api_path(run_id: str | None, session_id: str | None, suffix: str = "") -> str:
+    if run_id:
+        return f"/api/terminal/runs/{run_id}{suffix}"
+    if session_id:
+        return f"/api/terminal/runs/by-session/{session_id}{suffix}"
+    raise CommandError("missing_run_target", "chat run command requires a run id or --session-id")
+
+
 def _all_run_events(state: dict[str, object]) -> list[dict[str, object]]:
     events: list[dict[str, object]] = []
     for run_id in _events_payload(state):
@@ -1248,13 +1277,14 @@ def _run_status(request: CommandRequest) -> CommandResponse:
         raise CommandError("unexpected_run_args", f"unexpected run status args: {' '.join(positionals[1:])}")
     run_id = positionals[0] if positionals else (str(options["run_id"]) if isinstance(options.get("run_id"), str) else None)
     session_id = str(options["session_id"]) if isinstance(options.get("session_id"), str) else None
-    if run_id and run_id.startswith("run_") and not _has_local_run(run_id):
-        payload = _terminal_api_request(request, "GET", f"/api/terminal/runs/{run_id}")
+    kind = str(options.get("kind")) if isinstance(options.get("kind"), str) else None
+    if _chat_run_uses_api(kind, run_id):
+        payload = _terminal_api_request(request, "GET", _chat_run_api_path(run_id, session_id))
         run = cast(dict[str, object], payload.get("run", {}))
         return CommandResponse(
             ok=True,
             command=["run", "status"],
-            message=f"Run {run.get('run_id', run_id)} is {run.get('status', 'unknown')}",
+            message=f"Run {run.get('run_id', run_id or session_id)} is {run.get('status', 'unknown')}",
             data={"run": run},
         )
     state = _load_run_state()
@@ -1280,8 +1310,9 @@ def _run_attach(request: CommandRequest) -> CommandResponse:
         cursor = int(raw_cursor) if isinstance(raw_cursor, str) and raw_cursor else None
     except ValueError as exc:
         raise CommandError("invalid_cursor", f"--cursor must be an integer: {raw_cursor}") from exc
-    if run_id and run_id.startswith("run_") and not _has_local_run(run_id):
-        payload = _terminal_api_request(request, "GET", f"/api/terminal/runs/{run_id}/events", query={"cursor": cursor})
+    kind = str(options.get("kind")) if isinstance(options.get("kind"), str) else None
+    if _chat_run_uses_api(kind, run_id):
+        payload = _terminal_api_request(request, "GET", _chat_run_api_path(run_id, session_id, "/events"), query={"cursor": cursor})
         events = payload.get("events")
         return CommandResponse(
             ok=True,
@@ -1320,8 +1351,9 @@ def _run_stop(request: CommandRequest) -> CommandResponse:
         raise CommandError("unexpected_run_args", f"unexpected run stop args: {' '.join(positionals[1:])}")
     run_id = positionals[0] if positionals else (str(options["run_id"]) if isinstance(options.get("run_id"), str) else None)
     session_id = str(options["session_id"]) if isinstance(options.get("session_id"), str) else None
-    if run_id and run_id.startswith("run_") and not _has_local_run(run_id):
-        payload = _terminal_api_request(request, "POST", f"/api/terminal/runs/{run_id}/stop")
+    kind = str(options.get("kind")) if isinstance(options.get("kind"), str) else None
+    if _chat_run_uses_api(kind, run_id):
+        payload = _terminal_api_request(request, "POST", _chat_run_api_path(run_id, session_id, "/stop"))
         run = cast(dict[str, object], payload.get("run", {}))
         return CommandResponse(
             ok=True,

@@ -213,3 +213,133 @@ def test_terminal_client_stop_does_not_fake_stopped_when_detached_task_missing(m
     payload = stopped.json()
     assert payload["stopped"] is False
     assert payload["run"]["status"] == "running"
+
+
+def test_terminal_client_chat_run_by_session_status_and_events(monkeypatch):
+    terminal_client_runs.reset_for_tests()
+    agent_runs.reset_for_tests()
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    manager = FakeSessionManager()
+
+    async def fake_stream_llm_with_fallback(candidates, messages, **kwargs):
+        yield 'data: {"delta": "session"}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr("routes.terminal_client_routes.stream_llm_with_fallback", fake_stream_llm_with_fallback)
+    install_terminal_route_fakes(monkeypatch)
+
+    app = FastAPI()
+    app.include_router(setup_terminal_client_routes(session_manager=manager, chat_handler=FakeChatHandler()))
+    client = TestClient(app)
+
+    started = client.post(
+        "/api/terminal/runs",
+        json={"kind": "chat", "session_id": "ses-real", "message": "hello"},
+    )
+    assert started.status_code == 200
+
+    status = client.get("/api/terminal/runs/by-session/ses-real")
+    assert status.status_code == 200
+    assert status.json()["run"]["session_id"] == "ses-real"
+
+    events = client.get("/api/terminal/runs/by-session/ses-real/events")
+    assert events.status_code == 200
+    assert [event["session_id"] for event in events.json()["events"]] == ["ses-real"] * 4
+
+
+def test_terminal_client_chat_run_by_session_stop(monkeypatch):
+    terminal_client_runs.reset_for_tests()
+    agent_runs.reset_for_tests()
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    manager = FakeSessionManager()
+
+    async def fake_stream_llm_with_fallback(candidates, messages, **kwargs):
+        yield 'data: {"delta": "session"}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr("routes.terminal_client_routes.stream_llm_with_fallback", fake_stream_llm_with_fallback)
+    install_terminal_route_fakes(monkeypatch)
+    monkeypatch.setattr("src.terminal_client_runs.agent_runs.get_status", lambda session_id: "running")
+    monkeypatch.setattr("src.terminal_client_runs.agent_runs.stop", lambda session_id: True)
+
+    app = FastAPI()
+    app.include_router(setup_terminal_client_routes(session_manager=manager, chat_handler=FakeChatHandler()))
+    client = TestClient(app)
+
+    started = client.post(
+        "/api/terminal/runs",
+        json={"kind": "chat", "session_id": "ses-real", "message": "hello"},
+    )
+    assert started.status_code == 200
+
+    stopped = client.post("/api/terminal/runs/by-session/ses-real/stop")
+
+    assert stopped.status_code == 200
+    assert stopped.json()["run"]["session_id"] == "ses-real"
+
+
+def test_terminal_client_chat_run_by_session_reports_ambiguity(monkeypatch):
+    terminal_client_runs.reset_for_tests()
+    agent_runs.reset_for_tests()
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    manager = FakeSessionManager()
+
+    async def fake_stream_llm_with_fallback(candidates, messages, **kwargs):
+        yield 'data: {"delta": "session"}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr("routes.terminal_client_routes.stream_llm_with_fallback", fake_stream_llm_with_fallback)
+    install_terminal_route_fakes(monkeypatch)
+    monkeypatch.setattr("src.terminal_client_runs.agent_runs.get_status", lambda session_id: "running")
+
+    app = FastAPI()
+    app.include_router(setup_terminal_client_routes(session_manager=manager, chat_handler=FakeChatHandler()))
+    client = TestClient(app)
+
+    for _ in range(2):
+        started = client.post(
+            "/api/terminal/runs",
+            json={"kind": "chat", "session_id": "ses-real", "message": "hello"},
+        )
+        assert started.status_code == 200
+
+    status = client.get("/api/terminal/runs/by-session/ses-real")
+
+    assert status.status_code == 409
+    detail = status.json()["detail"]
+    assert detail["code"] == "ambiguous_run"
+    assert len(detail["choices"]) == 2
+
+
+def test_terminal_client_chat_run_by_session_uses_latest_completed_run(monkeypatch):
+    terminal_client_runs.reset_for_tests()
+    agent_runs.reset_for_tests()
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    manager = FakeSessionManager()
+
+    async def fake_stream_llm_with_fallback(candidates, messages, **kwargs):
+        yield 'data: {"delta": "session"}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr("routes.terminal_client_routes.stream_llm_with_fallback", fake_stream_llm_with_fallback)
+    install_terminal_route_fakes(monkeypatch)
+
+    app = FastAPI()
+    app.include_router(setup_terminal_client_routes(session_manager=manager, chat_handler=FakeChatHandler()))
+    client = TestClient(app)
+
+    first = client.post(
+        "/api/terminal/runs",
+        json={"kind": "chat", "session_id": "ses-real", "message": "first"},
+    ).json()["run"]["run_id"]
+    assert client.get(f"/api/terminal/runs/{first}/events").status_code == 200
+    second = client.post(
+        "/api/terminal/runs",
+        json={"kind": "chat", "session_id": "ses-real", "message": "second"},
+    ).json()["run"]["run_id"]
+    assert client.get(f"/api/terminal/runs/{second}/events").status_code == 200
+
+    status = client.get("/api/terminal/runs/by-session/ses-real")
+
+    assert status.status_code == 200
+    assert status.json()["run"]["run_id"] == second

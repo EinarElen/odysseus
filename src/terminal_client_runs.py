@@ -209,10 +209,18 @@ def resolve_run(*, run_id: str | None = None, session_id: str | None = None) -> 
         return run
     if not session_id:
         raise KeyError("missing")
-    matches = [_RUNS[rid] for rid in _session_run_ids(session_id) if _RUNS[rid].status in RUN_ACTIVE_STATUSES]
-    if len(matches) != 1:
-        raise ValueError(matches)
-    return matches[0]
+    runs = [_RUNS[rid] for rid in _session_run_ids(session_id)]
+    for run in runs:
+        _sync_run_status(run)
+    active = [run for run in runs if run.status in RUN_ACTIVE_STATUSES]
+    if len(active) == 1:
+        return active[0]
+    if len(active) > 1:
+        raise ValueError(active)
+    if not runs:
+        raise KeyError(session_id)
+    runs.sort(key=lambda run: run.updated_at, reverse=True)
+    return runs[0]
 
 
 async def attach_run(*, run_id: str | None = None, session_id: str | None = None, cursor: int | None = None) -> dict[str, Any]:

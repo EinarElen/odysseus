@@ -255,6 +255,15 @@ uses the synthetic single-event stream, but the ticket remains open until this
 is verified against a live configured model/backend rather than a test-patched
 LLM stream.
 
+2026-07-09 follow-up: API-backed chat Run status, attach, and stop now resolve
+by Run id or by Session id through the terminal-client API. Session-id
+resolution reports ambiguity when multiple active Runs match, but still permits
+reconnect/attach to a single recent completed Run. `ody-term run
+status/attach/stop --kind chat --session-id ...` uses these API paths, and a
+stale client-local JSON chat Run no longer satisfies chat status, attach, or
+stop. The ticket remains open because live configured-backend verification and
+durable/recent Run evidence across process restart are still not proven.
+
 ## Promote Event Inspection To Real Odysseus Activity
 
 **What to build:** `ody-term inspect events` reads normalized Event Envelopes

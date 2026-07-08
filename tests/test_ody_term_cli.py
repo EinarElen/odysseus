@@ -136,6 +136,36 @@ def terminal_api_fake(monkeypatch: pytest.MonkeyPatch):
             if status:
                 values = [run for run in values if run.get("status") == status]
             return {"runs": values}
+        if method == "GET" and path.startswith("/api/terminal/runs/by-session/") and path.endswith("/events"):
+            session_id = path.split("/")[5]
+            matches = [run for run in runs.values() if run.get("session_id") == session_id and run.get("status") == "running"]
+            if len(matches) != 1:
+                raise AssertionError(f"unexpected by-session event resolve for {session_id}")
+            run = matches[0]
+            cursor = int(query["cursor"]) if query and query.get("cursor") is not None else None
+            events = [event for event in events_by_run[run["run_id"]] if cursor is None or event["seq"] > cursor]
+            next_cursor = str(events[-1]["seq"]) if events else (str(cursor) if cursor is not None else None)
+            return {
+                "run": _summary(run),
+                "events": events,
+                "cursor": {"after": str(cursor) if cursor is not None else None, "next": next_cursor, "count": len(events)},
+            }
+        if method == "GET" and path.startswith("/api/terminal/runs/by-session/"):
+            session_id = path.rsplit("/", 1)[1]
+            matches = [run for run in runs.values() if run.get("session_id") == session_id and run.get("status") == "running"]
+            if len(matches) != 1:
+                raise AssertionError(f"unexpected by-session resolve for {session_id}")
+            return {"run": _summary(matches[0])}
+        if method == "POST" and path.startswith("/api/terminal/runs/by-session/") and path.endswith("/stop"):
+            session_id = path.split("/")[5]
+            matches = [run for run in runs.values() if run.get("session_id") == session_id and run.get("status") == "running"]
+            if len(matches) != 1:
+                raise AssertionError(f"unexpected by-session stop for {session_id}")
+            run = matches[0]
+            run["status"] = "stopped"
+            run["updated_at"] = "2026-07-09T00:00:01+00:00"
+            run["finished_at"] = "2026-07-09T00:00:01+00:00"
+            return {"run": _summary(run), "stopped": True}
         if method == "GET" and path.startswith("/api/terminal/runs/") and path.endswith("/events"):
             run_id = path.split("/")[4]
             cursor = int(query["cursor"]) if query and query.get("cursor") is not None else None
@@ -806,6 +836,124 @@ def test_run_attach_emits_chat_run_event_envelopes_as_jsonl(
     assert events[0]["session_id"] == "ses_chat"
     assert events[0]["run_id"] == run_id
     assert events[0]["payload"]["message"] == "hi"
+
+
+def test_chat_run_status_attach_stop_by_session_use_terminal_api(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    run_cli(["run", "start", "--kind", "chat", "--session-id", "ses_api_session", "--message", "hi", "--format=json"])
+
+    exit_code, stdout, stderr = run_cli(["run", "status", "--kind", "chat", "--session-id", "ses_api_session", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert json.loads(stdout)["data"]["run"]["session_id"] == "ses_api_session"
+
+    exit_code, stdout, stderr = run_cli(["run", "attach", "--kind", "chat", "--session-id", "ses_api_session", "--format=jsonl"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert [json.loads(line)["session_id"] for line in stdout.splitlines()] == ["ses_api_session"]
+
+    exit_code, stdout, stderr = run_cli(
+        ["run", "stop", "--kind", "chat", "--session-id", "ses_api_session", "--yes", "--format=json"]
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert json.loads(stdout)["data"]["run"]["status"] == "stopped"
+    assert [call[1] for call in terminal_api_fake["calls"][-3:]] == [
+        "/api/terminal/runs/by-session/ses_api_session",
+        "/api/terminal/runs/by-session/ses_api_session/events",
+        "/api/terminal/runs/by-session/ses_api_session/stop",
+    ]
+
+
+def test_local_chat_run_state_does_not_satisfy_chat_commands(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    local_state = {
+        "version": 1,
+        "runs": {
+            "run_api_shadow": {
+                "run_id": "run_api_shadow",
+                "session_id": "ses_local",
+                "kind": "chat",
+                "status": "running",
+                "started_at": "2026-07-09T00:00:00+00:00",
+                "updated_at": "2026-07-09T00:00:00+00:00",
+                "finished_at": None,
+            }
+        },
+        "events": {
+            "run_api_shadow": [
+                {
+                    "schema": "ody.event.v1",
+                    "id": "evt_local_1",
+                    "seq": 1,
+                    "time": "2026-07-09T00:00:00+00:00",
+                    "session_id": "ses_local",
+                    "run_id": "run_api_shadow",
+                    "source": "chat",
+                    "kind": "message.delta",
+                    "level": "info",
+                    "summary": "local",
+                    "payload": {"message": "local"},
+                    "raw": {"transport": "local", "type": "message.delta", "body": "local"},
+                }
+            ]
+        },
+    }
+    ody_term._save_run_state(local_state)
+    api_run = {
+        "run_id": "run_api_shadow",
+        "session_id": "ses_api",
+        "kind": "chat",
+        "status": "running",
+        "started_at": "2026-07-09T00:00:00+00:00",
+        "updated_at": "2026-07-09T00:00:00+00:00",
+        "finished_at": None,
+    }
+    terminal_api_fake["state"]["runs"]["run_api_shadow"] = api_run
+    terminal_api_fake["state"]["events"]["run_api_shadow"] = [
+        {
+            "schema": "ody.event.v1",
+            "id": "evt_api_1",
+            "seq": 1,
+            "time": "2026-07-09T00:00:00+00:00",
+            "session_id": "ses_api",
+            "run_id": "run_api_shadow",
+            "source": "chat",
+            "kind": "message.delta",
+            "level": "info",
+            "summary": "api",
+            "payload": {"message": "api"},
+            "raw": {"transport": "sse", "type": "message.delta", "body": "api"},
+        }
+    ]
+
+    exit_code, stdout, stderr = run_cli(["run", "status", "run_api_shadow", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert json.loads(stdout)["data"]["run"]["session_id"] == "ses_api"
+    assert terminal_api_fake["calls"][-1][0:2] == ("GET", "/api/terminal/runs/run_api_shadow")
+
+    exit_code, stdout, stderr = run_cli(["run", "attach", "run_api_shadow", "--format=jsonl"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert [json.loads(line)["session_id"] for line in stdout.splitlines()] == ["ses_api"]
+    assert terminal_api_fake["calls"][-1][0:2] == ("GET", "/api/terminal/runs/run_api_shadow/events")
+
+    exit_code, stdout, stderr = run_cli(["run", "stop", "run_api_shadow", "--yes", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert json.loads(stdout)["data"]["run"]["status"] == "stopped"
+    assert terminal_api_fake["calls"][-1][0:2] == ("POST", "/api/terminal/runs/run_api_shadow/stop")
 
 
 def test_run_attach_cursor_continues_after_last_seen_event(
