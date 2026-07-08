@@ -54,14 +54,18 @@ function _slotChar(i) { return state._parallel ? String.fromCharCode(65 + i) : S
 
 function init(apiBase) {
   state.API_BASE = apiBase;
-  // Clean up unsaved compare sessions on page close/refresh
+  // Preserve unsaved compare sessions on page close/refresh so dev reloads and
+  // browser refreshes do not destroy work. Explicit compare close still owns
+  // deletion through deactivate(true).
   window.addEventListener('beforeunload', () => {
     if (!state._saveOnClose && state._paneSessionIds.length > 0) {
-      // sendBeacon uses POST — use the bulk delete endpoint
-      navigator.sendBeacon(
-        `${state.API_BASE}/api/sessions/bulk-delete`,
-        new Blob([JSON.stringify({ ids: state._paneSessionIds })], { type: 'application/json' })
-      );
+      try {
+        sessionStorage.setItem('odysseus-compare-recovery', JSON.stringify({
+          ids: state._paneSessionIds,
+          at: Date.now(),
+          mode: state._compareMode,
+        }));
+      } catch (_) {}
     }
   });
 }

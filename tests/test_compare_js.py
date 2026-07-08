@@ -179,3 +179,20 @@ def test_storage_keys_are_namespaced(node_available):
     out = _run_node(script)
     assert out["votes"].startswith("odysseus-")
     assert out["pool"].startswith("odysseus-")
+
+
+def test_beforeunload_preserves_unsaved_compare_sessions():
+    """Page refresh/dev reload must not delete unsaved compare panes.
+
+    Explicit compare close still tears down throwaway pane sessions, but
+    beforeunload is not reliable enough for destructive cleanup: Ctrl-C,
+    browser refresh, and dev reload can strand the client midway through
+    teardown. Pin that unload now records recovery metadata instead of sending
+    the bulk-delete request.
+    """
+    source = (_REPO / "static/js/compare/index.js").read_text(encoding="utf-8")
+    unload_block = source.split("window.addEventListener('beforeunload'", 1)[1].split("});", 1)[0]
+
+    assert "sessionStorage.setItem('odysseus-compare-recovery'" in unload_block
+    assert "/api/sessions/bulk-delete" not in unload_block
+    assert "navigator.sendBeacon" not in unload_block
