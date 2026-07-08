@@ -11,10 +11,12 @@ import hashlib
 import json
 import os
 import re
+import signal
 import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -25,6 +27,7 @@ from src.runtime_paths import get_app_root
 
 TRUE_VALUES = {"1", "true", "yes", "on", "y"}
 OUTPUT_LIMIT = 16000
+CLIENT_TTL_SECONDS = 15.0
 
 FRONTEND_WATCH = (
     "static/index.html",
@@ -76,6 +79,9 @@ IGNORE_DIRS = {
     "venv",
 }
 
+_CLIENTS: Dict[str, float] = {}
+_CLIENT_LOCK = threading.Lock()
+
 
 def _env_true(name: str) -> bool:
     return (os.getenv(name) or "").strip().lower() in TRUE_VALUES
@@ -85,7 +91,16 @@ def dev_launch_requested() -> bool:
     return _env_true("ODYSSEUS_DEV_MODE")
 
 
+def _configured_reload_mode() -> str:
+    return (os.getenv("ODYSSEUS_RELOAD_MODE") or os.getenv("ODYSSEUS_DEV_RELOAD_MODE") or "").strip().lower()
+
+
 def dev_reload_requested() -> bool:
+    mode = _configured_reload_mode()
+    if mode in {"interactive", "manual", "prompt"}:
+        return False
+    if mode == "auto":
+        return dev_launch_requested() and not is_frozen()
     return (
         dev_launch_requested()
         and not is_frozen()
@@ -95,6 +110,37 @@ def dev_reload_requested() -> bool:
 
 def dev_reload_active() -> bool:
     return _env_true("ODYSSEUS_RELOAD_ACTIVE")
+
+
+def dev_reload_mode() -> str:
+    if dev_reload_active() or dev_reload_requested():
+        return "auto"
+    if dev_launch_requested():
+        return "interactive"
+    return "off"
+
+
+def mark_client_seen(client_id: Optional[str]) -> None:
+    value = (client_id or "").strip()[:96]
+    if not value or not re.fullmatch(r"[A-Za-z0-9_.:-]+", value):
+        return
+    now = time.time()
+    with _CLIENT_LOCK:
+        _CLIENTS[value] = now
+        _prune_clients(now)
+
+
+def _prune_clients(now: Optional[float] = None) -> None:
+    cutoff = (now if now is not None else time.time()) - CLIENT_TTL_SECONDS
+    for key, seen_at in list(_CLIENTS.items()):
+        if seen_at < cutoff:
+            _CLIENTS.pop(key, None)
+
+
+def active_client_count() -> int:
+    with _CLIENT_LOCK:
+        _prune_clients()
+        return len(_CLIENTS)
 
 
 def is_frozen() -> bool:
@@ -292,6 +338,9 @@ def repo_status(root: Optional[str] = None) -> Dict[str, Any]:
         "dirty_files": dirty_files[:200],
         "reload_requested": dev_reload_requested(),
         "reload_active": dev_reload_active(),
+        "reload_mode": dev_reload_mode(),
+        "manual_reload_supported": not dev_reload_active(),
+        "client_count": active_client_count(),
         "repo": repo,
         "remotes": remotes,
     }
@@ -376,6 +425,94 @@ def revision(root: Optional[str] = None) -> Dict[str, Any]:
         "server_count": server["count"],
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "reload_active": dev_reload_active(),
+        "reload_mode": dev_reload_mode(),
+        "manual_reload_supported": not dev_reload_active(),
+        "client_count": active_client_count(),
+    }
+
+
+def _server_reload_argv() -> List[str]:
+    host = os.getenv("APP_BIND", "127.0.0.1")
+    port = os.getenv("APP_PORT", "7000")
+    return [sys.executable, "-m", "uvicorn", "app:app", "--host", host, "--port", str(port)]
+
+
+def _restart_helper_code() -> str:
+    return (
+        "import json, os, subprocess, sys, time\n"
+        "pid = int(sys.argv[1])\n"
+        "cwd = sys.argv[2]\n"
+        "delay = float(sys.argv[3])\n"
+        "argv = json.loads(os.environ.pop('ODYSSEUS_RESTART_ARGV_JSON'))\n"
+        "deadline = time.time() + 45\n"
+        "time.sleep(delay)\n"
+        "while time.time() < deadline:\n"
+        "    try:\n"
+        "        os.kill(pid, 0)\n"
+        "    except OSError:\n"
+        "        break\n"
+        "    time.sleep(0.1)\n"
+        "else:\n"
+        "    sys.exit(2)\n"
+        "os.chdir(cwd)\n"
+        "child_env = os.environ.copy()\n"
+        "subprocess.Popen(argv, cwd=cwd, env=child_env)\n"
+    )
+
+
+def _spawn_restart_helper(app_root: str, argv: List[str], env: Dict[str, str], delay_s: float) -> subprocess.Popen:
+    helper_env = env.copy()
+    helper_env["ODYSSEUS_RESTART_ARGV_JSON"] = json.dumps(argv)
+    return subprocess.Popen(
+        [sys.executable, "-c", _restart_helper_code(), str(os.getpid()), app_root, str(delay_s)],
+        cwd=app_root,
+        env=helper_env,
+    )
+
+
+def _request_graceful_exit() -> None:
+    sig = getattr(signal, "SIGTERM", signal.SIGINT)
+    if os.name == "nt":
+        signal.raise_signal(sig)
+    else:
+        os.kill(os.getpid(), sig)
+
+
+def request_server_reload(root: Optional[str] = None, *, delay_s: float = 0.35) -> Dict[str, Any]:
+    app_root = os.path.realpath(root or source_root())
+    status = repo_status(app_root)
+    if not status.get("enabled"):
+        return {"ok": False, "error": status.get("reason") or "Developer mode is disabled"}
+    if dev_reload_active():
+        return {
+            "ok": False,
+            "error": "Manual server restart is disabled while an external reload supervisor is active.",
+            "mode": dev_reload_mode(),
+        }
+
+    argv = _server_reload_argv()
+    env = os.environ.copy()
+    env["ODYSSEUS_DEV_MODE"] = "1"
+    env["ODYSSEUS_RELOAD_MODE"] = "interactive"
+    env.pop("ODYSSEUS_RELOAD", None)
+    env.pop("ODYSSEUS_DEV_RELOAD", None)
+    env.pop("ODYSSEUS_RELOAD_ACTIVE", None)
+
+    def _restart() -> None:
+        try:
+            _spawn_restart_helper(app_root, argv, env, delay_s)
+        except Exception:
+            return
+        time.sleep(max(0.05, min(delay_s, 2.0)))
+        _request_graceful_exit()
+
+    threading.Thread(target=_restart, name="odysseus-dev-reload", daemon=True).start()
+    return {
+        "ok": True,
+        "scheduled": True,
+        "delay_s": delay_s,
+        "command": shlex.join(argv),
+        "mode": "interactive",
     }
 
 

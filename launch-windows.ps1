@@ -15,7 +15,8 @@
 #>
 param(
     [int]$Port = 7000,
-    [string]$BindHost = "127.0.0.1"
+    [string]$BindHost = "127.0.0.1",
+    [switch]$Reload
 )
 
 $ErrorActionPreference = "Stop"
@@ -205,4 +206,11 @@ $env:APP_BIND = $BindHost
 Write-Step ("Starting Odysseus at http://{0}:{1}" -f $BindHost, $Port)
 Write-Host "Press Ctrl+C to stop."
 Write-Host ""
-& $venvPy -m uvicorn app:app --host $BindHost --port $Port
+if ($Reload) {
+    $env:ODYSSEUS_DEV_MODE = "1"
+    $env:ODYSSEUS_RELOAD = "1"
+    $env:ODYSSEUS_RELOAD_ACTIVE = "1"
+    & $venvPy -m uvicorn app:app --host $BindHost --port $Port --reload --reload-dir $PSScriptRoot
+} else {
+    & $venvPy -m uvicorn app:app --host $BindHost --port $Port
+}

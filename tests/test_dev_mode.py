@@ -1,9 +1,12 @@
 import os
 import subprocess
+from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from src import dev_mode
+from routes import dev_routes
 
 
 def _git(root, *args):
@@ -40,6 +43,141 @@ def test_repo_status_enables_for_matching_git_root(monkeypatch, tmp_path):
     assert status["enabled"] is True
     assert status["root"] == os.path.realpath(tmp_path)
     assert status["git_root"] == os.path.realpath(tmp_path)
+    assert status["reload_mode"] == "interactive"
+
+
+def test_interactive_reload_mode_disables_uvicorn_reload(monkeypatch, tmp_path):
+    _init_repo(tmp_path)
+    monkeypatch.setenv("ODYSSEUS_DEV_MODE", "1")
+    monkeypatch.setenv("ODYSSEUS_RELOAD_MODE", "interactive")
+    monkeypatch.setenv("ODYSSEUS_RELOAD", "1")
+    monkeypatch.delenv("ODYSSEUS_RELOAD_ACTIVE", raising=False)
+    monkeypatch.setattr(dev_mode, "get_app_root", lambda: str(tmp_path))
+
+    assert dev_mode.dev_reload_requested() is False
+    assert dev_mode.dev_reload_mode() == "interactive"
+    assert dev_mode.uvicorn_reload_config() == {}
+
+
+def test_auto_reload_mode_enables_uvicorn_reload(monkeypatch, tmp_path):
+    _init_repo(tmp_path)
+    monkeypatch.setenv("ODYSSEUS_DEV_MODE", "1")
+    monkeypatch.setenv("ODYSSEUS_RELOAD_MODE", "auto")
+    monkeypatch.delenv("ODYSSEUS_RELOAD_ACTIVE", raising=False)
+    monkeypatch.setattr(dev_mode, "get_app_root", lambda: str(tmp_path))
+
+    config = dev_mode.uvicorn_reload_config()
+
+    assert config["reload"] is True
+    assert os.environ["ODYSSEUS_RELOAD_ACTIVE"] == "1"
+
+
+def test_dev_mode_tracks_active_clients():
+    with dev_mode._CLIENT_LOCK:
+        dev_mode._CLIENTS.clear()
+
+    dev_mode.mark_client_seen("pytest-client")
+    dev_mode.mark_client_seen("../bad")
+
+    assert dev_mode.active_client_count() == 1
+
+
+def test_request_server_reload_schedules_interactive_exec(monkeypatch, tmp_path):
+    _init_repo(tmp_path)
+    monkeypatch.setenv("ODYSSEUS_DEV_MODE", "1")
+    monkeypatch.setenv("APP_BIND", "127.0.0.1")
+    monkeypatch.setenv("APP_PORT", "7999")
+    monkeypatch.delenv("ODYSSEUS_RELOAD_ACTIVE", raising=False)
+    monkeypatch.setattr(dev_mode, "get_app_root", lambda: str(tmp_path))
+
+    started = {}
+
+    class FakeThread:
+        def __init__(self, *, target, name, daemon):
+            started["target"] = target
+            started["name"] = name
+            started["daemon"] = daemon
+
+        def start(self):
+            started["called"] = True
+
+    monkeypatch.setattr(dev_mode.threading, "Thread", FakeThread)
+
+    result = dev_mode.request_server_reload(str(tmp_path), delay_s=0)
+
+    assert result["ok"] is True
+    assert result["mode"] == "interactive"
+    assert "uvicorn app:app" in result["command"]
+    assert callable(started["target"])
+    assert started["name"] == "odysseus-dev-reload"
+    assert started["daemon"] is True
+    assert started["called"] is True
+
+
+def test_request_server_reload_rejects_external_reload_supervisor(monkeypatch, tmp_path):
+    _init_repo(tmp_path)
+    monkeypatch.setenv("ODYSSEUS_DEV_MODE", "1")
+    monkeypatch.setenv("ODYSSEUS_RELOAD_ACTIVE", "1")
+    monkeypatch.setattr(dev_mode, "get_app_root", lambda: str(tmp_path))
+
+    result = dev_mode.request_server_reload(str(tmp_path), delay_s=0)
+
+    assert result["ok"] is False
+    assert "external reload supervisor" in result["error"]
+
+
+def test_dev_server_reload_requires_action_header(monkeypatch, tmp_path):
+    _init_repo(tmp_path)
+    monkeypatch.setattr(dev_routes, "require_admin", lambda request: None)
+    monkeypatch.setattr(
+        dev_routes.dev_mode,
+        "repo_status",
+        lambda root=None: {"enabled": True, "root": str(tmp_path)},
+    )
+    router = dev_routes.setup_dev_routes()
+    endpoint = next(r.endpoint for r in router.routes if getattr(r, "path", "") == "/api/dev/server/reload")
+    request = SimpleNamespace(
+        headers={"host": "localhost:7000"},
+        url=SimpleNamespace(scheme="http"),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        import asyncio
+        asyncio.run(endpoint(request))
+
+    assert exc.value.status_code == 403
+
+
+def test_dev_server_reload_accepts_same_origin_action(monkeypatch, tmp_path):
+    _init_repo(tmp_path)
+    called = {}
+    monkeypatch.setattr(dev_routes, "require_admin", lambda request: None)
+    monkeypatch.setattr(
+        dev_routes.dev_mode,
+        "repo_status",
+        lambda root=None: {"enabled": True, "root": str(tmp_path)},
+    )
+    def fake_reload(root):
+        called["root"] = root
+        return {"ok": True}
+
+    monkeypatch.setattr(dev_routes.dev_mode, "request_server_reload", fake_reload)
+    router = dev_routes.setup_dev_routes()
+    endpoint = next(r.endpoint for r in router.routes if getattr(r, "path", "") == "/api/dev/server/reload")
+    request = SimpleNamespace(
+        headers={
+            "host": "localhost:7000",
+            "origin": "http://localhost:7000",
+            "X-Odysseus-Dev-Action": "server-reload",
+        },
+        url=SimpleNamespace(scheme="http"),
+    )
+
+    import asyncio
+    result = asyncio.run(endpoint(request))
+
+    assert result == {"ok": True}
+    assert called["root"] == str(tmp_path)
 
 
 def test_revision_token_changes_when_watched_file_changes(tmp_path):

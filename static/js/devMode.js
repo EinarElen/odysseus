@@ -11,6 +11,19 @@ const SHUT_KEY = 'odysseus-dev-hot-reload-shutup';
 const SNOOZE_KEY = 'odysseus-dev-hot-reload-snooze-until';
 const POLL_MS = 1400;
 const SNOOZE_MS = 2 * 60 * 1000;
+const CLIENT_ID = (() => {
+  try {
+    const key = 'odysseus-dev-client-id';
+    let id = sessionStorage.getItem(key);
+    if (!id) {
+      id = globalThis.crypto?.randomUUID?.() || `dev-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+      sessionStorage.setItem(key, id);
+    }
+    return id;
+  } catch (_) {
+    return `dev-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  }
+})();
 
 let state = {
   status: null,
@@ -30,8 +43,8 @@ function esc(value) {
 async function api(path, options = {}) {
   const res = await fetch(`${API_BASE}${path}`, {
     credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
     ...options,
+    headers: { 'Content-Type': 'application/json', 'X-Odysseus-Dev-Client': CLIENT_ID, ...(options.headers || {}) },
   });
   const text = await res.text();
   let data = {};
@@ -117,6 +130,7 @@ function ensurePanel() {
       <div class="dev-mode-actions">
         <button type="button" class="theme-io-btn" id="dev-use-workspace">${icon('<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>')}Use repo workspace</button>
         <button type="button" class="theme-io-btn" id="dev-refresh">${icon('<path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/><path d="M3 12a9 9 0 0 1 15.74-6.26L21 8"/><path d="M16 8h5V3"/>')}Refresh</button>
+        <button type="button" class="theme-io-btn" id="dev-server-reload">${icon('<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>')}Restart server</button>
         <label class="dev-mode-toggle"><input type="checkbox" id="dev-hot-toggle"> Hot reload emulation</label>
       </div>
       <div id="dev-hot-note" class="dev-mode-muted"></div>
@@ -178,20 +192,27 @@ function renderStatus(status) {
   if (!badges || !body) return;
   badges.innerHTML = `
     <span class="dev-mode-pill ${status.enabled ? 'ok' : 'warn'}">${status.enabled ? 'Enabled' : 'Disabled'}</span>
-    <span class="dev-mode-pill ${status.reload_active ? 'ok' : 'warn'}">${status.reload_active ? 'Server reload active' : 'Server reload off'}</span>
+    <span class="dev-mode-pill ${status.reload_active ? 'ok' : 'warn'}">${status.reload_active ? 'Auto server reload' : 'Manual server reload'}</span>
   `;
   body.innerHTML = `
     <span>Root</span><code title="${esc(status.root)}">${esc(status.root)}</code>
     <span>Branch</span><code>${esc(status.branch || 'unknown')}</code>
     <span>Commit</span><code>${esc(status.commit || 'none')}</code>
     <span>Dirty</span><code>${esc(status.dirty_count ?? 0)} files</code>
+    <span>Clients</span><code>${esc(status.client_count ?? 0)} active</code>
     <span>Remote</span><code>${esc(status.repo || 'none')}</code>
     <span>Reason</span><code>${esc(status.reason || '')}</code>
   `;
   if (note) {
-    note.textContent = status.reload_active
-      ? 'Server reload is launch-time enabled. The UI watcher will reload this tab after source changes.'
-      : 'UI hot reload emulation can refresh this tab. Restart with ODYSSEUS_RELOAD=1 for server reload.';
+    note.textContent = status.reload_active || status.manual_reload_supported === false
+      ? 'Auto server reload is enabled. Save a server file to let the external reload supervisor restart Odysseus.'
+      : 'Dev launches use interactive reload by default. Frontend changes prompt here; Python/server changes wait for Restart server.';
+  }
+  const reloadBtn = document.getElementById('dev-server-reload');
+  if (reloadBtn) {
+    const supported = status.manual_reload_supported !== false;
+    reloadBtn.disabled = !supported;
+    reloadBtn.title = supported ? 'Restart the server after Python/server changes' : 'Manual restart is disabled while auto reload is active';
   }
 }
 
@@ -260,9 +281,9 @@ function classifyRevisionChange(prev, next) {
       title: 'Full app change detected',
       detail: next.reload_active
         ? 'Server reload is active. This tab will reconnect after restart.'
-        : 'Server reload is off. Restart the backend to run updated Python.',
-      primary: 'Reload now',
-      autoMs: next.reload_active ? 5000 : 0,
+        : 'Restart the server to run updated Python, then this tab will reconnect.',
+      primary: next.reload_active ? 'Reload tab' : 'Restart server',
+      autoMs: 0,
     };
   }
   if (codeChanged) {
@@ -271,7 +292,7 @@ function classifyRevisionChange(prev, next) {
       title: 'Frontend-only change detected',
       detail: 'Reload this tab to load updated UI code.',
       primary: 'Reload now',
-      autoMs: 3500,
+      autoMs: 0,
     };
   }
   if (cssChanged) {
@@ -280,7 +301,7 @@ function classifyRevisionChange(prev, next) {
       title: 'Frontend style change detected',
       detail: 'Apply CSS without reloading the page.',
       primary: 'Apply CSS',
-      autoMs: 2500,
+      autoMs: 0,
     };
   }
   return null;
@@ -298,14 +319,60 @@ function handleRevisionChange(change, next) {
   showReloadToast(change, next);
 }
 
-function applyRevisionChange(change, next) {
-  dismissReloadToast();
-  state.revision = next;
+function reloadBlockers() {
+  const reasons = [];
+  try {
+    if (window.__odysseusChatBusy) reasons.push('active chat stream');
+    const submit = document.getElementById('submit') || document.querySelector('.send-btn');
+    if (submit?.dataset?.mode === 'streaming') reasons.push('active chat stream');
+    if (window.compareModule?.isActive?.()) reasons.push('compare mode');
+    const message = document.getElementById('message');
+    if (message?.value?.trim()) reasons.push('unsent message');
+    if (document.querySelector('[aria-busy="true"], [data-busy="1"], .ge-btn-busy-label')) reasons.push('active operation');
+  } catch (_) {}
+  return [...new Set(reasons)];
+}
+
+async function confirmReloadIfBusy(actionText) {
+  const reasons = reloadBlockers();
+  if (!reasons.length) return true;
+  const msg = `Reload now? Active work may be interrupted: ${reasons.join(', ')}.`;
+  if (typeof window.styledConfirm === 'function') {
+    return !!(await window.styledConfirm(msg, { confirmText: actionText || 'Reload anyway', danger: true }));
+  }
+  return window.confirm(msg);
+}
+
+async function applyRevisionChange(change, next) {
   if (change.kind === 'css') {
+    dismissReloadToast();
+    state.revision = next;
     refreshStylesheets(next.css_token);
     return;
   }
+  if (!(await confirmReloadIfBusy(change.primary || 'Reload anyway'))) return;
+  dismissReloadToast();
+  if (change.kind === 'full' && !next.reload_active) {
+    await requestServerReload(next, { skipBusyCheck: true });
+    return;
+  }
+  state.revision = next;
   window.location.reload();
+}
+
+async function requestServerReload(next = null, options = {}) {
+  if (!options.skipBusyCheck && !(await confirmReloadIfBusy('Restart anyway'))) return;
+  try {
+    await api('/api/dev/server/reload', {
+      method: 'POST',
+      headers: { 'X-Odysseus-Dev-Action': 'server-reload' },
+      body: JSON.stringify({}),
+    });
+    if (next) state.revision = next;
+    showReconnectToast();
+  } catch (err) {
+    uiModule?.showToast?.(`Server restart failed: ${err.message}`, 7000, 'error');
+  }
 }
 
 function dismissReloadToast() {
@@ -395,7 +462,7 @@ function showReloadToast(change, next) {
   primary.addEventListener('click', (event) => {
     event.preventDefault();
     event.stopPropagation();
-    applyRevisionChange(change, next);
+    void applyRevisionChange(change, next);
   });
   const snooze = document.createElement('button');
   snooze.type = 'button';
@@ -561,6 +628,14 @@ function bindActions() {
     uiModule?.showToast?.('Workspace set to Odysseus checkout');
   });
   document.getElementById('dev-refresh')?.addEventListener('click', refreshAll);
+  document.getElementById('dev-server-reload')?.addEventListener('click', () => {
+    if (state.status?.manual_reload_supported === false) {
+      uiModule?.showToast?.('Manual restart is disabled while auto reload is active', 5000, 'error');
+      return;
+    }
+    dismissReloadToast();
+    void requestServerReload(state.revision);
+  });
   document.getElementById('dev-hot-toggle')?.addEventListener('change', event => setHotReload(!!event.target.checked));
   document.getElementById('dev-load-introspection')?.addEventListener('click', loadIntrospection);
   document.getElementById('dev-refresh-github')?.addEventListener('click', () => refreshGithub(true));

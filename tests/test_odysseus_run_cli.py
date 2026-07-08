@@ -11,6 +11,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNNER = REPO_ROOT / "scripts" / "odysseus-run"
 DISPATCHER = REPO_ROOT / "scripts" / "odysseus"
 PYPROJECT = REPO_ROOT / "pyproject.toml"
+SRC = REPO_ROOT / "src"
+
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 
 def run_runner(*args: str) -> subprocess.CompletedProcess[str]:
@@ -61,16 +65,35 @@ def test_launch_select_lists_methods_without_running() -> None:
     assert "Select with: uv run ody launch select" in result.stdout
 
 
-def test_launch_select_uv_dev_dry_run_uses_reload_environment() -> None:
+def test_launch_select_uv_dev_dry_run_defaults_to_interactive_reload() -> None:
     result = run_runner("launch", "select", "--method", "uv-dev", "--dry-run")
 
     assert result.returncode == 0
     assert "Selected launch method: uv-dev" in result.stdout
     assert "ODYSSEUS_DEV_MODE=1" in result.stdout
-    assert "ODYSSEUS_RELOAD_ACTIVE=1" in result.stdout
+    assert "ODYSSEUS_RELOAD_MODE=interactive" in result.stdout
+    assert "ODYSSEUS_RELOAD_ACTIVE=1" not in result.stdout
     assert "uv run --with-requirements requirements.txt" in result.stdout
     assert "python -m uvicorn app:app" in result.stdout
+    assert "--reload" not in result.stdout
+
+
+def test_launch_dev_auto_reload_is_explicit() -> None:
+    result = run_runner("launch", "dev", "--auto-reload", "--dry-run")
+
+    assert result.returncode == 0
+    assert "ODYSSEUS_DEV_MODE=1" in result.stdout
+    assert "ODYSSEUS_RELOAD_MODE=auto" in result.stdout
+    assert "ODYSSEUS_RELOAD_ACTIVE=1" in result.stdout
     assert "--reload" in result.stdout
+
+
+def test_launch_windows_reload_forwards_switch() -> None:
+    result = run_runner("launch", "windows", "--reload", "--dry-run")
+
+    assert result.returncode == 0
+    assert "launch-windows.ps1" in result.stdout
+    assert "-Reload" in result.stdout
 
 
 def test_launch_app_dry_run_uses_macos_safe_default_port(monkeypatch) -> None:

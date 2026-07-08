@@ -299,15 +299,17 @@ CATALOG: tuple[CatalogEntry, ...] = (
     CatalogEntry(
         name="launch dev",
         category="launch",
-        summary="Run the app with Odysseus developer-mode environment and reload.",
+        summary="Run the app with Odysseus developer-mode environment and interactive reload prompts.",
         details=(
-            "Starts uvicorn through uv, enables ODYSSEUS_DEV_MODE, and enables "
-            "uvicorn reload by default. This is for hacking on the user's current "
-            "bespoke checkout, not only upstream contribution workflows."
+            "Starts uvicorn through uv, enables ODYSSEUS_DEV_MODE, and leaves "
+            "server reload under user control through the browser toast and "
+            "Developer settings panel. This is for hacking on the user's current "
+            "bespoke checkout, not only upstream contribution workflows. Use "
+            "--auto-reload only when you explicitly want uvicorn's file watcher."
         ),
         examples=(
             "scripts/odysseus run launch dev",
-            "scripts/odysseus run launch dev --no-reload",
+            "scripts/odysseus run launch dev --auto-reload",
             "scripts/odysseus run launch dev --python 3.13 --dry-run",
         ),
         common=True,
@@ -527,7 +529,7 @@ TOPICS = {
         predictable local workflow.
 
         launch app starts uvicorn normally through uv run.
-        launch dev enables ODYSSEUS_DEV_MODE and reload by default.
+        launch dev enables ODYSSEUS_DEV_MODE and interactive reload prompts.
         launch launcher runs launcher.py through uv.
         launch macos and launch windows wrap existing native launchers.
         launch docker, launch docker-dev, and GPU variants wrap Compose files.
@@ -539,7 +541,8 @@ TOPICS = {
 
         Useful examples:
           uv run ody launch app --port 7000
-          uv run ody launch dev --no-reload
+          uv run ody launch dev
+          uv run ody launch dev --auto-reload
           uv run ody launch dev --python 3.13 --dry-run
     """,
     "check": """\
@@ -994,7 +997,9 @@ def plan_launch_app(args: argparse.Namespace, *, dev: bool) -> CommandPlan:
     if dev:
         env["ODYSSEUS_DEV_MODE"] = "1"
         env["ODYSSEUS_DEV_LAUNCH"] = "1"
-        if not args.no_reload:
+        env["ODYSSEUS_RELOAD_MODE"] = "interactive"
+        if getattr(args, "auto_reload", False) and not getattr(args, "no_reload", False):
+            env["ODYSSEUS_RELOAD_MODE"] = "auto"
             env["ODYSSEUS_RELOAD"] = "1"
             env["ODYSSEUS_RELOAD_ACTIVE"] = "1"
             argv.extend(["--reload", "--reload-dir", str(REPO_ROOT)])
@@ -1082,6 +1087,8 @@ def plan_launch_windows(args: argparse.Namespace) -> CommandPlan:
         argv.extend(["-Port", str(args.port)])
     if getattr(args, "host", ""):
         argv.extend(["-BindHost", args.host])
+    if getattr(args, "reload", False):
+        argv.append("-Reload")
     return CommandPlan("Launch native Windows script", tuple(argv))
 
 
@@ -1122,6 +1129,7 @@ def launch_candidates(args: argparse.Namespace) -> list[LaunchCandidate]:
         port=getattr(args, "port", None),
         reload=getattr(args, "reload", False),
         no_reload=getattr(args, "no_reload", False),
+        auto_reload=getattr(args, "auto_reload", False) or getattr(args, "reload", False),
         env_file=getattr(args, "env_file", ""),
         no_env_file=getattr(args, "no_env_file", False),
     )
@@ -1143,7 +1151,7 @@ def launch_candidates(args: argparse.Namespace) -> list[LaunchCandidate]:
     return [
         LaunchCandidate(
             "uv-dev",
-            "uv run + developer-mode environment + reload",
+            "uv run + developer-mode environment + interactive reload prompts",
             uv_ready and git_ready,
             "uv and git checkout present" if uv_ready and git_ready else "requires uv, requirements.txt, and .git",
             plan_launch_app(uv_args, dev=True),
@@ -1452,9 +1460,14 @@ def add_launch_options(parser: argparse.ArgumentParser, *, dev: bool) -> None:
     )
     if dev:
         parser.add_argument(
+            "--auto-reload",
+            action="store_true",
+            help="Opt into uvicorn file watching. Default dev launches are interactive/manual.",
+        )
+        parser.add_argument(
             "--no-reload",
             action="store_true",
-            help="Disable uvicorn reload while keeping developer-mode environment enabled.",
+            help="Keep server reload manual. This is the default for developer-mode launches.",
         )
     else:
         parser.add_argument(
@@ -1495,9 +1508,14 @@ def add_select_launch_options(parser: argparse.ArgumentParser) -> None:
         help="Do not pass .env to uv-backed methods even if it exists.",
     )
     parser.add_argument(
+        "--auto-reload",
+        action="store_true",
+        help="Opt into uvicorn file watching for uv-dev. Default dev selection is interactive/manual.",
+    )
+    parser.add_argument(
         "--reload",
         action="store_true",
-        help="Request reload where the selected method supports it.",
+        help="Request auto reload where the selected method supports it.",
     )
     parser.add_argument(
         "--no-reload",
