@@ -682,6 +682,27 @@ def test_auth_capabilities_reports_token_facts_without_trusting_local_policy(
     assert capabilities["service:kill"]["admin_only"] is True
 
 
+def test_auth_capabilities_uses_stored_token_scope_metadata(isolated_term_state: None) -> None:
+    run_cli(["auth", "login", "--token", "ody_test_secret", "--format=json"])
+    secrets = ody_term._load_secrets()
+    tokens = secrets["tokens"]
+    assert isinstance(tokens, dict)
+    entry = tokens["file:default"]
+    assert isinstance(entry, dict)
+    entry["scopes"] = ["event:read", "run:read", "run:start"]
+    ody_term._save_secrets(secrets)
+
+    exit_code, stdout, stderr = run_cli(["auth", "capabilities", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    data = json.loads(stdout)["data"]
+    assert data["auth_facts"]["token_scopes"] == ["event:read", "run:read", "run:start"]
+    assert data["capabilities"]["run:start"]["allowed"] is True
+    assert data["capabilities"]["event:read"]["allowed"] is True
+    assert data["capabilities"]["run:stop"]["allowed"] is False
+
+
 def test_auth_logout_removes_stored_token(isolated_term_state: None) -> None:
     run_cli(["auth", "login", "--token", "ody_test_secret", "--format=json"])
 
@@ -868,6 +889,37 @@ def test_chat_run_status_attach_stop_by_session_use_terminal_api(
         "/api/terminal/runs/by-session/ses_api_session/events",
         "/api/terminal/runs/by-session/ses_api_session/stop",
     ]
+
+
+def test_chat_run_stop_reports_api_not_stopped(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+
+    def fake_terminal_api_request(request, method, path, *, query=None, body=None):
+        assert method == "POST"
+        assert path == "/api/terminal/runs/run_api_busy/stop"
+        return {
+            "stopped": False,
+            "run": {
+                "run_id": "run_api_busy",
+                "session_id": "ses_api_busy",
+                "kind": "chat",
+                "status": "running",
+            },
+        }
+
+    monkeypatch.setattr(ody_term, "_terminal_api_request", fake_terminal_api_request)
+
+    exit_code, stdout, stderr = run_cli(["run", "stop", "run_api_busy", "--yes", "--format=json"])
+
+    assert exit_code == 1
+    assert stderr == ""
+    payload = json.loads(stdout)
+    assert payload["ok"] is False
+    assert payload["message"] == "Run run_api_busy was not stopped"
+    assert payload["data"]["stopped"] is False
+    assert payload["data"]["run"]["status"] == "running"
 
 
 def test_local_chat_run_state_does_not_satisfy_chat_commands(

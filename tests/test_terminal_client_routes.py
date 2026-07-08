@@ -297,6 +297,38 @@ def test_terminal_client_chat_run_by_session_stop(monkeypatch):
     assert stopped.json()["run"]["session_id"] == "ses-real"
 
 
+def test_terminal_client_chat_run_stop_waits_for_terminal_status(monkeypatch):
+    terminal_client_runs.reset_for_tests()
+    agent_runs.reset_for_tests()
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    manager = FakeSessionManager()
+    statuses = iter(["running", "running", "stopped", "stopped"])
+
+    async def fake_stream_llm_with_fallback(candidates, messages, **kwargs):
+        yield 'data: {"delta": "session"}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr("routes.terminal_client_routes.stream_llm_with_fallback", fake_stream_llm_with_fallback)
+    install_terminal_route_fakes(monkeypatch)
+    monkeypatch.setattr("src.terminal_client_runs.agent_runs.get_status", lambda session_id: next(statuses, "stopped"))
+    monkeypatch.setattr("src.terminal_client_runs.agent_runs.stop", lambda session_id: True)
+
+    app = FastAPI()
+    app.include_router(setup_terminal_client_routes(session_manager=manager, chat_handler=FakeChatHandler()))
+    client = TestClient(app)
+
+    run_id = client.post(
+        "/api/terminal/runs",
+        json={"kind": "chat", "session_id": "ses-real", "message": "hello"},
+    ).json()["run"]["run_id"]
+
+    stopped = client.post(f"/api/terminal/runs/{run_id}/stop")
+
+    assert stopped.status_code == 200
+    assert stopped.json()["stopped"] is True
+    assert stopped.json()["run"]["status"] == "stopped"
+
+
 def test_terminal_client_chat_run_by_session_reports_ambiguity(monkeypatch):
     terminal_client_runs.reset_for_tests()
     agent_runs.reset_for_tests()

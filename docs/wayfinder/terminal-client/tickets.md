@@ -221,18 +221,18 @@ cursor, and stop the Run through the same Run model.
 
 **Blocked by:** Add Wayfinder Implementation Evidence Gates.
 
-- [ ] Starting a chat Run creates or targets a real Odysseus Session and starts
+- [x] Starting a chat Run creates or targets a real Odysseus Session and starts
       real chat execution through a terminal-client API path.
-- [ ] The terminal-client API exposes distinct Run identity linked to Session
+- [x] The terminal-client API exposes distinct Run identity linked to Session
       identity, even if existing internals remain session-keyed during the
       compatibility phase.
-- [ ] `run list` and `run status` report real active/recent chat Runs with
+- [x] `run list` and `run status` report real active/recent chat Runs with
       status, timestamps, heartbeat/activity summary, and event availability.
-- [ ] `run attach` emits one normalized `ody.event.v1` Event Envelope per real
+- [x] `run attach` emits one normalized `ody.event.v1` Event Envelope per real
       stream event in JSONL mode and returns cursor metadata in JSON mode.
-- [ ] `run stop` stops real execution through bounded server-side behavior and
+- [x] `run stop` stops real execution through bounded server-side behavior and
       does not mutate only client-local JSON state.
-- [ ] Tests fail if the command reports successful chat Run behavior without
+- [x] Tests fail if the command reports successful chat Run behavior without
       using the real terminal-client API path.
 
 Implementation note: a first terminal-client API seam now exists at
@@ -273,6 +273,21 @@ is reset. Reloaded active Run metadata is marked interrupted when no detached
 execution or persisted detached-run status exists. The ticket remains open only
 for live configured-backend verification against a real model/backend outside
 the patched test stream.
+
+2026-07-09 live verification: with the backend running on
+`http://127.0.0.1:7860`, a scoped API token, the configured ChatGPT
+Subscription endpoint `https://chatgpt.com/backend-api/codex/responses`, and
+model `gpt-5.4-mini`, `ody-term run start --kind chat` created
+`run_704b9dc7c0a7486b` linked to durable Session `ses_16f1dce291444318`.
+`run attach` emitted seven real `ody.event.v1` envelopes from the live stream,
+including message deltas, metrics, `message_saved`, and `[DONE]`; the assistant
+reply was `ody-term live ok`. `run status` reported `done`, `event_count: 7`,
+and event availability. `run attach --cursor 4 --format=json` returned three
+events with cursor `{after: "4", next: "7"}`. `run list --kind chat` reported
+the real recent Run with heartbeat/activity metadata. A second live Run
+`run_20ccaae46c3f4bbf` was stopped through `ody-term run stop --yes`; follow-up
+status reported `stopped` with a server-side `finished_at`. This closes the
+ticket.
 
 ## Promote Event Inspection To Real Odysseus Activity
 

@@ -473,6 +473,7 @@ def _resolved_auth() -> dict[str, object]:
         token_ref = _selected_token_ref()
         entry = _secret_token_entry(token_ref)
         token_present = bool(entry.get("token"))
+        scopes = _parse_scopes(entry.get("scopes")) if token_present else []
         storage_mode = "keychain" if entry.get("storage_mode") == "keychain" else "file-fallback"
         storage = {
             "mode": storage_mode,
@@ -1355,11 +1356,12 @@ def _run_stop(request: CommandRequest) -> CommandResponse:
     if _chat_run_uses_api(kind, run_id):
         payload = _terminal_api_request(request, "POST", _chat_run_api_path(run_id, session_id, "/stop"))
         run = cast(dict[str, object], payload.get("run", {}))
+        stopped = bool(payload.get("stopped"))
         return CommandResponse(
-            ok=True,
+            ok=stopped,
             command=["run", "stop"],
-            message=f"Stopped Run {run.get('run_id', run_id)}",
-            data={"run": run, "confirmation": confirmation},
+            message=f"Stopped Run {run.get('run_id', run_id)}" if stopped else f"Run {run.get('run_id', run_id)} was not stopped",
+            data={"run": run, "stopped": stopped, "confirmation": confirmation},
         )
     state = _load_run_state()
     run = _resolve_run_reference(state, run_id=run_id, session_id=session_id)

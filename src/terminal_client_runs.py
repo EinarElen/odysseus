@@ -21,6 +21,8 @@ from src.constants import TERMINAL_CLIENT_RUNS_FILE
 
 
 RUN_ACTIVE_STATUSES = {"queued", "starting", "running", "waiting", "stopping"}
+STOP_STATUS_WAIT_ATTEMPTS = 20
+STOP_STATUS_POLL_INTERVAL_S = 0.05
 _TERMINAL_RUN_STORE = Path(TERMINAL_CLIENT_RUNS_FILE)
 logger = logging.getLogger(__name__)
 
@@ -346,7 +348,11 @@ async def stop_run(*, run_id: str | None = None, session_id: str | None = None) 
     run = resolve_run(run_id=run_id, session_id=session_id)
     stopped = agent_runs.stop(run.session_id)
     if stopped:
-        await asyncio.sleep(0)
+        for _ in range(STOP_STATUS_WAIT_ATTEMPTS):
+            await asyncio.sleep(STOP_STATUS_POLL_INTERVAL_S)
+            _sync_run_status(run)
+            if run.status not in RUN_ACTIVE_STATUSES:
+                break
     _sync_run_status(run)
     return {"run": run_summary(run), "stopped": stopped}
 
