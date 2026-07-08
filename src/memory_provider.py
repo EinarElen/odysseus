@@ -157,9 +157,7 @@ class NativeMemoryProvider(MemoryProvider):
         if metadata:
             entry["metadata"] = dict(metadata)
 
-        memories = self.memory_manager.load_all()
-        memories.append(entry)
-        self.memory_manager.save(memories)
+        self.memory_manager.append_entry_record(entry)
 
         if self._vector_available():
             self.memory_vector.add(entry["id"], entry["text"])
@@ -223,25 +221,12 @@ class NativeMemoryProvider(MemoryProvider):
         ]
 
     async def delete(self, memory_id: str, *, owner: Optional[str] = None) -> bool:
-        memories = self.memory_manager.load_all()
-        remaining = []
-        deleted_id = None
-
-        for entry in memories:
-            if entry.get("id") != memory_id:
-                remaining.append(entry)
-                continue
-            if owner is not None and entry.get("owner") != owner:
-                remaining.append(entry)
-                continue
-            deleted_id = entry.get("id")
-
-        if deleted_id is None:
+        deleted = self.memory_manager.delete_entry(memory_id, owner=owner)
+        if deleted is None:
             return False
 
-        self.memory_manager.save(remaining)
         if self._vector_available():
-            self.memory_vector.remove(deleted_id)
+            self.memory_vector.remove(deleted.get("id"))
         return True
 
     def _vector_available(self) -> bool:

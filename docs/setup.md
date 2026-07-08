@@ -51,6 +51,16 @@ downloads and serves. The app itself is lightweight; local model serving is the
 heavy part and depends on the model, runtime, GPU, and VRAM, so small hosts can
 connect to API or remote model servers instead. Use `--host 0.0.0.0` only when you intentionally want LAN/reverse-proxy access.
 
+For hacking on your current checkout, prefer the developer launcher:
+
+```bash
+uv run ody launch dev
+```
+
+That enables the Developer panel, interactive reload prompts, and manual server
+restart support. Use `uv run ody launch dev --auto-reload` only when you want
+uvicorn's file watcher to own server restarts.
+
 ### Apple Silicon
 Docker on macOS cannot use the Metal GPU. For GPU-accelerated Cookbook on an
 M-series Mac, run Odysseus natively:
@@ -353,7 +363,7 @@ venv + pip steps in the native install guides, no project changes are needed but
 ```bash
 uv venv venv --python 3.13
 uv pip install -r requirements.txt
-# then continue as usual: python setup.py, uvicorn, ...
+# then continue as usual, or use: uv run ody launch dev
 ```
 
 `requirements.txt` is intentionally unpinned, so two installs at different times can produce different package versions. If you want a reproducible environment (e.g. across your own machines, or to roll back after a bad upgrade), snapshot and restore exact versions with:
@@ -438,8 +448,9 @@ Key settings:
 | `ALLOWED_ORIGINS` | `http://localhost,http://127.0.0.1` | Comma-separated exact permitted origins for cross-origin browser/API clients. |
 | `SECURE_COOKIES` | `false` | Set true when serving Odysseus through HTTPS at a trusted proxy or private access gateway. |
 | `DATABASE_URL` | `sqlite:///./data/app.db` | Database connection string |
-| `CHROMADB_HOST` | `localhost` | ChromaDB host for vector memory. Docker overrides this to `chromadb`. |
-| `CHROMADB_PORT` | `8100` | ChromaDB port for manual host runs. Docker overrides this to `8000`. |
+| `CHROMADB_HOST` | `localhost` | ChromaDB host for vector memory. Native local runs autostart this when local; Docker overrides this to `chromadb`. |
+| `CHROMADB_PORT` | `8100` | ChromaDB port for native local runs. Docker overrides this to `8000`. |
+| `ODYSSEUS_CHROMADB_AUTOSTART` | `true` | Start a local ChromaDB server automatically for native local runs. |
 | `EMBEDDING_URL` | -- | OpenAI-compatible embeddings endpoint |
 | `ODYSSEUS_CHAT_UPLOAD_MAX_BYTES` | `10485760` | Chat/agent attachment cap in bytes. Raise for larger local PDFs or text documents. |
 | `ODYSSEUS_GALLERY_UPLOAD_MAX_BYTES` | `104857600` | Gallery image upload cap in bytes (100 MB). |

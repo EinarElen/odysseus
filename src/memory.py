@@ -5,6 +5,7 @@ import os
 import time
 import uuid
 import re
+import threading
 from typing import List, Dict, Tuple
 from datetime import datetime
 
@@ -35,6 +36,7 @@ def get_text_similarity(text1: str, text2: str) -> float:
 class MemoryManager:
     def __init__(self, data_dir: str):
         self.memory_file = os.path.join(data_dir, "memory.json")
+        self._lock = threading.RLock()
         self.ensure_file_exists()
         
     def extract_memory_from_chat(self, chat_history: List[Dict], session_id: str = None) -> List[Dict]:
@@ -112,19 +114,20 @@ class MemoryManager:
     
     def load_all(self) -> List[Dict]:
         """Load all memory entries from JSON file (unfiltered)."""
-        if not os.path.exists(self.memory_file):
+        with self._lock:
+            if not os.path.exists(self.memory_file):
+                return []
+
+            try:
+                with open(self.memory_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        return self._validate_entries(data)
+            except (json.JSONDecodeError, PermissionError) as e:
+                logger.error("Error loading memory.json: %s", e)
+                return self._migrate_from_legacy()
+
             return []
-
-        try:
-            with open(self.memory_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    return self._validate_entries(data)
-        except (json.JSONDecodeError, PermissionError) as e:
-            logger.error("Error loading memory.json: %s", e)
-            return self._migrate_from_legacy()
-
-        return []
 
     def load(self, owner: str = None) -> List[Dict]:
         """Load memory entries, optionally filtered by owner."""
@@ -135,17 +138,18 @@ class MemoryManager:
 
     def claim_ownerless(self, owner: str):
         """Assign all ownerless memory entries to the given owner."""
-        entries = self.load_all()
-        changed = False
-        claimed = 0
-        for entry in entries:
-            if not entry.get("owner"):
-                entry["owner"] = owner
-                changed = True
-                claimed += 1
-        if changed:
-            self.save(entries)
-            logger.info("Claimed %d ownerless memories for %s", claimed, owner)
+        with self._lock:
+            entries = self.load_all()
+            changed = False
+            claimed = 0
+            for entry in entries:
+                if not entry.get("owner"):
+                    entry["owner"] = owner
+                    changed = True
+                    claimed += 1
+            if changed:
+                self.save(entries)
+                logger.info("Claimed %d ownerless memories for %s", claimed, owner)
     
     def _validate_entries(self, entries: List[Dict]) -> List[Dict]:
         """Ensure all entries have required fields."""
@@ -195,22 +199,23 @@ class MemoryManager:
     
     def save(self, entries: List[Dict]):
         """Save memory entries to JSON file."""
-        # Validate entries before saving
-        for entry in entries:
-            if "id" not in entry:
-                entry["id"] = str(uuid.uuid4())
-            if "timestamp" not in entry:
-                entry["timestamp"] = int(time.time())
-            if "source" not in entry:
-                entry["source"] = "user"
-            if "category" not in entry:
-                entry["category"] = "fact"
-        
-        # Use atomic write
-        tmp_file = self.memory_file + ".tmp"
-        with open(tmp_file, "w", encoding="utf-8") as f:
-            json.dump(entries, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_file, self.memory_file)
+        with self._lock:
+            # Validate entries before saving
+            for entry in entries:
+                if "id" not in entry:
+                    entry["id"] = str(uuid.uuid4())
+                if "timestamp" not in entry:
+                    entry["timestamp"] = int(time.time())
+                if "source" not in entry:
+                    entry["source"] = "user"
+                if "category" not in entry:
+                    entry["category"] = "fact"
+            
+            # Use atomic write
+            tmp_file = self.memory_file + ".tmp"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(entries, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_file, self.memory_file)
     
     def add_entry(self, text: str, source: str = "user", category: str = "fact", owner: str = None) -> Dict:
         """Add a new memory entry."""
@@ -229,20 +234,114 @@ class MemoryManager:
             entry["owner"] = owner
         return entry
 
+    def append_entry_record(self, entry: Dict) -> Dict:
+        """Append a prepared memory entry under the manager lock."""
+        with self._lock:
+            entries = self.load_all()
+            entries.append(entry)
+            self.save(entries)
+            return dict(entry)
+
+    def append_if_unique(self, text: str, *, owner: str = None, source: str = "user", category: str = "fact") -> Dict | None:
+        with self._lock:
+            entries = self.load_all()
+            scoped = [e for e in entries if owner is None or e.get("owner") == owner]
+            if self.find_duplicates(text, scoped):
+                return None
+            entry = self.add_entry(text, source=source, category=category, owner=owner)
+            entries.append(entry)
+            self.save(entries)
+            return dict(entry)
+
+    def import_entries(self, incoming: List[Dict], *, owner: str = None) -> int:
+        with self._lock:
+            entries = self.load_all()
+            existing_texts = {
+                e.get("text", "").strip().lower()
+                for e in entries
+                if owner is None or e.get("owner") == owner
+            }
+            added = 0
+            for mem in incoming:
+                if not isinstance(mem, dict) or not mem.get("text"):
+                    continue
+                text_key = mem["text"].strip().lower()
+                if text_key in existing_texts:
+                    continue
+                if owner and not mem.get("owner"):
+                    mem["owner"] = owner
+                entries.append(mem)
+                existing_texts.add(text_key)
+                added += 1
+            if added:
+                self.save(entries)
+            return added
+
+    def update_entry(
+        self,
+        memory_id: str,
+        *,
+        owner: str = None,
+        match_prefix: bool = False,
+        text: str = None,
+        category: str = None,
+        pinned: bool = None,
+        touch: bool = True,
+    ) -> Dict | None:
+        with self._lock:
+            entries = self.load_all()
+            for entry in entries:
+                eid = str(entry.get("id", ""))
+                if eid == memory_id or (match_prefix and eid.startswith(memory_id)):
+                    if owner is not None and entry.get("owner") != owner:
+                        return None
+                    if text is not None:
+                        entry["text"] = text.strip()
+                    if category is not None:
+                        entry["category"] = category
+                    if pinned is not None:
+                        entry["pinned"] = pinned
+                    if touch and (text is not None or category is not None):
+                        entry["timestamp"] = int(time.time())
+                    self.save(entries)
+                    return dict(entry)
+        return None
+
+    def delete_entry(self, memory_id: str, *, owner: str = None, match_prefix: bool = False) -> Dict | None:
+        with self._lock:
+            entries = self.load_all()
+            deleted = None
+            kept = []
+            for entry in entries:
+                eid = str(entry.get("id", ""))
+                matches = eid == memory_id or (match_prefix and eid.startswith(memory_id))
+                if matches and deleted is None:
+                    if owner is not None and entry.get("owner") != owner:
+                        kept.append(entry)
+                        continue
+                    deleted = dict(entry)
+                    continue
+                kept.append(entry)
+            if deleted is None:
+                return None
+            self.save(kept)
+            return deleted
+
     def increment_uses(self, ids: List[str]) -> None:
         """Bump the uses counter for each memory id. Called after a memory has
         actually been injected into a chat's context (not just retrieved)."""
         if not ids:
             return
         id_set = set(ids)
-        entries = self.load_all()
-        changed = False
-        for e in entries:
-            if e.get("id") in id_set:
-                e["uses"] = int(e.get("uses", 0) or 0) + 1
-                changed = True
-        if changed:
-            self.save(entries)
+        with self._lock:
+            entries = self.load_all()
+            changed = False
+            for e in entries:
+                if e.get("id") in id_set:
+                    e["uses"] = int(e.get("uses", 0) or 0) + 1
+                    changed = True
+            if changed:
+                self.save(entries)
     
     def find_duplicates(self, text: str, entries: List[Dict] = None) -> List[Dict]:
         """Find duplicate memory entries based on text content."""

@@ -43,10 +43,32 @@ def test_port_open_true_for_listening_socket():
 def test_get_chroma_client_does_not_cache_when_unreachable(monkeypatch):
     pytest.importorskip("chromadb")
     cc.reset_client()
+    monkeypatch.setenv("ODYSSEUS_CHROMADB_AUTOSTART", "false")
     monkeypatch.setenv("CHROMADB_HOST", "127.0.0.1")
     monkeypatch.setenv("CHROMADB_PORT", str(_free_port()))
     with pytest.raises(RuntimeError):
         cc.get_chroma_client()
     # A failed connection must leave the singleton unset so a later call
     # (once ChromaDB is up) can succeed.
+    assert cc._client is None
+
+
+def test_get_chroma_client_autostarts_local_chromadb(monkeypatch):
+    pytest.importorskip("chromadb")
+    cc.reset_client()
+    port = _free_port()
+    monkeypatch.setenv("CHROMADB_HOST", "127.0.0.1")
+    monkeypatch.setenv("CHROMADB_PORT", str(port))
+    monkeypatch.setattr(cc, "_port_open", lambda host, port, timeout=None: False)
+    called = {}
+
+    def fake_start(host, port):
+        called["target"] = (host, port)
+        return False
+
+    monkeypatch.setattr(cc, "_start_local_chromadb", fake_start)
+    with pytest.raises(RuntimeError):
+        cc.get_chroma_client()
+
+    assert called["target"] == ("127.0.0.1", port)
     assert cc._client is None
