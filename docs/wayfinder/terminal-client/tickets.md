@@ -10,11 +10,11 @@ Work the **frontier**: any ticket whose blockers are all done. The two survey ti
 
 **Blocked by:** None — can start immediately.
 
-- [ ] Existing Odysseus CLI, launch, auth, config, streaming, harness, lifecycle, and test patterns are summarized.
-- [ ] Reusable internal seams and risky coupling points are identified.
-- [ ] Recommendations are specific enough to guide the command spine, profiles, auth, events, and server bootstrap tickets.
-- [ ] The survey explicitly rejects rabbit holes that are not relevant to `ody-term` v1.
-- [ ] The survey does not preserve old interfaces or avoid dependencies unless doing so materially improves the Terminal Client.
+- [x] Existing Odysseus CLI, launch, auth, config, streaming, harness, lifecycle, and test patterns are summarized.
+- [x] Reusable internal seams and risky coupling points are identified.
+- [x] Recommendations are specific enough to guide the command spine, profiles, auth, events, and server bootstrap tickets.
+- [x] The survey explicitly rejects rabbit holes that are not relevant to `ody-term` v1.
+- [x] The survey does not preserve old interfaces or avoid dependencies unless doing so materially improves the Terminal Client.
 
 ## Survey Relevant External Terminal Client Technologies
 
@@ -22,11 +22,11 @@ Work the **frontier**: any ticket whose blockers are all done. The two survey ti
 
 **Blocked by:** None — can start immediately.
 
-- [ ] Candidate CLI/TUI stacks are compared against Odysseus v1 needs: command grammar, JSON/JSONL output, streaming, mouse-capable TUI, packaging, and tests.
-- [ ] Secret storage and local config/runtime-state options are compared.
-- [ ] The recommendation accounts for `uv` integration without treating `uv` as a required implementation language choice.
-- [ ] Rejected options include short, concrete reasons.
-- [ ] The recommendation is allowed to choose a new dependency or break from legacy internal shapes when that is the simpler, better path.
+- [x] Candidate CLI/TUI stacks are compared against Odysseus v1 needs: command grammar, JSON/JSONL output, streaming, mouse-capable TUI, packaging, and tests.
+- [x] Secret storage and local config/runtime-state options are compared.
+- [x] The recommendation accounts for `uv` integration without treating `uv` as a required implementation language choice.
+- [x] Rejected options include short, concrete reasons.
+- [x] The recommendation is allowed to choose a new dependency or break from legacy internal shapes when that is the simpler, better path.
 
 ## Establish `ody-term` Command Spine And Output Contracts
 
@@ -34,11 +34,11 @@ Work the **frontier**: any ticket whose blockers are all done. The two survey ti
 
 **Blocked by:** Survey Odysseus Terminal-Relevant Technology; Survey Relevant External Terminal Client Technologies.
 
-- [ ] `ody-term` exposes the accepted top-level domains and help shape.
-- [ ] Global target, output, format, color, verbosity, quiet, and confirmation options are parsed consistently.
-- [ ] TTY and non-TTY defaults select the accepted human and clanker output profiles.
-- [ ] Human, grug, JSON, JSONL, raw, and debug output contracts have a testable baseline.
-- [ ] Aliases, if present, are discoverable metadata over canonical commands and do not change semantics.
+- [x] `ody-term` exposes the accepted top-level domains and help shape.
+- [x] Global target, output, format, color, verbosity, quiet, and confirmation options are parsed consistently.
+- [x] TTY and non-TTY defaults select the accepted human and clanker output profiles.
+- [x] Human, grug, JSON, JSONL, raw, and debug output contracts have a testable baseline.
+- [x] Aliases, if present, are discoverable metadata over canonical commands and do not change semantics.
 
 ## Add Terminal Client Profiles, Config, And Target Resolution
 
@@ -46,10 +46,10 @@ Work the **frontier**: any ticket whose blockers are all done. The two survey ti
 
 **Blocked by:** Establish `ody-term` Command Spine And Output Contracts.
 
-- [ ] Profiles store target configuration, output posture, repo hints, and credential references without storing mutable process facts.
-- [ ] Config commands operate only on Terminal Client config, not Odysseus application settings.
-- [ ] Target resolution follows the accepted precedence order and reports how the target was selected.
-- [ ] Human/TUI localhost fallback and non-interactive structured failure behavior are covered by tests.
+- [x] Profiles store target configuration, output posture, repo hints, and credential references without storing mutable process facts.
+- [x] Config commands operate only on Terminal Client config, not Odysseus application settings.
+- [x] Target resolution follows the accepted precedence order and reports how the target was selected.
+- [x] Human/TUI localhost fallback and non-interactive structured failure behavior are covered by tests.
 
 ## Implement Local Server Bootstrap Runtime State
 
@@ -57,11 +57,11 @@ Work the **frontier**: any ticket whose blockers are all done. The two survey ti
 
 **Blocked by:** Add Terminal Client Profiles, Config, And Target Resolution.
 
-- [ ] Local server commands can report status before authenticated API access exists.
-- [ ] Server start delegates to existing Odysseus launch behavior rather than introducing a second launch grammar.
-- [ ] Runtime state records enough ownership evidence to make stop and logs safe.
-- [ ] Ambiguous or stale process evidence fails with structured diagnostics instead of killing by broad process or port matching.
-- [ ] `--start` and `--ensure-server` behavior is covered at the command seam.
+- [x] Local server commands can report status before authenticated API access exists.
+- [x] Server start delegates to existing Odysseus launch behavior rather than introducing a second launch grammar.
+- [x] Runtime state records enough ownership evidence to make stop and logs safe.
+- [x] Ambiguous or stale process evidence fails with structured diagnostics instead of killing by broad process or port matching.
+- [x] `--start` and `--ensure-server` behavior is covered at the command seam.
 
 ## Add Terminal Client Auth And Capability Reporting
 

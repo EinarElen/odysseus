@@ -13,9 +13,10 @@ dependencies = []
 ody = "odysseus_run_cli:main"
 odysseus = "odysseus_run_cli:main"
 odysseus-run = "odysseus_run_cli:main"
+ody-term = "ody_term:main"
 
 [tool.hatch.build.targets.wheel]
-only-include = ["src/odysseus_run_cli.py"]
+only-include = ["src/odysseus_run_cli.py", "src/ody_term.py"]
 sources = ["src"]
 
 [tool.ruff]

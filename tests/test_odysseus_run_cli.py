@@ -171,7 +171,9 @@ def test_pyproject_exposes_uv_console_scripts() -> None:
     assert scripts["ody"] == "odysseus_run_cli:main"
     assert scripts["odysseus"] == "odysseus_run_cli:main"
     assert scripts["odysseus-run"] == "odysseus_run_cli:main"
+    assert scripts["ody-term"] == "ody_term:main"
     assert pyproject["build-system"]["build-backend"] == "hatchling.build"
     assert pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["only-include"] == [
-        "src/odysseus_run_cli.py"
+        "src/odysseus_run_cli.py",
+        "src/ody_term.py",
     ]
