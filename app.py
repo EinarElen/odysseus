@@ -1035,6 +1035,11 @@ async def _startup_event():
             _db.close()
     except Exception as e:
         logger.debug(f"Incognito purge skipped: {e}")
+    try:
+        from src import agent_runs
+        agent_runs.recover_stale_runs(session_manager)
+    except Exception as e:
+        logger.debug(f"Agent run recovery skipped: {e}")
     # Strong refs to fire-and-forget startup tasks. Without this, Python may
     # GC tasks created with `asyncio.create_task(...)` before they finish.
     _startup_tasks: list[asyncio.Task] = getattr(app.state, "_startup_tasks", [])
@@ -1263,6 +1268,17 @@ async def _shutdown_event():
             await upload_cleanup_task
         except asyncio.CancelledError:
             pass
+    # Stop app-owned fire-and-forget tasks before closing shared managers they
+    # may still be using.
+    startup_tasks = [
+        t for t in getattr(app.state, "_startup_tasks", [])
+        if isinstance(t, asyncio.Task) and not t.done()
+    ]
+    for task in startup_tasks:
+        task.cancel()
+    if startup_tasks:
+        await asyncio.gather(*startup_tasks, return_exceptions=True)
+    app.state._startup_tasks = []
     # Stop task scheduler (no-op if it never started under the gate)
     try:
         await task_scheduler.stop()

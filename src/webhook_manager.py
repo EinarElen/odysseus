@@ -367,7 +367,7 @@ class WebhookManager:
         except RuntimeError:
             # Called from a sync thread (e.g. sync FastAPI route in threadpool)
             if self._loop and self._loop.is_running():
-                asyncio.run_coroutine_threadsafe(self.fire(event, payload), self._loop)
+                self._loop.call_soon_threadsafe(self._spawn_tracked, self.fire(event, payload))
 
     async def fire(self, event: str, payload: dict):
         """Fire webhooks matching the given event."""
@@ -450,6 +450,18 @@ class WebhookManager:
 
     async def close(self):
         # Delivery clients are per-request and closed via their async context
-        # manager, so there is no long-lived client to tear down here. Kept for
-        # API compatibility with callers (e.g. app shutdown).
+        # manager. Still, shutdown should give tracked fire-and-forget deliveries
+        # a brief chance to finish instead of dropping them silently.
+        current = asyncio.current_task()
+        pending = [t for t in list(self._bg_tasks) if t is not current and not t.done()]
+        if not pending:
+            return None
+        done, still_pending = await asyncio.wait(pending, timeout=5)
+        if done:
+            await asyncio.gather(*done, return_exceptions=True)
+        for task in still_pending:
+            task.cancel()
+        if still_pending:
+            await asyncio.gather(*still_pending, return_exceptions=True)
+            logger.warning("Cancelled %d webhook delivery task(s) during shutdown", len(still_pending))
         return None

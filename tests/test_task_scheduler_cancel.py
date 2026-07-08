@@ -103,3 +103,40 @@ def test_stop_task_cleans_up_queued_handle_and_run(tmp_path, monkeypatch):
         assert run.finished_at >= run.started_at
     finally:
         db.close()
+
+
+def test_scheduler_stop_cancels_active_task_handle():
+    from src.task_scheduler import TaskScheduler
+
+    async def drive():
+        scheduler = TaskScheduler.__new__(TaskScheduler)
+        scheduler._running = True
+        scheduler._stopping = False
+        scheduler._task = None
+        scheduler._note_pings_task = None
+        scheduler._event_pings_task = None
+        scheduler._executing = {"task-a"}
+        scheduler._executing_lock = asyncio.Lock()
+        scheduler._task_handles = {}
+
+        cancelled = asyncio.Event()
+
+        async def work():
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        handle = asyncio.create_task(work())
+        scheduler._task_handles["task-a"] = handle
+        await asyncio.sleep(0)
+
+        await scheduler.stop()
+
+        assert cancelled.is_set()
+        assert handle.cancelled()
+        assert scheduler._task_handles == {}
+        assert scheduler._executing == set()
+
+    asyncio.run(drive())

@@ -17,9 +17,15 @@ close / navigation / refresh). It does NOT survive a server restart.
 import asyncio
 import json
 import logging
+import time
+from pathlib import Path
 from typing import AsyncGenerator, Dict, Optional
 
+from core.atomic_io import atomic_write_json
+from src.constants import DATA_DIR
+
 logger = logging.getLogger(__name__)
+_STORE = Path(DATA_DIR) / "agent_runs.json"
 
 
 class _Run:
@@ -40,6 +46,73 @@ _RUNS: Dict[str, _Run] = {}
 # replay the result. After this, the run is evicted to bound memory — without
 # it, every session that ever streamed kept its entire event log forever.
 _EVICT_GRACE_S = 180
+
+
+def _load_state() -> Dict[str, dict]:
+    try:
+        if _STORE.exists():
+            data = json.loads(_STORE.read_text(encoding="utf-8")) or {}
+            if isinstance(data, dict):
+                return {str(k): v for k, v in data.items() if isinstance(v, dict)}
+    except Exception:
+        logger.debug("[agent-run] state load failed", exc_info=True)
+    return {}
+
+
+def _save_state(state: Dict[str, dict]) -> None:
+    try:
+        _STORE.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(str(_STORE), state, indent=2)
+    except Exception:
+        logger.debug("[agent-run] state save failed", exc_info=True)
+
+
+def _set_persisted_status(session_id: str, status: str, **extra) -> None:
+    state = _load_state()
+    rec = state.get(session_id, {})
+    rec.update({"session_id": session_id, "status": status, **extra})
+    if status == "running" and "started_at" not in rec:
+        rec["started_at"] = time.time()
+    if status != "running":
+        rec["finished_at"] = time.time()
+    state[session_id] = rec
+    _save_state(state)
+
+
+def get_persisted_status(session_id: str) -> Optional[str]:
+    rec = _load_state().get(session_id)
+    return str(rec.get("status")) if rec else None
+
+
+def recover_stale_runs(session_manager) -> int:
+    """Mark persisted running runs interrupted after a server restart."""
+    state = _load_state()
+    changed = False
+    recovered = 0
+    for session_id, rec in list(state.items()):
+        if rec.get("status") != "running":
+            continue
+        rec["status"] = "interrupted"
+        rec["finished_at"] = time.time()
+        rec["recovered_at"] = time.time()
+        rec["reason"] = "Server restarted before this response completed."
+        changed = True
+        try:
+            from core.models import ChatMessage
+            session_manager.add_message(
+                session_id,
+                ChatMessage(
+                    "assistant",
+                    "[Interrupted: server restarted before this response completed.]",
+                    metadata={"interrupted": True, "reason": rec["reason"]},
+                ),
+            )
+            recovered += 1
+        except Exception:
+            logger.debug("[agent-run] stale run recovery skipped for %s", session_id, exc_info=True)
+    if changed:
+        _save_state(state)
+    return recovered
 
 
 def _publish(run: _Run, ev: str) -> None:
@@ -108,8 +181,10 @@ async def _drain(session_id: str, agen: AsyncGenerator[str, None],
             _publish(run, ev)
         if run.status == "running":
             run.status = "done"
+            _set_persisted_status(session_id, "done")
     except asyncio.CancelledError:
         run.status = "stopped"
+        _set_persisted_status(session_id, "stopped")
         # Let the wrapped generator's own CancelledError handler run (it saves
         # the partial response to the session).
         try:
@@ -119,6 +194,7 @@ async def _drain(session_id: str, agen: AsyncGenerator[str, None],
     except Exception as e:
         logger.error("[agent-run] %s failed: %s", session_id, e, exc_info=True)
         run.status = "error"
+        _set_persisted_status(session_id, "error", error=str(e)[:1000])
         _publish(
             run,
             "event: error\n"
@@ -151,6 +227,7 @@ def start(session_id: str, agen: AsyncGenerator[str, None]) -> _Run:
             prev.evict_task.cancel()
     run = _Run()
     _RUNS[session_id] = run
+    _set_persisted_status(session_id, "running", started_at=time.time())
     run.task = asyncio.create_task(_drain(session_id, agen, prev_task))
     return run
 

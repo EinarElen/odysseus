@@ -350,6 +350,7 @@ class TaskScheduler:
         self._run_semaphore = asyncio.Semaphore(1)
         self._concurrency_cap = 1
         self._task_handles = {}
+        self._stopping = False
 
     def _set_run_progress(self, run_id: str, message: str):
         """Persist short live progress text for Activity while a run is active."""
@@ -535,6 +536,7 @@ class TaskScheduler:
             logger.warning(f"Could not dedupe default-assistant rows on startup: {e}")
 
         self._running = True
+        self._stopping = False
         self._task = asyncio.create_task(self._loop())
         # Internal background scanner that isn't a user-facing "task" — pure
         # infra (no LLM), shouldn't clutter the Tasks UI, fires on its own
@@ -575,6 +577,7 @@ class TaskScheduler:
 
     async def stop(self):
         self._running = False
+        self._stopping = True
         if self._task:
             self._task.cancel()
             try:
@@ -587,6 +590,25 @@ class TaskScheduler:
                 t.cancel()
                 try: await t
                 except asyncio.CancelledError: pass
+        handles = [
+            (task_id, handle)
+            for task_id, handle in list(getattr(self, "_task_handles", {}).items())
+            if handle and not handle.done()
+        ]
+        for _task_id, handle in handles:
+            handle.cancel()
+        if handles:
+            done, pending = await asyncio.wait([handle for _, handle in handles], timeout=10)
+            for task_id, handle in handles:
+                if handle in pending:
+                    self._mark_run_aborted(task_id, message="Server shutdown timed out")
+                    logger.warning("Task %s did not stop within shutdown timeout", task_id)
+                if self._task_handles.get(task_id) is handle:
+                    self._task_handles.pop(task_id, None)
+            if done:
+                await asyncio.gather(*done, return_exceptions=True)
+        async with self._executing_lock:
+            self._executing.difference_update(task_id for task_id, _ in handles)
         logger.info("Task scheduler stopped")
 
     async def _note_pings_loop(self):
@@ -768,7 +790,8 @@ class TaskScheduler:
         except asyncio.CancelledError:
             # If cancellation happens while queued behind the semaphore,
             # _execute_task_locked never runs and cannot update the Activity row.
-            self._mark_run_aborted(task_id, run_id)
+            message = "Server shutting down" if getattr(self, "_stopping", False) else "Stopped by user"
+            self._mark_run_aborted(task_id, run_id, message=message)
             self._defer_immediately_due_task(task_id, delay=timedelta(minutes=15))
             raise
         finally:
@@ -948,6 +971,8 @@ class TaskScheduler:
                 msg = (
                     "Paused because Odysseus became active"
                     if foreground_cancel.get("hit")
+                    else "Server shutting down"
+                    if getattr(self, "_stopping", False)
                     else "Stopped by user"
                 )
                 logger.info("Task '%s' %s", task.name, msg)

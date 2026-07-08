@@ -130,21 +130,12 @@ def launch(command: str, session_id: str, cwd: Optional[str] = None,
         )
         argv = [os.environ.get("ComSpec", "cmd.exe"), "/c", str(script_path)]
 
-    proc = subprocess.Popen(
-        argv,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        cwd=cwd or None,
-        **detached_popen_kwargs(),  # detach from the request lifecycle (setsid / DETACHED_PROCESS)
-    )
-
     rec = {
         "id": job_id,
         "session_id": session_id,
         "command": command,
         "status": "running",       # running | done | failed
-        "pid": proc.pid,
+        "pid": None,
         "started_at": time.time(),
         "ended_at": None,
         "exit_code": None,
@@ -154,6 +145,31 @@ def launch(command: str, session_id: str, cwd: Optional[str] = None,
         "exit_path": str(exit_path),
     }
     jobs = _load()
+    jobs[job_id] = rec
+    _save(jobs)
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            cwd=cwd or None,
+            **detached_popen_kwargs(),  # detach from the request lifecycle (setsid / DETACHED_PROCESS)
+        )
+    except Exception as e:
+        jobs = _load()
+        rec = jobs.get(job_id, rec)
+        rec["status"] = "failed"
+        rec["exit_code"] = -1
+        rec["ended_at"] = time.time()
+        rec["launch_error"] = str(e)
+        jobs[job_id] = rec
+        _save(jobs)
+        return rec
+
+    jobs = _load()
+    rec = jobs.get(job_id, rec)
+    rec["pid"] = proc.pid
     jobs[job_id] = rec
     _save(jobs)
     return rec
@@ -207,6 +223,14 @@ def refresh() -> Dict[str, Dict[str, Any]]:
             rec["status"] = "done" if code == 0 else "failed"
             rec["ended_at"] = now
             changed = True
+        elif not rec.get("pid"):
+            if (now - rec.get("started_at", now)) > rec.get("max_runtime_s", DEFAULT_MAX_RUNTIME_S):
+                rec["status"] = "failed"
+                rec["exit_code"] = -1
+                rec["ended_at"] = now
+                rec["timed_out"] = True
+                rec["pid_missing"] = True
+                changed = True
         elif (now - rec.get("started_at", now)) > rec.get("max_runtime_s", DEFAULT_MAX_RUNTIME_S):
             # Runaway / stuck — reap it but STILL surface a follow-up.
             _kill(rec.get("pid"))
@@ -292,6 +316,8 @@ def result_text(rec: Dict[str, Any]) -> str:
         head = f"Background job timed out after {rec.get('max_runtime_s')}s."
     elif rec.get("died"):
         head = "Background job process died unexpectedly (no exit code)."
+    elif rec.get("launch_error"):
+        head = f"Background job failed to launch: {rec.get('launch_error')}"
     else:
         head = f"Background job finished with exit code {rec.get('exit_code')}."
     return f"{head}\nCommand: {rec.get('command')}\n\nOutput:\n{out or '(no output)'}"

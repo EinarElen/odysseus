@@ -57,3 +57,22 @@ def test_spawn_tracked_runs_the_coroutine():
         assert ran == [True]
 
     asyncio.run(run())
+
+
+def test_close_waits_for_tracked_delivery_task():
+    async def run():
+        wm = WebhookManager.__new__(WebhookManager)
+        wm._bg_tasks = set()
+        completed = []
+
+        async def work():
+            await asyncio.sleep(0.01)
+            completed.append(True)
+
+        wm._spawn_tracked(work())
+        await wm.close()
+
+        assert completed == [True]
+        assert wm._bg_tasks == set()
+
+    asyncio.run(run())
