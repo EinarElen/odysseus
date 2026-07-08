@@ -1,5 +1,6 @@
 # routes/model_routes.py
 """Routes for model and provider management."""
+import asyncio
 import os
 import re
 import uuid
@@ -32,6 +33,19 @@ from src.endpoint_resolver import (
 from src.auth_helpers import _auth_disabled, effective_user, owner_filter
 
 logger = logging.getLogger(__name__)
+
+
+async def _request_disconnected(request: Request) -> bool:
+    checker = getattr(request, "is_disconnected", None)
+    if checker is None:
+        return False
+    try:
+        result = checker()
+        if hasattr(result, "__await__"):
+            return bool(await result)
+        return bool(result)
+    except Exception:
+        return False
 
 _SPEECH_ENDPOINT_SETTINGS = (
     ("tts_provider", "tts_model", "tts-1", "Text to Speech"),
@@ -1722,16 +1736,20 @@ def setup_model_routes(model_discovery):
             db.close()
 
         if not ep_data:
-            def _empty():
+            async def _empty():
                 yield f"data: {json.dumps({'type': 'probe_done', 'total': 0, 'ok': 0})}\n\n"
             return StreamingResponse(_empty(), media_type="text/event-stream")
 
-        def _stream():
+        async def _stream():
             total = 0
             ok_count = 0
             for ep in ep_data:
+                if await _request_disconnected(request):
+                    return
                 base = _normalize_base(ep["base_url"])
-                all_models = _probe_endpoint(base, ep.get("api_key"))
+                all_models = await asyncio.to_thread(_probe_endpoint, base, ep.get("api_key"))
+                if await _request_disconnected(request):
+                    return
                 # Update cached_models in DB
                 if all_models:
                     db2 = SessionLocal()
@@ -1751,8 +1769,10 @@ def setup_model_routes(model_discovery):
                 yield f"data: {json.dumps({'type': 'probe_start', 'endpoint': ep['name'], 'model_count': len(models), 'skipped': skipped})}\n\n"
 
                 for model_id in models:
+                    if await _request_disconnected(request):
+                        return
                     total += 1
-                    result = _probe_single_model(base, ep.get("api_key"), model_id, timeout=8)
+                    result = await asyncio.to_thread(_probe_single_model, base, ep.get("api_key"), model_id, timeout=8)
                     result["type"] = "probe_result"
                     result["endpoint"] = ep["name"]
                     result["model"] = model_id
@@ -2116,16 +2136,23 @@ def setup_model_routes(model_discovery):
             db.close()
 
         base = _normalize_base(ep_data["base_url"])
-        all_models = _probe_endpoint(base, ep_data["api_key"])
-        chat_models = [m for m in all_models if _is_chat_model(m)]
-        skipped = len(all_models) - len(chat_models)
 
-        def _stream():
+        async def _stream():
+            yield f"data: {json.dumps({'type': 'probe_begin', 'endpoint': ep_data['name']})}\n\n"
+            if await _request_disconnected(request):
+                return
+            all_models = await asyncio.to_thread(_probe_endpoint, base, ep_data["api_key"])
+            if await _request_disconnected(request):
+                return
+            chat_models = [m for m in all_models if _is_chat_model(m)]
+            skipped = len(all_models) - len(chat_models)
             yield f"data: {json.dumps({'type': 'probe_start', 'endpoint': ep_data['name'], 'model_count': len(chat_models), 'skipped': skipped})}\n\n"
             failed = []
             ok_count = 0
             for mid in chat_models:
-                result = _probe_single_model(base, ep_data["api_key"], mid, timeout=8)
+                if await _request_disconnected(request):
+                    return
+                result = await asyncio.to_thread(_probe_single_model, base, ep_data["api_key"], mid, timeout=8)
                 result["model"] = mid
                 result["type"] = "probe_result"
                 result["endpoint"] = ep_data["name"]
@@ -2358,12 +2385,14 @@ def setup_model_routes(model_discovery):
                 provider_options = sanitize_provider_options(base, model, provider_options)
             except Exception:
                 provider_options = {}
-            return {
+            result = {
                 "endpoint_id": ep.id,
                 "endpoint_url": chat_url,
                 "model": model,
-                "provider_options": provider_options,
             }
+            if provider_options:
+                result["provider_options"] = provider_options
+            return result
         finally:
             db.close()
 

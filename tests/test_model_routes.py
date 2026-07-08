@@ -997,6 +997,49 @@ def test_reprobe_chatgpt_subscription_does_not_hide_models(monkeypatch):
     assert ep.hidden_models is None
 
 
+def test_model_probe_stops_before_expensive_work_when_disconnected(monkeypatch):
+    ep = _make_endpoint()
+    db = _PinnedFakeDb([ep])
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
+    called = []
+    monkeypatch.setattr(model_routes, "_probe_endpoint", lambda *a, **k: called.append(True) or ["m1"])
+    endpoint = _get_route("/api/probe", "GET")
+
+    class DisconnectedRequest(_PinnedFakeRequest):
+        async def is_disconnected(self):
+            return True
+
+    response = endpoint(DisconnectedRequest())
+
+    async def _drain():
+        async for _ in response.body_iterator:
+            pass
+
+    asyncio.run(_drain())
+
+    assert called == []
+
+
+def test_endpoint_probe_emits_before_model_list_probe(monkeypatch):
+    ep = _make_endpoint()
+    db = _PinnedFakeDb([ep])
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
+    monkeypatch.setattr(model_routes, "_probe_endpoint", lambda *a, **k: [])
+    endpoint = _get_route("/api/model-endpoints/{ep_id}/probe", "GET")
+
+    response = endpoint("ep1", _PinnedFakeRequest())
+
+    async def _first_chunk():
+        async for chunk in response.body_iterator:
+            return chunk.decode() if isinstance(chunk, bytes) else chunk
+
+    first = asyncio.run(_first_chunk())
+
+    assert '"type": "probe_begin"' in first
+
+
 def test_visible_models_handles_malformed_strings():
     # Non-JSON cached/pinned strings are treated as comma/newline lists and
     # never raise; a malformed hidden string is normalized too.
