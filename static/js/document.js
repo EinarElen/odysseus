@@ -29,6 +29,13 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   let _animationInProgress = false;
   let _animationCancel = null;      // function to cancel current animation
   let _htmlPreviewActive = false;   // true when inline HTML preview iframe is showing
+  let _typstPreviewActive = false;
+  let _typstSessionId = null;
+  let _typstRevision = 0;
+  let _typstSyncDebounce = null;
+  let _typstCompileDebounce = null;
+  let _typstEventSource = null;
+  let _typstLatestRenderedRevision = -1;
   let _emailAccountsCache = null;
   let _emailAccountsCacheAt = 0;
   let _emailHeaderManualExpandUntil = 0;
@@ -77,7 +84,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       'php', 'ruby', 'sql', 'java', 'go', 'rust',
       'c', 'cpp', 'c++', 'csharp', 'c#',
       'yaml', 'json', 'css',
-      'ini', 'toml',
+      'ini', 'toml', 'typst',
     ].includes(lang) || _isRenderLang(lang);
   };
 
@@ -2145,9 +2152,9 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         if (lang === 'csv') {
           icon = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>';
           title = 'Table view';
-        } else if (_isRenderLang(lang)) {
+        } else if (_isRenderLang(lang) || lang === 'typst') {
           icon = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
-          title = 'Preview';
+          title = lang === 'typst' ? 'Typst preview' : 'Preview';
         } else {
           icon = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
           title = 'Run';
@@ -2180,6 +2187,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       // for runnable langs = output panel open.
       let _viewActive = false;
       if (lang === 'csv') _viewActive = _csvActive;
+      else if (lang === 'typst') _viewActive = !!_typstPreviewActive;
       else if (_isRenderLang(lang)) _viewActive = _htmlActive;
       else _viewActive = _outputActive;
       const _codeBtn2 = renderToggle.querySelector('[data-renderview="code"]');
@@ -2200,6 +2208,12 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       actionBtn.innerHTML = _csvActive ? _penIco : '<span style="font-size:12px;font-weight:600;">⊞</span>';
       actionBtn.title = _csvActive ? 'Edit' : 'Table View';
       if (_csvActive) actionBtn.classList.add('active');
+    } else if (lang === 'typst') {
+      show = false;
+      if (renderToggle) {
+        renderToggle.querySelector('[data-renderview="code"]')?.classList.toggle('active', !_typstPreviewActive);
+        renderToggle.querySelector('[data-renderview="run"]')?.classList.toggle('active', !!_typstPreviewActive);
+      }
     } else if (_isRenderLang(lang)) {
       // SVG/HTML/XML use the segmented Code </> | Run ▶ light-switch toggle
       // (like markdown's edit/preview switch) instead of the single button.
@@ -4559,8 +4573,11 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       requestAnimationFrame(() => toggleCsvPreview());
     }
 
-    // Exit HTML preview on switch
+    // Exit HTML/Typst preview on switch
     exitHtmlPreview();
+    exitTypstPreview();
+    _typstSessionId = doc._typstSessionId || null;
+    _typstLatestRenderedRevision = -1;
 
     // Show/hide email fields. Markdown preview uses the same editor wrapper
     // as email source mode, so clear it before showing the rich email body;
@@ -4975,6 +4992,17 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       </div>
       <div id="doc-md-preview" class="doc-md-preview" style="display:none"></div>
       <div id="doc-csv-preview" class="doc-csv-preview" style="display:none"></div>
+      <div id="doc-typst-preview" class="doc-md-preview doc-typst-preview" style="display:none;overflow:auto;padding:18px;background:color-mix(in srgb,var(--bg) 94%,var(--fg) 6%);">
+        <div class="doc-typst-toolbar" style="display:flex;gap:8px;align-items:center;margin-bottom:10px;font-size:11px;opacity:.85;">
+          <span id="doc-typst-status">Typst preview</span>
+          <span style="flex:1"></span>
+          <label style="display:inline-flex;align-items:center;gap:4px;"><input id="doc-typst-auto" type="checkbox" checked> Auto</label>
+          <button type="button" id="doc-typst-refresh" class="doc-action-icon-btn" title="Refresh Typst preview">Refresh</button>
+          <button type="button" id="doc-typst-export-pdf" class="doc-action-icon-btn" title="Export Typst PDF">PDF</button>
+        </div>
+        <div id="doc-typst-diagnostics" style="display:none;margin-bottom:10px;padding:8px;border:1px solid color-mix(in srgb,var(--red,#e06c75) 50%,transparent);border-radius:8px;color:var(--red,#e06c75);white-space:pre-wrap;font:12px/1.4 monospace;"></div>
+        <div id="doc-typst-pages" style="display:flex;flex-direction:column;gap:16px;align-items:center;"></div>
+      </div>
       <iframe id="doc-html-preview" class="doc-html-preview" sandbox="allow-scripts allow-modals" style="display:none"></iframe>
       <div id="doc-pdf-view" style="display:none;width:100%;flex:1;min-height:0;overflow:auto;background:#525659;padding:20px 0;position:relative;">
         <div id="doc-pdf-save-pill" style="display:none;position:absolute;top:8px;right:14px;padding:4px 10px;border-radius:12px;font-size:11px;z-index:5;pointer-events:none;background:transparent;color:transparent;"></div>
@@ -5377,8 +5405,9 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         if (csvPreview) csvPreview.style.display = 'none';
         if (wrap2) wrap2.style.display = '';
       }
-      // If switching away from html, exit HTML preview
+      // If switching away from html/typst, exit those previews
       if (!_isRenderLang(lang)) exitHtmlPreview();
+      if (lang !== 'typst') exitTypstPreview();
       // Show/hide email fields
       if (lang === 'email') {
         const doc = activeDocId && docs.get(activeDocId);
@@ -5584,6 +5613,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       const lang = (document.getElementById('doc-language-select')?.value || '').toLowerCase();
       if (lang === 'markdown') toggleMarkdownPreview();
       else if (lang === 'csv') toggleCsvPreview();
+      else if (lang === 'typst') toggleTypstPreview();
       else if (_isRenderLang(lang)) toggleHtmlPreview();
       else {
         // Runnable language — toggle output
@@ -5621,6 +5651,9 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         const csv = document.getElementById('doc-csv-preview');
         const isOn = csv && csv.style.display !== 'none';
         if (wantRun !== isOn) toggleCsvPreview();
+      } else if (lang === 'typst') {
+        const isOn = !!_typstPreviewActive;
+        if (wantRun !== isOn) toggleTypstPreview();
       } else if (_isRenderLang(lang)) {
         const htmlPrev = document.getElementById('doc-html-preview');
         const isOn = htmlPrev && htmlPrev.style.display !== 'none';
@@ -5637,6 +5670,9 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       }
       _syncHeaderActions();
     });
+
+    document.getElementById('doc-typst-refresh')?.addEventListener('click', () => _syncAndCompileTypst({ force: true }));
+    document.getElementById('doc-typst-export-pdf')?.addEventListener('click', () => _exportTypstPdf());
 
     // Font size toggle (S → M → L)
     const fontBtn = document.getElementById('doc-fontsize-btn');
@@ -5779,6 +5815,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         _autoSaveDebounce = setTimeout(() => { saveDocument({ silent: true }); }, 2000);
         const doc = activeDocId && docs.get(activeDocId);
         if (doc && doc.language === 'email') _persistEmailLocalDraftSoon();
+        if (doc && doc.language === 'typst') _scheduleTypstPreviewCompile();
       });
       ta.addEventListener('paste', (e) => {
         if (_activeDocLanguage() !== 'markdown') return;
@@ -6842,6 +6879,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     }
     // Save current state
     saveCurrentToMap();
+    _closeTypstEvents();
 
     // A "down" close means minimize, not close. Register the chip and flip
     // the dock state to minimized so a chip appears at the bottom. Any
@@ -9346,7 +9384,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       markdown: '.md', json: '.json', yaml: '.yml', bash: '.sh',
       sql: '.sql', rust: '.rs', go: '.go', java: '.java', c: '.c', cpp: '.cpp', csharp: '.cs',
       typescript: '.ts', ruby: '.rb', php: '.php', text: '.txt',
-      xml: '.xml', toml: '.toml', ini: '.ini', csv: '.csv',
+      xml: '.xml', toml: '.toml', ini: '.ini', csv: '.csv', typst: '.typ',
     };
     const ext = extMap[lang] || '.txt';
     const safeName = title.replace(/[^a-zA-Z0-9_\-. ]/g, '_').trim() || 'document';
@@ -9470,7 +9508,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       markdown: '.md', json: '.json', yaml: '.yml', bash: '.sh',
       sql: '.sql', rust: '.rs', go: '.go', java: '.java', c: '.c', cpp: '.cpp', csharp: '.cs',
       typescript: '.ts', ruby: '.rb', php: '.php', text: '.txt',
-      xml: '.xml', toml: '.toml', ini: '.ini', csv: '.csv',
+      xml: '.xml', toml: '.toml', ini: '.ini', csv: '.csv', typst: '.typ',
     };
     const ext = extMap[lang] || '.txt';
 
@@ -9496,11 +9534,18 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     options.push({ label: 'Import from library', fn: () => openLibrary() });
     options.push({ label: 'Import from device', fn: () => _importFromDevice(), _divider: true });
     if (isForm) options.push({ label: 'Filled PDF (.pdf)', fn: _downloadFilledPdf });
-    options.push(
-      { label: 'Export Markdown', fn: exportDocument },
-      { label: 'Print as PDF', fn: exportAsPdf },
-      { label: 'Export as Word', fn: exportAsDocx },
-    );
+    if (lang === 'typst') {
+      options.push(
+        { label: 'Export Typst source (.typ)', fn: exportDocument },
+        { label: 'Export Typst PDF', fn: _exportTypstPdf },
+      );
+    } else {
+      options.push(
+        { label: 'Export Markdown', fn: exportDocument },
+        { label: 'Print as PDF', fn: exportAsPdf },
+        { label: 'Export as Word', fn: exportAsDocx },
+      );
+    }
 
     options.forEach(opt => {
       const item = document.createElement('button');
@@ -9721,6 +9766,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       if (markdownModule && markdownModule.renderMermaid) {
         markdownModule.renderMermaid(preview);
       }
+      exitTypstPreview();
       preview.style.display = '';
       wrap.style.display = 'none';
     } else {
@@ -9821,6 +9867,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         outputPanel.innerHTML = '<pre class="doc-run-error">No data — CSV is empty or unparseable.</pre>';
         return;
       } else {
+        exitTypstPreview();
         const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         const colCount = Math.max(...rows.map(r => r.length));
         let html = '<div class="csv-table-wrap"><table class="csv-table"><thead><tr>';
@@ -9903,7 +9950,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     if (!iframe || !wrap || !textarea) return;
 
     if (!_htmlPreviewActive) {
-      // Show preview — hide markdown preview if active
+      // Show preview — hide markdown/Typst preview if active
+      exitTypstPreview();
       const mdPreview = document.getElementById('doc-md-preview');
       if (mdPreview) mdPreview.style.display = 'none';
       const code = textarea.value || '';
@@ -9926,6 +9974,159 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     if (iframe) { iframe.style.display = 'none'; iframe.srcdoc = ''; }
     if (wrap) wrap.style.display = '';
     renderTabs();
+  }
+
+  function _setTypstStatus(text) {
+    const el = document.getElementById('doc-typst-status');
+    if (el) el.textContent = text;
+  }
+
+  function _renderTypstDiagnostics(diags) {
+    const box = document.getElementById('doc-typst-diagnostics');
+    if (!box) return;
+    const list = Array.isArray(diags) ? diags : [];
+    if (!list.length) { box.style.display = 'none'; box.textContent = ''; return; }
+    box.textContent = list.map(d => d.raw || d.message || String(d)).join('\n\n');
+    box.style.display = '';
+  }
+
+  async function _ensureTypstSession() {
+    const doc = activeDocId && docs.get(activeDocId);
+    const ta = document.getElementById('doc-editor-textarea');
+    if (!doc || !ta) throw new Error('No active Typst document');
+    if (_typstSessionId && doc._typstSessionId === _typstSessionId) return _typstSessionId;
+    _closeTypstEvents();
+    const res = await fetch(`${API_BASE}/api/typst/sessions`, {
+      method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ownerType: 'document', ownerId: activeDocId, source: ta.value || doc.content || '', backend: 'tinymist', autoRefresh: false }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.session?.id) throw new Error(data.detail || data.error || `HTTP ${res.status}`);
+    _typstSessionId = data.session.id;
+    doc._typstSessionId = _typstSessionId;
+    _typstRevision = data.session.sourceRevision || 0;
+    _openTypstEvents(_typstSessionId);
+    return _typstSessionId;
+  }
+
+  function _closeTypstEvents() {
+    if (_typstEventSource) { try { _typstEventSource.close(); } catch (_) {} _typstEventSource = null; }
+  }
+
+  function _openTypstEvents(sessionId) {
+    _closeTypstEvents();
+    if (!window.EventSource) return;
+    _typstEventSource = new EventSource(`${API_BASE}/api/typst/sessions/${sessionId}/events`);
+    _typstEventSource.addEventListener('compile-started', (e) => {
+      try { const d = JSON.parse(e.data || '{}'); _setTypstStatus(`Compiling r${d.revision}…`); } catch (_) { _setTypstStatus('Compiling…'); }
+    });
+    const onDone = (e) => { try { _applyTypstResult(JSON.parse(e.data || '{}')); } catch (_) {} };
+    _typstEventSource.addEventListener('compile-finished', onDone);
+    _typstEventSource.addEventListener('compile-error', onDone);
+  }
+
+  async function _syncAndCompileTypst({ force = false } = {}) {
+    const ta = document.getElementById('doc-editor-textarea');
+    if (!ta || !activeDocId || docs.get(activeDocId)?.language !== 'typst') return;
+    if (!_typstPreviewActive && !force) return;
+    try {
+      const sid = await _ensureTypstSession();
+      const revision = ++_typstRevision;
+      _setTypstStatus(`Syncing r${revision}…`);
+      const res = await fetch(`${API_BASE}/api/typst/sessions/${sid}/source`, {
+        method: 'PATCH', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: ta.value || '', revision, compile: true }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || data.error || `HTTP ${res.status}`);
+      if (data.compile) _applyTypstResult(data.compile);
+    } catch (err) {
+      console.error('Typst preview failed:', err);
+      _setTypstStatus('Typst preview failed');
+      _renderTypstDiagnostics([{ message: err.message || String(err) }]);
+    }
+  }
+
+  function _applyTypstResult(result) {
+    if (!result) return;
+    if (typeof result.revision === 'number' && result.revision < _typstLatestRenderedRevision) return;
+    _typstLatestRenderedRevision = result.revision || _typstLatestRenderedRevision;
+    _renderTypstDiagnostics(result.diagnostics || []);
+    if (!result.ok) { _setTypstStatus(`Compile failed r${result.revision ?? ''}`.trim()); return; }
+    const pages = document.getElementById('doc-typst-pages');
+    if (!pages) return;
+    pages.innerHTML = '';
+    (result.pages || []).forEach(p => {
+      const frame = document.createElement('div');
+      frame.className = 'doc-typst-page';
+      frame.style.cssText = 'background:white;color:black;box-shadow:0 8px 30px rgba(0,0,0,.25);max-width:100%;overflow:auto;';
+      const img = document.createElement('img');
+      img.alt = `Typst page ${p.page}`;
+      img.style.cssText = 'display:block;max-width:100%;height:auto;';
+      img.src = `${API_BASE}${p.svgUrl}?rev=${encodeURIComponent(result.revision || '')}&hash=${encodeURIComponent(p.hash || '')}`;
+      frame.appendChild(img);
+      pages.appendChild(frame);
+    });
+    _setTypstStatus(`Preview up to date r${result.revision} · ${result.durationMs || 0}ms · ${result.backend || 'typst'}`);
+  }
+
+  function _scheduleTypstPreviewCompile() {
+    const auto = document.getElementById('doc-typst-auto');
+    if (!_typstPreviewActive || (auto && !auto.checked)) return;
+    _setTypstStatus('Preview stale');
+    clearTimeout(_typstSyncDebounce);
+    clearTimeout(_typstCompileDebounce);
+    _typstSyncDebounce = setTimeout(() => {
+      _typstCompileDebounce = setTimeout(() => _syncAndCompileTypst(), 450);
+    }, 180);
+  }
+
+  function toggleTypstPreview() {
+    const preview = document.getElementById('doc-typst-preview');
+    const wrap = document.getElementById('doc-editor-wrap');
+    if (!preview || !wrap) return;
+    if (!_typstPreviewActive) {
+      document.getElementById('doc-md-preview')?.style && (document.getElementById('doc-md-preview').style.display = 'none');
+      document.getElementById('doc-csv-preview')?.style && (document.getElementById('doc-csv-preview').style.display = 'none');
+      exitHtmlPreview();
+      preview.style.display = '';
+      wrap.style.display = 'none';
+      _typstPreviewActive = true;
+      _syncAndCompileTypst({ force: true });
+    } else {
+      exitTypstPreview();
+    }
+    _syncHeaderActions();
+  }
+
+  function exitTypstPreview() {
+    const preview = document.getElementById('doc-typst-preview');
+    const wrap = document.getElementById('doc-editor-wrap');
+    _typstPreviewActive = false;
+    if (preview) preview.style.display = 'none';
+    if (wrap) wrap.style.display = '';
+    _syncHeaderActions();
+  }
+
+  async function _exportTypstPdf() {
+    try {
+      const sid = await _ensureTypstSession();
+      await _syncAndCompileTypst({ force: true });
+      const res = await fetch(`${API_BASE}/api/typst/sessions/${sid}/export`, {
+        method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ format: 'pdf' }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `${_slug(docs.get(activeDocId)?.title || 'typst-document')}.pdf`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    } catch (err) {
+      console.error('Typst PDF export failed:', err);
+      if (uiModule) uiModule.showError('Typst PDF export failed');
+    }
   }
 
   // ---- Streaming animation engine ----

@@ -2863,7 +2863,7 @@ function _collectFormDraft(form) {
     due_date: form.querySelector('.note-form-due')?.value || null,
     repeat: form.querySelector('.note-form-repeat')?.value || 'none',
   };
-  if (type === 'note') d.content = form.querySelector('.note-form-content')?.value || '';
+  if (type === 'note' || type === 'typst') d.content = form.querySelector('.note-form-content')?.value || '';
   else if (type === 'goal') { d.content = form.querySelector('.note-form-goal-desc')?.value || ''; d.items = _collectItems(form); }
   else d.items = _collectItems(form);
   return d;
@@ -2934,8 +2934,8 @@ function _buildForm(note = null) {
     </div>
     ${currentImageUrl && type !== 'draw' ? `<div class="note-form-image-wrap"><img class="note-form-image" src="${_esc(currentImageUrl)}" draggable="false" /><button class="note-form-image-rm" title="Remove">&times;</button></div>` : ''}
     <div class="note-form-body">
-      ${type === 'note'
-        ? `<textarea class="note-form-content" placeholder="Take a note..." rows="4">${_esc(note?.content || '')}</textarea>`
+      ${type === 'note' || type === 'typst'
+        ? `<textarea class="note-form-content" placeholder="${type === 'typst' ? 'Write Typst source...' : 'Take a note...'}" rows="4">${_esc(note?.content || '')}</textarea>`
         : type === 'draw'
         ? _buildDrawHtml()
         : type === 'goal'
@@ -2952,6 +2952,10 @@ function _buildForm(note = null) {
         <button type="button" class="note-form-type-pill${type === 'todo' ? ' active' : ''}" data-type="todo">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
           <span>Todo</span>
+        </button>
+        <button type="button" class="note-form-type-pill${type === 'typst' ? ' active' : ''}" data-type="typst">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19h16"/><path d="M6 5h12"/><path d="M9 5v14"/><path d="M15 5v14"/></svg>
+          <span>Typst</span>
         </button>
         <button type="button" class="note-form-type-pill${type === 'draw' ? ' active' : ''}" data-type="draw">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg>
@@ -2992,7 +2996,7 @@ function _buildForm(note = null) {
   // user's hand-formatted text instead of a join of generated items. Same the
   // other way: if you started in todo, switch to note, switch back, items
   // come back unchanged.
-  let _stashedNoteText = (type === 'note') ? (note?.content || '') : null;
+  let _stashedNoteText = (type === 'note' || type === 'typst') ? (note?.content || '') : null;
   let _stashedTodoItems = (type === 'todo' && Array.isArray(note?.items)) ? note.items.slice() : null;
   // Goal mode kept its own pair of stashes (description + steps) so a
   // Todo→Goal→Todo round-trip wouldn't lose either side. The Goal pill in
@@ -3023,7 +3027,7 @@ function _buildForm(note = null) {
       const bodyEl = form.querySelector('.note-form-body');
       // Stash whatever the user has in the current mode before swapping it
       // out, so a subsequent flip back restores their work.
-      if (currentType === 'note') {
+      if (currentType === 'note' || currentType === 'typst') {
         _stashedNoteText = form.querySelector('.note-form-content')?.value || '';
       } else if (currentType === 'todo') {
         _stashedTodoItems = _collectItems(form);
@@ -3062,10 +3066,10 @@ function _buildForm(note = null) {
           ? _stashedNoteText
           : (_stashedGoalDesc && _stashedGoalDesc)
           || (_stashedTodoItems || _stashedGoalItems || []).map(i => i.text).join('\n');
-        bodyEl.innerHTML = `<textarea class="note-form-content" placeholder="Take a note..." rows="4">${_esc(text)}</textarea>`;
+        bodyEl.innerHTML = `<textarea class="note-form-content" placeholder="${newType === 'typst' ? 'Write Typst source...' : 'Take a note...'}" rows="4">${_esc(text)}</textarea>`;
         _wireHashtag(bodyEl.querySelector('.note-form-content'));
       }
-      const focusEl = newType === 'note'
+      const focusEl = (newType === 'note' || newType === 'typst')
         ? bodyEl.querySelector('.note-form-content')
         : newType === 'todo'
           ? bodyEl.querySelector('.note-cl-text')
@@ -3639,7 +3643,7 @@ function _buildForm(note = null) {
       repeat: form.querySelector('.note-form-repeat')?.value || 'none',
       image_url: currentImageUrl || null,
     };
-    if (currentType === 'note') {
+    if (currentType === 'note' || currentType === 'typst') {
       payload.content = form.querySelector('.note-form-content')?.value || '';
     } else if (currentType === 'draw') {
       // Upload the canvas PNG before saving so image_url points to a
