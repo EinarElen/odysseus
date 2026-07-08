@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from typing import Optional, Set
 
 logger = logging.getLogger(__name__)
@@ -166,6 +167,8 @@ def plan_mode_disabled_tools() -> Set[str]:
     enabled. MCP tools are handled separately — the loop drops the MCP manager
     entirely in plan mode."""
     try:
+        if "src.agent_tools" in sys.modules and sys.modules.get("src.agent_tools") is None:
+            raise ImportError("src.agent_tools unavailable")
         from src.tools.registry import get_tool_registry
 
         all_names = set(get_tool_registry().names())

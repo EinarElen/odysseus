@@ -137,10 +137,11 @@ def _load_builtin_definitions() -> List[ToolDefinition]:
     definitions: List[ToolDefinition] = []
     seen: set[str] = set()
     try:
-        from src.agent_tools import FUNCTION_TOOL_SCHEMAS
+        from src.agent_tools import FUNCTION_TOOL_SCHEMAS, TOOL_TAGS
     except Exception as exc:
         logger.warning("Could not load built-in tool schemas: %s", exc)
         FUNCTION_TOOL_SCHEMAS = []
+        TOOL_TAGS = set()
     for schema in FUNCTION_TOOL_SCHEMAS:
         function = schema.get("function") if isinstance(schema, dict) else {}
         if not isinstance(function, dict):
@@ -154,6 +155,19 @@ def _load_builtin_definitions() -> List[ToolDefinition]:
                 name=name,
                 description=str(function.get("description") or ""),
                 parameters=function.get("parameters") if isinstance(function.get("parameters"), dict) else {},
+                execution_mode=_execution_mode_for(name),
+            )
+        )
+    for name in sorted(str(t) for t in TOOL_TAGS if str(t).strip()):
+        if name in seen:
+            continue
+        seen.add(name)
+        definitions.append(
+            ToolDefinition(
+                name=name,
+                description="Legacy-only Odysseus tool",
+                parameters={"type": "object", "properties": {}, "required": []},
+                exposure="legacy_only",
                 execution_mode=_execution_mode_for(name),
             )
         )
