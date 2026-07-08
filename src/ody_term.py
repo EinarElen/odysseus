@@ -15,7 +15,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TextIO, cast
+from typing import TextIO, TypedDict, cast
 
 try:
     from src.constants import ODY_TERM_SECRETS_FILE
@@ -69,7 +69,7 @@ COMMANDS: dict[str, tuple[str, ...]] = {
     "run": ("start", "list", "status", "attach", "stop"),
     "harness": ("list", "status", "attach", "stop"),
     "service": ("list", "status", "logs", "stop", "restart"),
-    "inspect": ("domains", "aliases", "contracts", "globals"),
+    "inspect": ("domains", "aliases", "contracts", "globals", "events"),
     "tui": (),
 }
 
@@ -113,6 +113,18 @@ class CommandResponse:
     message: str
     data: dict[str, object] = field(default_factory=dict)
     raw: object | None = None
+
+
+class EventFilters(TypedDict):
+    source: str | None
+    kind: str | None
+    level: str | None
+    session_id: str | None
+    run_id: str | None
+    harness_session_id: str | None
+    span_id: str | None
+    parent_id: str | None
+    tag: str | None
 
 
 def _usage() -> str:
@@ -202,6 +214,16 @@ def _parse_command_options(args: list[str]) -> tuple[dict[str, str | bool], list
         "--port",
         "--lines",
         "--token",
+        "--source",
+        "--kind",
+        "--level",
+        "--cursor",
+        "--session-id",
+        "--run-id",
+        "--harness-session-id",
+        "--span-id",
+        "--parent-id",
+        "--tag",
     }
     bool_flags = {"--default", "--dry-run", "--force"}
     while index < len(args):
@@ -610,6 +632,142 @@ def _tail_file(path: Path, lines: int) -> list[str]:
         return []
     text_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     return text_lines[-lines:]
+
+
+def _event_level_from_text(text: str) -> str:
+    lowered = text.lower()
+    if "error" in lowered or "exception" in lowered or "traceback" in lowered:
+        return "error"
+    if "warn" in lowered:
+        return "warn"
+    if "debug" in lowered:
+        return "debug"
+    if "trace" in lowered:
+        return "trace"
+    return "info"
+
+
+def _bounded_summary(text: str, limit: int = 160) -> str:
+    clean = " ".join(text.split())
+    if len(clean) <= limit:
+        return clean
+    return clean[: limit - 1] + "..."
+
+
+def _server_log_events(*, lines: int, cursor: int | None) -> dict[str, object]:
+    state = _server_state()
+    log_path = Path(str(state.get("log_path") or _server_log_path()))
+    raw_lines = _tail_file(log_path, max(lines, 0))
+    if log_path.exists():
+        with log_path.open("r", encoding="utf-8", errors="replace") as handle:
+            total_lines = sum(1 for _ in handle)
+        first_seq = max(1, total_lines - len(raw_lines) + 1)
+    else:
+        first_seq = 1
+    base_time = str(state.get("started_at") or _utc_now())
+    events: list[dict[str, object]] = []
+    for offset, line in enumerate(raw_lines):
+        seq = first_seq + offset
+        if cursor is not None and seq <= cursor:
+            continue
+        event: dict[str, object] = {
+            "schema": "ody.event.v1",
+            "id": f"evt_server_log_{seq}",
+            "seq": seq,
+            "time": base_time,
+            "source": "server",
+            "kind": "log",
+            "level": _event_level_from_text(line),
+            "summary": _bounded_summary(line),
+            "payload": {"message": line},
+            "raw": {
+                "transport": "log",
+                "type": "server.log",
+                "body": {"line": line},
+            },
+        }
+        events.append(event)
+    next_cursor = str(events[-1]["seq"]) if events else (str(cursor) if cursor is not None else None)
+    return {
+        "events": events,
+        "cursor": {"after": str(cursor) if cursor is not None else None, "next": next_cursor, "count": len(events)},
+        "source": {"type": "local-server-log", "path": str(log_path)},
+    }
+
+
+def _filter_events(
+    events: list[dict[str, object]],
+    *,
+    filters: EventFilters,
+) -> list[dict[str, object]]:
+    filtered = events
+    for key in ("source", "kind", "level", "session_id", "run_id", "harness_session_id", "span_id", "parent_id"):
+        value = filters[key]
+        if value:
+            filtered = [event for event in filtered if event.get(key) == value]
+    if filters["tag"]:
+        filtered = [
+            event
+            for event in filtered
+            if isinstance(event.get("tags"), list) and filters["tag"] in cast(list[object], event["tags"])
+        ]
+    return filtered
+
+
+def _inspect_events(request: CommandRequest) -> CommandResponse:
+    capability = "event:raw" if request.globals.format in {"raw", "debug"} else "event:read"
+    _require_capability(capability, request)
+    options, positionals = _parse_command_options(request.args)
+    if positionals:
+        raise CommandError("unexpected_inspect_args", f"unexpected inspect events args: {' '.join(positionals)}")
+    raw_lines = options.get("lines")
+    try:
+        lines = int(raw_lines) if isinstance(raw_lines, str) else 80
+    except ValueError as exc:
+        raise CommandError("invalid_lines", f"--lines must be an integer: {raw_lines}") from exc
+    raw_cursor = options.get("cursor")
+    try:
+        cursor = int(raw_cursor) if isinstance(raw_cursor, str) and raw_cursor else None
+    except ValueError as exc:
+        raise CommandError("invalid_cursor", f"--cursor must be an integer: {raw_cursor}") from exc
+    filters: EventFilters = {
+        "source": str(options["source"]) if isinstance(options.get("source"), str) else None,
+        "kind": str(options["kind"]) if isinstance(options.get("kind"), str) else None,
+        "level": str(options["level"]) if isinstance(options.get("level"), str) else None,
+        "session_id": str(options["session_id"]) if isinstance(options.get("session_id"), str) else None,
+        "run_id": str(options["run_id"]) if isinstance(options.get("run_id"), str) else None,
+        "harness_session_id": str(options["harness_session_id"])
+        if isinstance(options.get("harness_session_id"), str)
+        else None,
+        "span_id": str(options["span_id"]) if isinstance(options.get("span_id"), str) else None,
+        "parent_id": str(options["parent_id"]) if isinstance(options.get("parent_id"), str) else None,
+        "tag": str(options["tag"]) if isinstance(options.get("tag"), str) else None,
+    }
+    payload = _server_log_events(lines=max(lines, 0), cursor=cursor)
+    events = cast(list[dict[str, object]], payload["events"])
+    events = _filter_events(events, filters=filters)
+    cursor_payload = cast(dict[str, object], payload["cursor"])
+    cursor_payload["count"] = len(events)
+    capability = _capability_status(capability, _resolved_auth())
+    data = {
+        "events": events,
+        "cursor": cursor_payload,
+        "filters": filters,
+        "source": payload["source"],
+        "capability": capability,
+        "safety": {
+            "capability": f"{capability['resource']}:{capability['action']}",
+            "raw_mode": request.globals.format in {"raw", "debug"},
+            "identity_fields_absent_when_unknown": True,
+        },
+    }
+    return CommandResponse(
+        ok=True,
+        command=["inspect", "events"],
+        message=f"{len(events)} Event Envelope(s)",
+        data=data,
+        raw=[event.get("raw") for event in events],
+    )
 
 
 def _start_server(*, host: str, port: str | None, dry_run: bool) -> CommandResponse:
@@ -1060,13 +1218,14 @@ def execute(request: CommandRequest) -> CommandResponse:
                 "event_envelope_required_fields": [
                     "schema",
                     "id",
-                    "sequence",
+                    "seq",
                     "time",
                     "source",
                     "kind",
                     "level",
                     "payload",
                 ],
+                "event_envelope_field_aliases": {"sequence": "seq"},
             },
         )
     if request.domain == "inspect" and request.verb == "globals":
@@ -1076,6 +1235,8 @@ def execute(request: CommandRequest) -> CommandResponse:
             message="Terminal Client global options",
             data={"globals": _globals_payload(request.globals), "output_profile": request.output_profile},
         )
+    if request.domain == "inspect" and request.verb == "events":
+        return _inspect_events(request)
     if request.domain == "tui":
         return CommandResponse(
             ok=True,
@@ -1106,25 +1267,57 @@ def _write_json(payload: object, stdout: TextIO) -> None:
     stdout.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
 
 
+def _event_payload(response: CommandResponse) -> list[dict[str, object]] | None:
+    events = response.data.get("events")
+    if not isinstance(events, list):
+        return None
+    return [cast(dict[str, object], event) for event in events if isinstance(event, dict)]
+
+
 def render(response: CommandResponse, request: CommandRequest, stdout: TextIO) -> None:
     payload = _response_payload(response, request)
     output_format = request.globals.format
+    events = _event_payload(response)
 
     if output_format == "json":
         _write_json(payload, stdout)
     elif output_format == "jsonl":
-        _write_json(payload, stdout)
+        if events is not None:
+            for event in events:
+                _write_json(event, stdout)
+        else:
+            _write_json(payload, stdout)
     elif output_format == "raw":
         _write_json(response.raw if response.raw is not None else response.data, stdout)
     elif output_format == "debug":
-        _write_json({"request": {"domain": request.domain, "verb": request.verb, "args": request.args}, **payload}, stdout)
+        _write_json(
+            {
+                "request": {"domain": request.domain, "verb": request.verb, "args": request.args},
+                "renderer": {
+                    "contract": "event-envelope" if events is not None else "command-response",
+                    "raw_included": response.raw is not None,
+                    "format": output_format,
+                    "profile": request.output_profile,
+                },
+                **payload,
+            },
+            stdout,
+        )
     elif request.output_profile == "clanker":
         _write_json(payload, stdout)
     elif request.output_profile == "grug":
-        status = "ok" if response.ok else "no"
-        stdout.write(f"{status} {' '.join(response.command)}: {response.message}\n")
+        if events is not None:
+            for event in events:
+                stdout.write(f"{event.get('seq')} {event.get('level')} {event.get('source')}.{event.get('kind')}: {event.get('summary', '')}\n")
+        else:
+            status = "ok" if response.ok else "no"
+            stdout.write(f"{status} {' '.join(response.command)}: {response.message}\n")
     else:
-        stdout.write(response.message + "\n")
+        if events is not None:
+            for event in events:
+                stdout.write(f"[{event.get('level')}] {event.get('source')}.{event.get('kind')} #{event.get('seq')}: {event.get('summary', '')}\n")
+        else:
+            stdout.write(response.message + "\n")
 
 
 def render_error(error: CommandError, *, options: GlobalOptions | None, stdout_is_tty: bool, stderr: TextIO) -> None:

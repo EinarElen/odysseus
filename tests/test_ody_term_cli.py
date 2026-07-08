@@ -76,13 +76,14 @@ def test_non_tty_defaults_to_clanker_json_contract() -> None:
     assert payload["data"]["event_envelope_required_fields"] == [
         "schema",
         "id",
-        "sequence",
+        "seq",
         "time",
         "source",
         "kind",
         "level",
         "payload",
     ]
+    assert payload["data"]["event_envelope_field_aliases"] == {"sequence": "seq"}
 
 
 def test_tty_defaults_to_human_output() -> None:
@@ -581,3 +582,129 @@ def test_service_control_does_not_treat_pid_as_an_elevated_target(
     assert exit_code == 2
     assert stdout == ""
     assert json.loads(stderr)["error"]["code"] == "arbitrary_process_unsupported"
+
+
+def test_inspect_events_json_normalizes_server_logs_as_event_envelopes(
+    isolated_term_state: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    log_path = tmp_path / "server.log"
+    log_path.write_text("booted\nWARNING: slow provider\nERROR failed request\n", encoding="utf-8")
+    (tmp_path / "runtime.json").write_text(
+        json.dumps(
+            {
+                "kind": "ody-term-local-server",
+                "pid": 99999999,
+                "repo": str(Path(__file__).resolve().parents[1]),
+                "command": ["uv", "run", "ody"],
+                "url": "http://127.0.0.1:7860",
+                "log_path": str(log_path),
+                "started_at": "2026-07-08T12:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code, stdout, stderr = run_cli(["inspect", "events", "--lines", "2", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    data = json.loads(stdout)["data"]
+    assert data["cursor"] == {"after": None, "next": "3", "count": 2}
+    events = data["events"]
+    assert [event["seq"] for event in events] == [2, 3]
+    assert [event["level"] for event in events] == ["warn", "error"]
+    assert events[0]["schema"] == "ody.event.v1"
+    assert events[0]["source"] == "server"
+    assert events[0]["kind"] == "log"
+    assert "session_id" not in events[0]
+    assert "run_id" not in events[0]
+    assert "harness_session_id" not in events[0]
+    assert events[0]["payload"] == {"message": "WARNING: slow provider"}
+    assert events[0]["raw"]["transport"] == "log"
+    assert events[0]["raw"]["body"]["line"] == "WARNING: slow provider"
+
+
+def test_inspect_events_jsonl_emits_one_envelope_per_line(
+    isolated_term_state: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    log_path = tmp_path / "server.log"
+    log_path.write_text("one\ntwo\n", encoding="utf-8")
+    (tmp_path / "runtime.json").write_text(
+        json.dumps({"kind": "ody-term-local-server", "log_path": str(log_path)}),
+        encoding="utf-8",
+    )
+
+    exit_code, stdout, stderr = run_cli(["inspect", "events", "--format=jsonl"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    lines = stdout.splitlines()
+    assert len(lines) == 2
+    assert [json.loads(line)["payload"]["message"] for line in lines] == ["one", "two"]
+
+
+def test_inspect_events_raw_requires_raw_event_capability(
+    isolated_term_state: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ODY_TERM_TOKEN", "ody_env_secret")
+    log_path = tmp_path / "server.log"
+    log_path.write_text("one\n", encoding="utf-8")
+    (tmp_path / "runtime.json").write_text(
+        json.dumps({"kind": "ody-term-local-server", "log_path": str(log_path)}),
+        encoding="utf-8",
+    )
+
+    exit_code, stdout, stderr = run_cli(["inspect", "events", "--format=raw"])
+
+    assert exit_code == 2
+    assert stdout == ""
+    error = json.loads(stderr)["error"]
+    assert error["code"] == "capability_denied"
+    assert "event:raw" in error["message"]
+
+
+def test_inspect_events_filters_by_identity_and_correlation_fields(
+    isolated_term_state: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    log_path = tmp_path / "server.log"
+    log_path.write_text("one\ntwo\n", encoding="utf-8")
+    (tmp_path / "runtime.json").write_text(
+        json.dumps({"kind": "ody-term-local-server", "log_path": str(log_path)}),
+        encoding="utf-8",
+    )
+
+    exit_code, stdout, stderr = run_cli(
+        ["inspect", "events", "--run-id", "run_missing", "--span-id", "span_missing", "--format=json"]
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    data = json.loads(stdout)["data"]
+    assert data["events"] == []
+    assert data["filters"]["run_id"] == "run_missing"
+    assert data["filters"]["span_id"] == "span_missing"
+
+
+def test_inspect_events_debug_includes_renderer_and_safety_context(
+    isolated_term_state: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    log_path = tmp_path / "server.log"
+    log_path.write_text("one\n", encoding="utf-8")
+    (tmp_path / "runtime.json").write_text(
+        json.dumps({"kind": "ody-term-local-server", "log_path": str(log_path)}),
+        encoding="utf-8",
+    )
+
+    exit_code, stdout, stderr = run_cli(["inspect", "events", "--format=debug"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    payload = json.loads(stdout)
+    assert payload["renderer"]["contract"] == "event-envelope"
+    assert payload["renderer"]["raw_included"] is True
+    assert payload["data"]["safety"]["capability"] == "event:raw"
+    assert payload["data"]["capability"]["allowed"] is True

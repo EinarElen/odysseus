@@ -81,11 +81,11 @@ Work the **frontier**: any ticket whose blockers are all done. The two survey ti
 
 **Blocked by:** Add Terminal Client Auth And Capability Reporting.
 
-- [ ] Event Envelopes include required schema, identity, sequence, time, source, kind, level, and payload fields.
-- [ ] Source-native details are preserved in payload or raw fields where available.
-- [ ] JSONL emits one Event Envelope per line for streaming and automation.
-- [ ] Raw and debug modes expose source details without becoming the default automation contract.
-- [ ] Event filtering and cursor metadata have a stable initial behavior.
+- [x] Event Envelopes include required schema, identity, sequence, time, source, kind, level, and payload fields.
+- [x] Source-native details are preserved in payload or raw fields where available.
+- [x] JSONL emits one Event Envelope per line for streaming and automation.
+- [x] Raw and debug modes expose source details without becoming the default automation contract.
+- [x] Event filtering and cursor metadata have a stable initial behavior.
 
 ## Create Run Identity Compatibility Layer For Chat Runs
 
