@@ -1433,7 +1433,11 @@ def setup_chat_routes(
                         await _startup_events.put(event)
 
                     _start_task = asyncio.create_task(_adapter.start(_harness_config, startup_event_cb=_queue_startup_event))
-                    _startup_inactivity_timeout = 45
+                    try:
+                        _startup_inactivity_timeout = float(_harness_config.get("startup_activity_timeout_seconds") or 120)
+                    except (TypeError, ValueError):
+                        _startup_inactivity_timeout = 120.0
+                    _startup_inactivity_timeout = max(5.0, min(_startup_inactivity_timeout, 600.0))
                     _startup_last_activity = time.monotonic()
                     _startup_ready_event = None
                     try:
@@ -1456,13 +1460,13 @@ def setup_chat_routes(
                             except asyncio.TimeoutError:
                                 continue
                             _startup_last_activity = time.monotonic()
-                            if _event.type == "harness_status" and _event.data.get("phase") == "agent_session_ready":
+                            if _event.type == "harness_status" and _event.data.get("phase") == "session_ready":
                                 _startup_ready_event = _event
                             if _event.type == "harness_status":
                                 _phase = str(_event.data.get("phase") or "")
-                                if _harness_debug or (not _harness_quiet and _phase == "agent_session_ready"):
+                                if _harness_debug or (not _harness_quiet and _phase == "session_ready"):
                                     yield f'data: {json.dumps({"type": "harness_status", "data": _event.data})}\n\n'
-                                if _event.data.get("phase") == "agent_session_ready":
+                                if _event.data.get("phase") == "session_ready":
                                     try:
                                         _ref = await asyncio.wait_for(asyncio.shield(_start_task), timeout=1.0)
                                     except asyncio.TimeoutError:
