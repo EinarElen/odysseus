@@ -491,6 +491,45 @@ class ApiToken(TimestampMixin, Base):
     last_used_at = Column(DateTime, nullable=True)
 
 
+class RemotePairingInvite(TimestampMixin, Base):
+    """Short-lived, single-use invite for registering a remote client."""
+    __tablename__ = "remote_pairing_invites"
+
+    id = Column(String, primary_key=True, index=True)
+    owner = Column(String, nullable=True, index=True)
+    created_by = Column(String, nullable=True, index=True)
+    label = Column(String, nullable=False, default="Remote client")
+    client_type = Column(String, nullable=False, default="browser")
+    token_hash = Column(String, nullable=False)
+    token_prefix = Column(String, nullable=False, index=True)
+    capabilities = Column(Text, nullable=False, default="chat")
+    endpoint_url = Column(Text, nullable=True)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    consumed_at = Column(DateTime, nullable=True, index=True)
+    consumed_by_client_id = Column(String, nullable=True)
+    revoked_at = Column(DateTime, nullable=True, index=True)
+
+
+class RemoteKnownClient(TimestampMixin, Base):
+    """A durable client registration created by consuming a pairing invite."""
+    __tablename__ = "remote_known_clients"
+
+    id = Column(String, primary_key=True, index=True)
+    owner = Column(String, nullable=True, index=True)
+    name = Column(String, nullable=False, default="Remote client")
+    client_type = Column(String, nullable=False, default="browser", index=True)
+    platform = Column(String, nullable=True)
+    user_agent = Column(Text, nullable=True)
+    capabilities = Column(Text, nullable=False, default="chat")
+    api_token_id = Column(String, nullable=False, index=True)
+    invite_id = Column(String, nullable=True, index=True)
+    last_seen_at = Column(DateTime, nullable=True, index=True)
+    last_endpoint = Column(Text, nullable=True)
+    metadata_json = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True, index=True)
+    revoked_at = Column(DateTime, nullable=True, index=True)
+
+
 class Webhook(TimestampMixin, Base):
     """Outgoing webhooks fired on events."""
     __tablename__ = "webhooks"

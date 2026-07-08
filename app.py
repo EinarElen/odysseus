@@ -263,6 +263,8 @@ if AUTH_ENABLED:
         "/api/auth/features",
         "/api/auth/settings",
         "/api/auth/integrations/presets",
+        "/api/remote-access/pair/exchange",
+        "/.well-known/odysseus/environment",
         "/api/health",
         "/api/version",
         "/login",
@@ -862,6 +864,9 @@ app.include_router(setup_contacts_routes())
 
 from companion import setup_companion_routes
 app.include_router(setup_companion_routes())
+
+from remote_access import setup_remote_access_routes
+app.include_router(setup_remote_access_routes())
 
 # ========= ROUTES (kept in app.py) =========
 
