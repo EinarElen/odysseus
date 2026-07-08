@@ -69,11 +69,11 @@ Work the **frontier**: any ticket whose blockers are all done. The two survey ti
 
 **Blocked by:** Establish `ody-term` Command Spine And Output Contracts; Add Terminal Client Profiles, Config, And Target Resolution.
 
-- [ ] Auth status reports token-backed, auth-disabled, and localhost-bypass modes explicitly.
-- [ ] Token values are stored through the selected secret-storage path, with weaker fallback modes visible.
-- [ ] Terminal Client capability scopes are represented as resource/action permissions rather than command spellings.
-- [ ] `auth capabilities` reports raw auth facts and resolved policy facts in stable structured output.
-- [ ] Ordinary confirmation and elevated-friction behavior are enforced without bypassing auth, ownership, or server policy.
+- [x] Auth status reports token-backed, auth-disabled, and localhost-bypass modes explicitly.
+- [x] Token values are stored through the selected secret-storage path, with weaker fallback modes visible.
+- [x] Terminal Client capability scopes are represented as resource/action permissions rather than command spellings.
+- [x] `auth capabilities` reports raw auth facts and resolved policy facts in stable structured output.
+- [x] Ordinary confirmation and elevated-friction behavior are enforced without bypassing auth, ownership, or server policy.
 
 ## Introduce Event Envelope Inspection Over Existing Streams
 

@@ -38,6 +38,7 @@ SKILLS_FILE = os.path.join(DATA_DIR, "skills.json")
 APP_DB = os.path.join(DATA_DIR, "app.db")
 SCHEDULED_EMAILS_DB = os.path.join(DATA_DIR, "scheduled_emails.db")
 EMAIL_CACHE_DB = os.path.join(DATA_DIR, "email_cache.db")
+ODY_TERM_SECRETS_FILE = os.path.join(DATA_DIR, "ody-term-secrets.json")
 
 # Data subdirectories
 PERSONAL_UPLOADS_DIR = os.path.join(DATA_DIR, "personal_uploads")

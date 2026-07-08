@@ -34,8 +34,15 @@ def run_cli(argv: list[str], *, is_tty: bool = False) -> tuple[int, str, str]:
 def isolated_term_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ODY_TERM_CONFIG", str(tmp_path / "config.json"))
     monkeypatch.setenv("ODY_TERM_RUNTIME", str(tmp_path / "runtime.json"))
+    monkeypatch.setenv("ODY_TERM_SECRETS", str(tmp_path / "secrets.json"))
     monkeypatch.delenv("ODY_TERM_URL", raising=False)
     monkeypatch.delenv("ODYSSEUS_URL", raising=False)
+    monkeypatch.delenv("ODY_TERM_TOKEN", raising=False)
+    monkeypatch.delenv("ODY_TERM_SCOPES", raising=False)
+    monkeypatch.delenv("ODY_TERM_OWNER", raising=False)
+    monkeypatch.delenv("ODY_TERM_ADMIN", raising=False)
+    monkeypatch.delenv("AUTH_ENABLED", raising=False)
+    monkeypatch.delenv("LOCALHOST_BYPASS", raising=False)
 
 
 def test_help_exposes_terminal_client_domains() -> None:
@@ -425,3 +432,152 @@ def test_server_status_refuses_unowned_runtime_state(isolated_term_state: None, 
     assert stdout == ""
     error = json.loads(stderr)["error"]
     assert error["code"] == "ambiguous_runtime_state"
+
+
+def test_auth_status_reports_disabled_and_localhost_bypass_modes(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    monkeypatch.setenv("LOCALHOST_BYPASS", "true")
+
+    exit_code, stdout, stderr = run_cli(["auth", "status", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    auth = json.loads(stdout)["data"]["auth"]
+    assert auth["auth_mode"] == "auth-disabled"
+    assert auth["bypass_modes"] == {
+        "auth_disabled": True,
+        "localhost_bypass": True,
+    }
+    assert auth["token"]["present"] is False
+
+
+def test_auth_login_stores_token_in_visible_file_fallback_without_printing_secret(
+    isolated_term_state: None,
+) -> None:
+    exit_code, stdout, stderr = run_cli(
+        [
+            "auth",
+            "login",
+            "--token",
+            "ody_test_secret",
+            "--format=json",
+        ]
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    login = json.loads(stdout)["data"]["auth"]
+    assert login["token"]["present"] is True
+    assert login["token"]["storage"]["mode"] == "file-fallback"
+    assert login["token"]["storage"]["visible_weaker_fallback"] is True
+    assert "ody_test_secret" not in stdout
+
+    exit_code, stdout, stderr = run_cli(["auth", "status", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    auth = json.loads(stdout)["data"]["auth"]
+    assert auth["auth_mode"] == "token"
+    assert auth["owner"] is None
+    assert auth["token"]["ref"] == "file:default"
+    assert auth["token"]["scopes"] == []
+    assert "ody_test_secret" not in stdout
+
+
+def test_auth_capabilities_reports_token_facts_without_trusting_local_policy(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ODY_TERM_TOKEN", "ody_env_secret")
+
+    exit_code, stdout, stderr = run_cli(["auth", "capabilities", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    data = json.loads(stdout)["data"]
+    assert "ody_env_secret" not in stdout
+    assert data["auth_facts"]["auth_mode"] == "token"
+    assert data["auth_facts"]["owner"] is None
+    assert data["auth_facts"]["token_scopes"] == []
+    assert data["policy_facts"]["terminal_scopes"] == []
+    capabilities = data["capabilities"]
+    assert capabilities["session:read"]["allowed"] is False
+    assert capabilities["session:read"]["reason"] == "server_capabilities_unavailable"
+    assert capabilities["run:start"]["allowed"] is False
+    assert capabilities["run:start"]["reason"] == "server_capabilities_unavailable"
+    assert capabilities["service:restart"]["requires_confirmation"] is True
+    assert capabilities["service:kill"]["requires_yolo"] is True
+    assert capabilities["service:kill"]["admin_only"] is True
+
+
+def test_auth_logout_removes_stored_token(isolated_term_state: None) -> None:
+    run_cli(["auth", "login", "--token", "ody_test_secret", "--format=json"])
+
+    exit_code, stdout, stderr = run_cli(["auth", "logout", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert json.loads(stdout)["data"]["auth"]["token"]["present"] is False
+
+
+def test_confirmation_gates_do_not_bypass_missing_capability(isolated_term_state: None) -> None:
+    run_cli(["auth", "login", "--token", "ody_test_secret", "--format=json"])
+
+    exit_code, stdout, stderr = run_cli(["run", "stop", "run-1", "--yes", "--format=json"])
+
+    assert exit_code == 2
+    assert stdout == ""
+    error = json.loads(stderr)["error"]
+    assert error["code"] == "capability_denied"
+    assert "run:stop" in error["message"]
+
+
+def test_ordinary_confirmation_requires_yes_when_capability_allows(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+
+    exit_code, stdout, stderr = run_cli(["run", "stop", "run-1", "--format=json"])
+
+    assert exit_code == 2
+    assert stdout == ""
+    assert json.loads(stderr)["error"]["code"] == "confirmation_required"
+
+
+def test_ordinary_confirmation_accepts_yes_when_capability_allows(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+
+    exit_code, stdout, stderr = run_cli(["run", "stop", "run-1", "--yes", "--format=json"])
+
+    assert exit_code == 1
+    assert stderr == ""
+    assert json.loads(stdout)["data"]["confirmation"]["satisfied_by"] == "--yes"
+
+
+def test_elevated_confirmation_never_bypasses_admin_policy(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+
+    exit_code, stdout, stderr = run_cli(["service", "stop", "main-server", "--force", "--yolo", "--format=json"])
+
+    assert exit_code == 2
+    assert stdout == ""
+    error = json.loads(stderr)["error"]
+    assert error["code"] == "capability_denied"
+    assert "admin_only" in error["message"]
+
+
+def test_service_control_does_not_treat_pid_as_an_elevated_target(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+
+    exit_code, stdout, stderr = run_cli(["service", "stop", "pid:123", "--yes", "--format=json"])
+
+    assert exit_code == 2
+    assert stdout == ""
+    assert json.loads(stderr)["error"]["code"] == "arbitrary_process_unsupported"

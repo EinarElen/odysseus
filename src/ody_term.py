@@ -17,11 +17,34 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO, cast
 
+try:
+    from src.constants import ODY_TERM_SECRETS_FILE
+except Exception:  # pragma: no cover - keeps standalone ody_term packaging usable.
+    ODY_TERM_SECRETS_FILE = ""
+
 
 DOMAINS = ("auth", "config", "server", "session", "run", "harness", "service", "inspect", "tui")
 OUTPUT_PROFILES = ("human", "grug", "clanker")
 FORMATS = ("text", "json", "jsonl", "raw", "debug")
 COLOR_MODES = ("auto", "always", "never")
+TERMINAL_CAPABILITIES = (
+    "session:read",
+    "session:write",
+    "run:read",
+    "run:start",
+    "run:stop",
+    "event:read",
+    "event:raw",
+    "harness:read",
+    "harness:control",
+    "service:read",
+    "service:restart",
+    "service:kill",
+    "auth:capabilities",
+)
+CONFIRMATION_CAPABILITIES = {"run:stop", "harness:control", "service:restart"}
+ELEVATED_CAPABILITIES = {"service:kill"}
+ADMIN_ONLY_CAPABILITIES = {"service:kill"}
 
 ALIASES = (
     {
@@ -124,6 +147,15 @@ def _runtime_state_path() -> Path:
     return Path.home() / ".local" / "state" / "odysseus" / "ody-term-runtime.json"
 
 
+def _secrets_path() -> Path:
+    override = os.getenv("ODY_TERM_SECRETS", "").strip()
+    if override:
+        return Path(override).expanduser()
+    if ODY_TERM_SECRETS_FILE:
+        return Path(ODY_TERM_SECRETS_FILE).expanduser()
+    return _config_path().with_name("ody-term-secrets.json")
+
+
 def _empty_config() -> dict[str, object]:
     return {"version": 1, "default_profile": None, "profiles": {}}
 
@@ -161,8 +193,17 @@ def _parse_command_options(args: list[str]) -> tuple[dict[str, str | bool], list
     options: dict[str, str | bool] = {}
     positionals: list[str] = []
     index = 0
-    value_flags = {"--url", "--repo", "--token-ref", "--profile-output", "--host", "--port", "--lines"}
-    bool_flags = {"--default", "--dry-run"}
+    value_flags = {
+        "--url",
+        "--repo",
+        "--token-ref",
+        "--profile-output",
+        "--host",
+        "--port",
+        "--lines",
+        "--token",
+    }
+    bool_flags = {"--default", "--dry-run", "--force"}
     while index < len(args):
         token = args[index]
         if token in value_flags:
@@ -194,6 +235,206 @@ def _profile_payload(profile: object) -> dict[str, object]:
     if not isinstance(profile, dict):
         raise CommandError("corrupt_config", "Terminal Client profile must be an object")
     return cast(dict[str, object], dict(profile))
+
+
+def _load_secrets() -> dict[str, object]:
+    data = _load_json_object(_secrets_path())
+    tokens = data.get("tokens")
+    if tokens is None:
+        data["tokens"] = {}
+    elif not isinstance(tokens, dict):
+        raise CommandError("corrupt_secret_store", "Terminal Client secret store tokens must be an object")
+    return data
+
+
+def _save_secrets(secrets: dict[str, object]) -> None:
+    path = _secrets_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(secrets, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    tmp.replace(path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _parse_scopes(raw: object) -> list[str]:
+    if isinstance(raw, str):
+        parts = raw.replace(" ", ",").split(",")
+    elif isinstance(raw, list):
+        parts = [str(item) for item in raw]
+    else:
+        parts = []
+    return sorted({part.strip() for part in parts if part.strip()})
+
+
+def _auth_disabled() -> bool:
+    return os.getenv("AUTH_ENABLED", "true").lower() == "false"
+
+
+def _localhost_bypass_enabled() -> bool:
+    return os.getenv("LOCALHOST_BYPASS", "false").lower() == "true"
+
+
+def _selected_token_ref() -> str:
+    config = load_config()
+    profiles = _profiles(config)
+    profile_name = config.get("default_profile")
+    if isinstance(profile_name, str):
+        profile = _profile_payload(profiles.get(profile_name, {}))
+        token_ref = profile.get("token_ref")
+        if isinstance(token_ref, str) and token_ref:
+            return token_ref
+    return "file:default"
+
+
+def _secret_token_entry(ref: str) -> dict[str, object]:
+    secrets = _load_secrets()
+    tokens = secrets.get("tokens", {})
+    if not isinstance(tokens, dict):
+        raise CommandError("corrupt_secret_store", "Terminal Client secret store tokens must be an object")
+    entry = tokens.get(ref)
+    if not isinstance(entry, dict):
+        return {}
+    return cast(dict[str, object], entry)
+
+
+def _resolved_auth() -> dict[str, object]:
+    env_token = os.getenv("ODY_TERM_TOKEN", "").strip()
+    disabled = _auth_disabled()
+    localhost_bypass = _localhost_bypass_enabled()
+
+    token_ref = "env:ODY_TERM_TOKEN"
+    token_present = bool(env_token)
+    owner = None
+    user = None
+    scopes: list[str] = []
+    is_admin = False
+    storage = {
+        "mode": "environment",
+        "ref": token_ref,
+        "visible_weaker_fallback": False,
+    }
+
+    if not token_present:
+        token_ref = _selected_token_ref()
+        entry = _secret_token_entry(token_ref)
+        token_present = bool(entry.get("token"))
+        storage = {
+            "mode": "file-fallback",
+            "ref": token_ref,
+            "path": str(_secrets_path()),
+            "visible_weaker_fallback": token_present,
+        }
+
+    if token_present:
+        auth_mode = "token"
+    elif disabled:
+        auth_mode = "auth-disabled"
+    elif localhost_bypass:
+        auth_mode = "localhost-bypass"
+    else:
+        auth_mode = "none"
+
+    return {
+        "auth_mode": auth_mode,
+        "user": user,
+        "owner": owner,
+        "is_admin": is_admin,
+        "bypass_modes": {
+            "auth_disabled": disabled,
+            "localhost_bypass": localhost_bypass,
+        },
+        "token": {
+            "present": token_present,
+            "ref": token_ref if token_present else None,
+            "scopes": scopes if token_present else [],
+            "storage": storage if token_present else None,
+        },
+    }
+
+
+def _capability_status(capability: str, auth: dict[str, object]) -> dict[str, object]:
+    token = auth.get("token")
+    token_payload = token if isinstance(token, dict) else {}
+    scopes = set(_parse_scopes(token_payload.get("scopes")))
+    auth_mode = auth.get("auth_mode")
+    bypass = auth_mode in {"auth-disabled", "localhost-bypass"}
+    is_admin = bool(auth.get("is_admin"))
+    if auth_mode == "token" and not scopes:
+        allowed = False
+        reason = "server_capabilities_unavailable"
+    else:
+        allowed = bool(bypass or capability in scopes)
+        reason = None if allowed else "missing_scope"
+    if capability in ADMIN_ONLY_CAPABILITIES and not is_admin and not bypass:
+        allowed = False
+        reason = "admin_only"
+    if capability in ADMIN_ONLY_CAPABILITIES and bypass:
+        allowed = False
+        reason = "admin_only"
+    return {
+        "resource": capability.split(":", 1)[0],
+        "action": capability.split(":", 1)[1],
+        "allowed": allowed,
+        "requires_confirmation": capability in CONFIRMATION_CAPABILITIES or capability in ELEVATED_CAPABILITIES,
+        "requires_yolo": capability in ELEVATED_CAPABILITIES,
+        "admin_only": capability in ADMIN_ONLY_CAPABILITIES,
+        "reason": reason,
+    }
+
+
+def _capabilities_payload() -> dict[str, object]:
+    auth = _resolved_auth()
+    token = cast(dict[str, object], auth["token"])
+    token_scopes = _parse_scopes(token.get("scopes"))
+    capabilities = {capability: _capability_status(capability, auth) for capability in TERMINAL_CAPABILITIES}
+    return {
+        "auth_facts": {
+            "auth_mode": auth["auth_mode"],
+            "user": auth["user"],
+            "owner": auth["owner"],
+            "is_admin": auth["is_admin"],
+            "token_scopes": token_scopes,
+        },
+        "policy_facts": {
+            "terminal_scopes": token_scopes,
+            "bypass_modes": auth["bypass_modes"],
+        },
+        "capabilities": capabilities,
+    }
+
+
+def _require_capability(capability: str, request: CommandRequest) -> dict[str, object]:
+    status = _capability_status(capability, _resolved_auth())
+    if not status["allowed"]:
+        raise CommandError(
+            "capability_denied",
+            f"{capability} is not allowed: {status['reason']}",
+            exit_code=2,
+        )
+    if status["requires_yolo"]:
+        if not request.globals.yolo:
+            raise CommandError(
+                "elevated_confirmation_required",
+                f"{capability} requires --yolo",
+                exit_code=2,
+            )
+        return {"capability": capability, "required": "elevated", "satisfied_by": "--yolo"}
+    if status["requires_confirmation"]:
+        if not request.globals.yes:
+            raise CommandError(
+                "confirmation_required",
+                f"{capability} requires --yes",
+                exit_code=2,
+            )
+        return {"capability": capability, "required": "ordinary", "satisfied_by": "--yes"}
+    return {"capability": capability, "required": None, "satisfied_by": None}
 
 
 def _resolve_target(request: CommandRequest) -> dict[str, object]:
@@ -548,6 +789,93 @@ def _globals_payload(options: GlobalOptions) -> dict[str, object]:
 
 def execute(request: CommandRequest) -> CommandResponse:
     command = [request.domain] if request.verb is None else [request.domain, request.verb]
+    if request.domain == "auth" and request.verb == "status":
+        return CommandResponse(
+            ok=True,
+            command=command,
+            message=f"Auth mode: {_resolved_auth()['auth_mode']}",
+            data={"auth": _resolved_auth()},
+        )
+    if request.domain == "auth" and request.verb == "login":
+        options, positionals = _parse_command_options(request.args)
+        if positionals:
+            raise CommandError("unexpected_auth_args", f"unexpected auth login args: {' '.join(positionals)}")
+        token = options.get("token")
+        if not isinstance(token, str) or not token:
+            raise CommandError("missing_token", "auth login requires --token")
+        token_ref = str(options.get("token_ref") or "file:default")
+        secrets = _load_secrets()
+        tokens = secrets.get("tokens", {})
+        if not isinstance(tokens, dict):
+            raise CommandError("corrupt_secret_store", "Terminal Client secret store tokens must be an object")
+        tokens = cast(dict[str, object], tokens)
+        tokens[token_ref] = {
+            "token": token,
+            "updated_at": _utc_now(),
+        }
+        secrets["tokens"] = tokens
+        _save_secrets(secrets)
+        auth = _resolved_auth()
+        if auth["token"] and cast(dict[str, object], auth["token"]).get("ref") != token_ref:
+            token_payload = cast(dict[str, object], auth["token"])
+            token_payload["ref"] = token_ref
+        return CommandResponse(
+            ok=True,
+            command=command,
+            message="Terminal Client token stored",
+            data={"auth": _resolved_auth()},
+        )
+    if request.domain == "auth" and request.verb == "logout":
+        options, positionals = _parse_command_options(request.args)
+        if positionals:
+            raise CommandError("unexpected_auth_args", f"unexpected auth logout args: {' '.join(positionals)}")
+        token_ref = str(options.get("token_ref") or _selected_token_ref())
+        secrets = _load_secrets()
+        tokens = secrets.get("tokens", {})
+        removed = False
+        if isinstance(tokens, dict):
+            removed = tokens.pop(token_ref, None) is not None
+            secrets["tokens"] = tokens
+            _save_secrets(secrets)
+        auth = _resolved_auth()
+        return CommandResponse(
+            ok=True,
+            command=command,
+            message="Terminal Client token removed" if removed else "No stored Terminal Client token found",
+            data={"auth": auth, "removed": removed},
+        )
+    if request.domain == "auth" and request.verb == "capabilities":
+        return CommandResponse(
+            ok=True,
+            command=command,
+            message="Terminal Client capabilities",
+            data=_capabilities_payload(),
+        )
+    if request.domain == "run" and request.verb == "stop":
+        confirmation = _require_capability("run:stop", request)
+        return CommandResponse(
+            ok=False,
+            command=command,
+            message="run stop is capability-gated but lifecycle execution is implemented by a later ticket",
+            data={"implemented": False, "args": request.args, "confirmation": confirmation},
+        )
+    if request.domain == "service" and request.verb in {"stop", "restart"}:
+        options, positionals = _parse_command_options(request.args)
+        if not positionals:
+            raise CommandError("missing_lifecycle_target", f"service {request.verb} requires a managed target id")
+        if any(target.startswith("pid:") for target in positionals):
+            raise CommandError(
+                "arbitrary_process_unsupported",
+                "service commands require managed lifecycle target ids, not raw host PIDs",
+            )
+        capability = "service:kill" if options.get("force") else "service:restart"
+        confirmation = _require_capability(capability, request)
+        return CommandResponse(
+            ok=False,
+            command=command,
+            message=f"service {request.verb} is capability-gated but lifecycle execution is implemented by a later ticket",
+            data={"implemented": False, "args": positionals, "confirmation": confirmation},
+        )
     if request.domain == "server" and request.verb == "status":
         status = _server_status_payload()
         return CommandResponse(
