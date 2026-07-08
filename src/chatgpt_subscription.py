@@ -299,17 +299,94 @@ def to_http_exception(exc: Exception) -> HTTPException:
     return HTTPException(502, str(exc))
 
 
+def _content_text(content: Any) -> str:
+    if isinstance(content, list):
+        return "\n".join(str(part.get("text") or part.get("content") or "") for part in content if isinstance(part, dict))
+    return "" if content is None else str(content)
+
+
+def _tool_call_parts(call: dict) -> tuple[str, str, str]:
+    function = call.get("function") if isinstance(call, dict) else {}
+    if not isinstance(function, dict):
+        function = {}
+    call_id = str(call.get("id") or call.get("call_id") or "").strip()
+    name = str(call.get("name") or function.get("name") or "").strip()
+    arguments = call.get("arguments", function.get("arguments", "{}"))
+    if not isinstance(arguments, str):
+        arguments = json.dumps(arguments or {}, ensure_ascii=False)
+    return call_id, name, arguments
+
+
 def build_responses_input(messages: list[dict]) -> list[dict]:
     input_items: list[dict] = []
     for msg in messages or []:
         role = msg.get("role") or "user"
+        text = _content_text(msg.get("content"))
         if role == "tool":
-            role = "user"
-        content = msg.get("content")
-        if isinstance(content, list):
-            text = "\n".join(str(part.get("text") or part.get("content") or "") for part in content if isinstance(part, dict))
-        else:
-            text = "" if content is None else str(content)
+            call_id = str(msg.get("tool_call_id") or msg.get("call_id") or "").strip()
+            if call_id:
+                input_items.append({"type": "function_call_output", "call_id": call_id, "output": text})
+            elif text:
+                input_items.append({"role": "user", "content": [{"type": "input_text", "text": text}]})
+            continue
+        if role == "assistant" and isinstance(msg.get("tool_calls"), list):
+            if text:
+                input_items.append({"role": "assistant", "content": [{"type": "output_text", "text": text}]})
+            for call in msg.get("tool_calls") or []:
+                call_id, name, arguments = _tool_call_parts(call)
+                if not call_id or not name:
+                    continue
+                item = {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": arguments,
+                }
+                if call.get("id"):
+                    item["id"] = str(call.get("id"))
+                input_items.append(item)
+            continue
         input_type = "output_text" if role == "assistant" else "input_text"
         input_items.append({"role": role, "content": [{"type": input_type, "text": text}]})
     return input_items
+
+
+def build_responses_tools(tools: Optional[list[dict]], *, strict: bool = True) -> list[dict]:
+    """Convert OpenAI chat-completions tool schemas to Responses function tools."""
+    if not tools:
+        return []
+    out: list[dict] = []
+    for tool in tools:
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            continue
+        if "name" in tool:
+            item = dict(tool)
+        else:
+            function = tool.get("function")
+            if not isinstance(function, dict):
+                continue
+            name = str(function.get("name") or "").strip()
+            if not name:
+                continue
+            parameters = function.get("parameters")
+            if not isinstance(parameters, dict):
+                parameters = {"type": "object", "properties": {}}
+            if strict:
+                try:
+                    from src.tools.model import strict_json_schema
+
+                    parameters = strict_json_schema(parameters)
+                except Exception:
+                    parameters = dict(parameters)
+            item = {
+                "type": "function",
+                "name": name,
+                "description": str(function.get("description") or ""),
+                "parameters": parameters,
+            }
+            if strict:
+                item["strict"] = True
+            elif "strict" in function:
+                item["strict"] = bool(function.get("strict"))
+        out.append(item)
+    return out

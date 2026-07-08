@@ -120,6 +120,8 @@ def _nullable_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
         return {"anyOf": [schema, {"type": "null"}]}
     if schema.get("type") == "null":
         return schema
+    if "enum" in schema:
+        return {"anyOf": [schema, {"type": "null"}]}
     if "anyOf" in schema:
         variants = list(schema.get("anyOf") or [])
         if not any(isinstance(v, dict) and v.get("type") == "null" for v in variants):

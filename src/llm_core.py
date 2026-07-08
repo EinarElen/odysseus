@@ -1075,11 +1075,13 @@ def _build_chatgpt_responses_payload(
     *,
     stream: bool = False,
     provider_options: Optional[Dict] = None,
+    tools: Optional[List[Dict]] = None,
 ) -> Dict:
-    from src.chatgpt_subscription import build_responses_input
+    from src.chatgpt_subscription import build_responses_input, build_responses_tools
     from src.provider_options import sanitize_provider_options
 
     conversation = [msg for msg in (messages or []) if (msg.get("role") or "") != "system"]
+    response_tools = build_responses_tools(tools)
     payload: Dict = {
         "model": model,
         "instructions": _chatgpt_subscription_instructions(messages),
@@ -1087,6 +1089,8 @@ def _build_chatgpt_responses_payload(
         "stream": stream,
         "store": False,
     }
+    if response_tools:
+        payload["tools"] = response_tools
     if not _restricts_temperature(model):
         payload["temperature"] = temperature
     options = sanitize_provider_options("https://chatgpt.com/backend-api/codex", model, provider_options or {})
@@ -2206,7 +2210,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         h = _provider_headers(provider, headers)
         payload = _build_chatgpt_responses_payload(
             model, messages_copy, temperature, max_tokens,
-            stream=True, provider_options=provider_options,
+            stream=True, provider_options=provider_options, tools=tools,
         )
     else:
         target_url = _normalize_openai_chat_url(url)
@@ -2263,6 +2267,71 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         event_name = ""
         input_tokens = 0
         output_tokens = 0
+        tool_call_order: List[str] = []
+        tool_calls_by_key: Dict[str, Dict[str, str]] = {}
+        active_tool_key: Optional[str] = None
+
+        def _tool_key_from_event(payload: Dict) -> Optional[str]:
+            item = payload.get("item")
+            if isinstance(item, dict):
+                return (
+                    str(item.get("id") or item.get("call_id") or "")
+                    or None
+                )
+            for key in ("item_id", "call_id", "output_index", "index"):
+                val = payload.get(key)
+                if val is not None:
+                    return str(val)
+            return active_tool_key
+
+        def _remember_tool_item(item: Dict) -> Optional[str]:
+            nonlocal active_tool_key
+            if not isinstance(item, dict) or item.get("type") != "function_call":
+                return None
+            key = str(item.get("id") or item.get("call_id") or item.get("output_index") or len(tool_call_order))
+            call = tool_calls_by_key.get(key)
+            if call is None:
+                call = {
+                    "id": str(item.get("call_id") or item.get("id") or f"call_{len(tool_call_order)}"),
+                    "name": "",
+                    "arguments": "",
+                }
+                tool_calls_by_key[key] = call
+                tool_call_order.append(key)
+            if item.get("call_id"):
+                call["id"] = str(item.get("call_id"))
+            if item.get("name"):
+                call["name"] = str(item.get("name"))
+            if item.get("arguments") is not None:
+                args = item.get("arguments")
+                call["arguments"] = args if isinstance(args, str) else json.dumps(args or {}, ensure_ascii=False)
+            active_tool_key = key
+            return key
+
+        def _append_tool_arguments(payload: Dict, delta: str) -> Optional[Dict[str, str]]:
+            key = _tool_key_from_event(payload)
+            if key is None:
+                key = str(len(tool_call_order))
+            call = tool_calls_by_key.get(key)
+            if call is None:
+                call = {"id": f"call_{len(tool_call_order)}", "name": "", "arguments": ""}
+                tool_calls_by_key[key] = call
+                tool_call_order.append(key)
+            call["arguments"] = (call.get("arguments") or "") + (delta or "")
+            return call
+
+        def _final_tool_calls() -> List[Dict]:
+            calls: List[Dict] = []
+            for key in tool_call_order:
+                call = tool_calls_by_key.get(key) or {}
+                if call.get("name"):
+                    calls.append({
+                        "id": call.get("id") or f"call_{len(calls)}",
+                        "name": call.get("name") or "",
+                        "arguments": call.get("arguments") or "{}",
+                    })
+            return calls
+
         try:
             client = _get_http_client()
             async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
@@ -2296,7 +2365,23 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                 yield _degenerate
                                 return
                             yield f'data: {json.dumps({"delta": delta})}\n\n'
+                    elif evt in ("response.output_item.added", "response.output_item.done"):
+                        item = data.get("item") or data.get("output_item") or {}
+                        _remember_tool_item(item)
+                    elif evt == "response.function_call_arguments.delta":
+                        delta = data.get("delta") or ""
+                        call = _append_tool_arguments(data, delta)
+                        if delta and call and call.get("name") in ("create_document", "update_document", "edit_document"):
+                            yield f'data: {json.dumps({"type": "tool_call_delta", "name": call.get("name"), "arg_delta": delta})}\n\n'
+                    elif evt == "response.function_call_arguments.done":
+                        key = _tool_key_from_event(data)
+                        if key is not None and key in tool_calls_by_key and data.get("arguments") is not None:
+                            args = data.get("arguments")
+                            tool_calls_by_key[key]["arguments"] = args if isinstance(args, str) else json.dumps(args or {}, ensure_ascii=False)
                     elif evt == "response.completed":
+                        calls = _final_tool_calls()
+                        if calls:
+                            yield f'data: {json.dumps({"type": "tool_calls", "calls": calls})}\n\n'
                         usage = (data.get("response") or {}).get("usage") or data.get("usage") or {}
                         input_tokens = usage.get("input_tokens") or usage.get("prompt_tokens") or input_tokens
                         output_tokens = usage.get("output_tokens") or usage.get("completion_tokens") or output_tokens
