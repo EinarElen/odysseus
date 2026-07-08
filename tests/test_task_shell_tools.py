@@ -9,6 +9,7 @@ who actually keeps it.
 """
 
 from types import SimpleNamespace
+from pathlib import Path
 
 from src.task_scheduler import (
     TASK_DEFAULT_SHELL_TOOLS,
@@ -81,6 +82,14 @@ def test_non_admin_owner_block_strips_shell_end_to_end():
     non_admin_schemas = (offered - set(NON_ADMIN_BLOCKED_TOOLS)) & schema_names
     assert "bash" not in non_admin_schemas
     assert "python" not in non_admin_schemas
+
+
+def test_agent_subprocess_tools_terminate_process_trees():
+    source = (Path(__file__).resolve().parents[1] / "src/agent_tools/subprocess_tools.py").read_text(encoding="utf-8")
+
+    assert "detached_popen_kwargs()" in source
+    assert "kill_process_tree(proc.pid)" in source
+    assert "kill_process_tree(proc.pid, force=True)" in source
 
 
 async def test_scheduled_task_honors_global_disabled_tools(monkeypatch):

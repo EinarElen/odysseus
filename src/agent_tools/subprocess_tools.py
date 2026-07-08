@@ -3,6 +3,7 @@ import sys
 import time
 import collections
 from typing import Optional, Callable, Awaitable, Tuple, Dict
+from core.platform_compat import detached_popen_kwargs, kill_process_tree
 from src.constants import MAX_OUTPUT_CHARS
 
 DEFAULT_BASH_TIMEOUT = 60 * 60     # 1 hour
@@ -10,6 +11,29 @@ DEFAULT_PYTHON_TIMEOUT = 60 * 60
 
 PROGRESS_INTERVAL_S = 2.0
 PROGRESS_TAIL_LINES = 12
+
+
+async def _terminate_process_tree(proc: asyncio.subprocess.Process, *, timeout: float = 2.0) -> None:
+    try:
+        kill_process_tree(proc.pid)
+    except Exception:
+        pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+        return
+    except Exception:
+        pass
+    try:
+        kill_process_tree(proc.pid, force=True)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+    except Exception:
+        pass
 
 async def _run_subprocess_streaming(
     proc: asyncio.subprocess.Process,
@@ -58,23 +82,9 @@ async def _run_subprocess_streaming(
         await asyncio.wait_for(proc.wait(), timeout=timeout)
     except asyncio.TimeoutError:
         timed_out = True
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=2)
-        except Exception:
-            pass
+        await _terminate_process_tree(proc)
     except asyncio.CancelledError:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=2)
-        except Exception:
-            pass
+        await _terminate_process_tree(proc)
         for t in (rd_out, rd_err):
             t.cancel()
         if prog_task is not None:
@@ -111,6 +121,7 @@ class BashTool:
             stderr=asyncio.subprocess.PIPE,
             env=_subproc_env,
             cwd=agent_cwd(),
+            **detached_popen_kwargs(),
         )
         stdout, stderr, rc, timed_out = await _run_subprocess_streaming(
             proc,
@@ -137,6 +148,7 @@ class PythonTool:
             stderr=asyncio.subprocess.PIPE,
             env=_subproc_env,
             cwd=agent_cwd(),
+            **detached_popen_kwargs(),
         )
         stdout, stderr, rc, timed_out = await _run_subprocess_streaming(
             proc,

@@ -7,6 +7,8 @@ import json
 import os
 import socket
 import sys
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,6 +30,12 @@ from routes.shell_routes import (
     _venv_activate_prefix,
     DOCKER_IN_CONTAINER_HINT,
 )
+
+
+@contextmanager
+def _short_unix_socket_path():
+    with tempfile.TemporaryDirectory(prefix="ody-sock-", dir="/tmp") as directory:
+        yield Path(directory) / "docker.sock"
 
 
 def test_shell_routes_import_without_posix_pty_modules(monkeypatch):
@@ -83,6 +91,15 @@ async def test_generate_pty_reports_explicit_unsupported_error(monkeypatch):
         },
         {"exit_code": -1, "error": shell_routes.PTY_UNSUPPORTED_ERROR},
     ]
+
+
+def test_pty_disconnect_cleanup_terminates_process_tree():
+    source = (Path(__file__).resolve().parents[1] / "routes" / "shell_routes.py").read_text(encoding="utf-8")
+
+    assert "async def _terminate_async_process_tree" in source
+    assert "kill_process_tree(proc.pid)" in source
+    assert "kill_process_tree(proc.pid, force=True)" in source
+    assert "await _terminate_async_process_tree(proc)" in source
 
 
 class TestFindLineBreak:
@@ -297,8 +314,7 @@ class TestHostDockerAccess:
         tmp_path,
         flag,
     ):
-        socket_path = tmp_path / "docker.sock"
-        with socket.socket(socket.AF_UNIX) as unix_socket:
+        with _short_unix_socket_path() as socket_path, socket.socket(socket.AF_UNIX) as unix_socket:
             unix_socket.bind(str(socket_path))
             if flag is None:
                 monkeypatch.delenv("ODYSSEUS_ENABLE_HOST_DOCKER", raising=False)
@@ -312,8 +328,7 @@ class TestHostDockerAccess:
         monkeypatch,
         tmp_path,
     ):
-        socket_path = tmp_path / "docker.sock"
-        with socket.socket(socket.AF_UNIX) as unix_socket:
+        with _short_unix_socket_path() as socket_path, socket.socket(socket.AF_UNIX) as unix_socket:
             unix_socket.bind(str(socket_path))
             monkeypatch.setenv("ODYSSEUS_ENABLE_HOST_DOCKER", "true")
 

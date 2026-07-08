@@ -47,6 +47,7 @@ from core.platform_compat import (
     detached_popen_kwargs,
     find_bash,
     git_bash_path,
+    kill_process_tree,
 )
 
 
@@ -106,6 +107,29 @@ def _venv_activate_prefix(venv: str | None) -> str:
 logger = logging.getLogger(__name__)
 
 PTY_SUPPORTED = pty is not None and fcntl is not None and hasattr(os, "setsid")
+
+
+async def _terminate_async_process_tree(proc: asyncio.subprocess.Process, *, timeout: float = 2.0) -> None:
+    try:
+        kill_process_tree(proc.pid)
+    except Exception:
+        pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+        return
+    except Exception:
+        pass
+    try:
+        kill_process_tree(proc.pid, force=True)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+    except Exception:
+        pass
 
 
 DOCKER_IN_CONTAINER_HINT = HOST_DOCKER_ACCESS_HINT
@@ -542,16 +566,14 @@ async def _generate_pty(cmd: str, timeout: int, request: Request):
     try:
         while not process_done.is_set():
             if deadline and loop.time() > deadline:
-                proc.kill()
-                await proc.wait()
+                await _terminate_async_process_tree(proc)
                 yield f"data: {json.dumps({'stream': 'stderr', 'data': f'Command timed out after {timeout}s'})}\n\n"
                 yield f"data: {json.dumps({'exit_code': -1})}\n\n"
                 return
 
             # Check client disconnect
             if await request.is_disconnected():
-                proc.kill()
-                await proc.wait()
+                await _terminate_async_process_tree(proc)
                 return
 
             # Read available data from PTY
