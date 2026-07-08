@@ -27,6 +27,16 @@ def test_default_routes_remain_unframeable():
     assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
 
 
+def test_dev_mode_allows_embedded_preview(monkeypatch):
+    monkeypatch.setenv("ODYSSEUS_DEV_MODE", "1")
+
+    response = _client().get("/plain")
+
+    assert "X-Frame-Options" not in response.headers
+    assert "frame-ancestors" not in response.headers["Content-Security-Policy"]
+    assert "script-src" in response.headers["Content-Security-Policy"]
+
+
 def test_document_pdf_preview_can_be_framed_by_same_origin():
     response = _client().get("/api/document/doc-123/render-pdf")
 

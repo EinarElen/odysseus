@@ -780,6 +780,9 @@ app.include_router(setup_cookbook_routes())
 from routes.workspace_routes import setup_workspace_routes
 app.include_router(setup_workspace_routes())
 
+from routes.dev_routes import setup_dev_routes
+app.include_router(setup_dev_routes())
+
 # Hardware model fitting (cookbook "What Fits?" tab)
 from routes.hwfit_routes import setup_hwfit_routes
 app.include_router(setup_hwfit_routes())
@@ -896,6 +899,14 @@ async def serve_email(request: Request):
 
 @app.get("/memory")
 async def serve_memory(request: Request):
+    return await serve_index(request)
+
+@app.get("/skills")
+async def serve_skills(request: Request):
+    return await serve_index(request)
+
+@app.get("/skills-lab")
+async def serve_skills_lab(request: Request):
     return await serve_index(request)
 
 @app.get("/gallery")
@@ -1272,8 +1283,12 @@ async def _shutdown_event():
 
 if __name__ == "__main__":
     import uvicorn
+    from src.dev_mode import dev_reload_requested, uvicorn_reload_config
 
     bind_host = os.getenv("APP_BIND", "127.0.0.1")
     bind_port = int(os.getenv("APP_PORT", "7000"))
 
-    uvicorn.run(app, host=bind_host, port=bind_port, log_level="info")
+    if dev_reload_requested():
+        uvicorn.run("app:app", host=bind_host, port=bind_port, log_level="info", **uvicorn_reload_config())
+    else:
+        uvicorn.run(app, host=bind_host, port=bind_port, log_level="info")

@@ -17,6 +17,7 @@ INTERNAL_TOOL_TOKEN = os.environ.get("ODYSSEUS_INTERNAL_TOKEN") or secrets.token
 INTERNAL_TOOL_HEADER = "X-Odysseus-Internal-Token"
 # Pseudo-username on in-process tool-loopback requests; require_admin trusts it and it is reserved.
 INTERNAL_TOOL_USER = "internal-tool"
+TRUE_VALUES = {"1", "true", "yes", "on", "y"}
 
 
 def is_cors_preflight(method: str, headers) -> bool:
@@ -73,6 +74,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         is_document_pdf_preview = path.startswith("/api/document/") and path.endswith("/render-pdf")
         # Visual report pages are self-contained HTML — need inline scripts + external images
         is_report = path.startswith("/api/research/report/")
+        dev_frame_embed = (os.getenv("ODYSSEUS_DEV_MODE") or "").strip().lower() in TRUE_VALUES
 
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -86,32 +88,35 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
 
         if is_report:
+            frame_policy = "" if dev_frame_embed else "frame-ancestors 'none'"
             response.headers["Content-Security-Policy"] = (
                 "default-src 'self'; "
                 "script-src 'self' 'unsafe-inline'; "
                 "style-src 'self' 'unsafe-inline'; "
                 "font-src 'self'; "
                 "img-src 'self' data: blob: https:; "
-                "connect-src 'self'; "
-                "frame-ancestors 'none'"
+                "connect-src 'self'"
+                + (f"; {frame_policy}" if frame_policy else "")
             )
         elif is_tool_render:
             # Skip framing headers for tools.
             pass
         elif is_document_pdf_preview:
-            response.headers["X-Frame-Options"] = "SAMEORIGIN"
-            response.headers["Content-Security-Policy"] = (
-                "default-src 'none'; "
-                "frame-ancestors 'self'"
+            if not dev_frame_embed:
+                response.headers["X-Frame-Options"] = "SAMEORIGIN"
+            response.headers["Content-Security-Policy"] = "default-src 'none'" + (
+                "; frame-ancestors 'self'" if not dev_frame_embed else ""
             )
         else:
-            response.headers["X-Frame-Options"] = "DENY"
+            if not dev_frame_embed:
+                response.headers["X-Frame-Options"] = "DENY"
             # NOTE: `style-src 'unsafe-inline'` is intentionally retained.
             # `static/index.html` and `static/login.html` ship inline <style>
             # blocks, and several JS modules build runtime `style=""` attrs.
             # Migrating to nonce-only requires templating the HTML files +
             # auditing every JS-set style attribute. Since inline styles
             # don't execute script, the residual risk is visual-only.
+            frame_policy = "" if dev_frame_embed else "; frame-ancestors 'none'"
             response.headers["Content-Security-Policy"] = (
                 "default-src 'self'; "
                 f"script-src 'self' 'nonce-{nonce}' https://cdn.jsdelivr.net; "
@@ -120,7 +125,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "img-src 'self' data: blob: https:; "
                 "media-src 'self' blob:; "
                 "connect-src 'self'; "
-                "frame-src 'self'; "
-                "frame-ancestors 'none'"
+                "frame-src 'self'"
+                + frame_policy
             )
         return response
