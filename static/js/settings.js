@@ -690,8 +690,8 @@ async function initHarnessSettings() {
     thinkingSel.value = h.thinking_level || '';
     verbositySel.value = h.verbosity || 'normal';
     modelInput.value = h.model || h.model_id || '';
-    agentDirInput.value = h.agent_dir || h.agentDir || '';
-    sessionDirInput.value = h.session_dir || h.sessionDir || h.pi_session_dir || h.piSessionDir || '';
+    agentDirInput.value = h.agent_dir || '';
+    sessionDirInput.value = h.session_dir || '';
     persistSel.value = h.persist === false || h.in_memory === true || h.inMemory === true ? 'memory' : 'persist';
   }
   function collect() {
