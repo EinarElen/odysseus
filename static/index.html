@@ -1654,6 +1654,10 @@
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
             <span>Users</span>
           </button>
+          <button class="settings-nav-item admin-only" data-settings-tab="remote-access">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 0 1 16 0"/><path d="M7.5 12a4.5 4.5 0 0 1 9 0"/><path d="M12 12v8"/><path d="M9 20h6"/></svg>
+            <span>Remote Access</span>
+          </button>
           <button class="settings-nav-item admin-only" data-settings-tab="system">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
             <span>System</span>
@@ -2404,6 +2408,69 @@
               <button class="admin-btn-add" id="adm-addBtn">Add User</button>
               <span id="adm-addMsg" style="font-size:11px"></span>
             </div>
+          </div>
+        </div>
+
+        <!-- ═══ ADMIN: REMOTE ACCESS TAB ═══ -->
+        <div data-settings-panel="remote-access" class="hidden">
+          <div class="admin-card">
+            <h2 style="display:flex;align-items:center;gap:8px;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M4 12a8 8 0 0 1 16 0"/><path d="M7.5 12a4.5 4.5 0 0 1 9 0"/><path d="M12 12v8"/><path d="M9 20h6"/></svg>
+              Tailscale
+              <span style="flex:1"></span>
+              <button type="button" class="admin-btn-sm" id="adm-remoteRefreshBtn">Refresh</button>
+            </h2>
+            <div id="adm-remoteStatus" class="admin-toggle-sub" style="margin-bottom:8px">Loading...</div>
+            <div id="adm-remoteEndpointList" class="admin-user-list"></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">
+              <button type="button" class="admin-btn-add" id="adm-tsServeStart">Enable Serve</button>
+              <button type="button" class="admin-btn-sm" id="adm-tsServeStop">Disable Serve</button>
+              <span id="adm-tsServeMsg" style="font-size:11px;align-self:center;"></span>
+            </div>
+          </div>
+
+          <div class="admin-card">
+            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>Pair Client</h2>
+            <div class="admin-add-form" style="align-items:flex-start;">
+              <input id="adm-remoteInviteLabel" type="text" placeholder="Client label" style="flex:1;min-width:160px;">
+              <select id="adm-remoteClientType" style="min-width:120px;">
+                <option value="browser">Browser</option>
+                <option value="desktop">Desktop</option>
+                <option value="cli">CLI</option>
+                <option value="agent">Agent</option>
+                <option value="support">Support</option>
+                <option value="automation">Automation</option>
+                <option value="display">Display</option>
+                <option value="mobile">Mobile</option>
+              </select>
+              <input id="adm-remoteTtl" type="number" min="1" max="1440" value="30" title="Invite lifetime in minutes" style="width:82px;">
+              <button type="button" class="admin-btn-add" id="adm-remoteInviteBtn">Create Invite</button>
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:10px;margin:8px 0;font-size:11px;">
+              <label><input type="checkbox" class="adm-remote-cap" value="chat" checked> Chat</label>
+              <label><input type="checkbox" class="adm-remote-cap" value="models" checked> Models</label>
+              <label><input type="checkbox" class="adm-remote-cap" value="sessions"> Sessions</label>
+              <label><input type="checkbox" class="adm-remote-cap" value="remote_support:read"> Support read</label>
+              <label><input type="checkbox" class="adm-remote-cap" value="remote_support:control"> Support control</label>
+            </div>
+            <div id="adm-remoteInviteMsg" style="font-size:11px;margin-top:6px;"></div>
+            <div id="adm-remoteInviteReveal" class="admin-success" style="display:none;margin-top:8px;padding:10px;border-radius:8px;">
+              <div style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;">
+                <img id="adm-remoteInviteQr" alt="Pairing QR" width="132" height="132" style="display:none;border-radius:6px;background:var(--fg);padding:4px;">
+                <div style="flex:1;min-width:220px;">
+                  <div class="admin-ep-detail">Pairing URL</div>
+                  <code id="adm-remoteInviteUrl" style="display:block;word-break:break-all;margin:3px 0 8px;"></code>
+                  <button type="button" class="admin-btn-sm" id="adm-remoteCopyUrl">Copy URL</button>
+                  <button type="button" class="admin-btn-sm" id="adm-remoteCopyToken">Copy token</button>
+                </div>
+              </div>
+            </div>
+            <div id="adm-remoteInvitesList" class="admin-user-list" style="margin-top:10px;"></div>
+          </div>
+
+          <div class="admin-card">
+            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 18v3"/></svg>Known Clients</h2>
+            <div id="adm-remoteClientsList" class="admin-user-list"><div class="admin-empty">Loading...</div></div>
           </div>
         </div>
 

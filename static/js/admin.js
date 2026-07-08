@@ -2877,6 +2877,218 @@ function initDangerZone() {
   });
 }
 
+/* ── Remote access ── */
+function _remoteSafeQr(raw) {
+  const value = String(raw || '').trim();
+  return /^data:image\/png;base64,[a-z0-9+/=\s]+$/i.test(value) ? value : '';
+}
+
+function _remoteWhen(value) {
+  if (!value) return 'Never';
+  try { return new Date(value).toLocaleString(); } catch (_) { return value; }
+}
+
+async function _remoteCopy(value, msgEl) {
+  try {
+    await navigator.clipboard.writeText(value || '');
+    if (msgEl) { msgEl.textContent = 'Copied'; msgEl.className = 'admin-success'; }
+  } catch (_) {
+    if (msgEl) { msgEl.textContent = 'Copy failed'; msgEl.className = 'admin-error'; }
+  }
+}
+
+function _remoteEndpointHtml(endpoint) {
+  const warnings = (endpoint.warnings || []).map(w => `<div class="admin-ep-detail" style="color:var(--red);">${esc(w)}</div>`).join('');
+  const badges = [
+    endpoint.kind,
+    endpoint.reachable,
+    endpoint.requires_serve ? 'serve' : '',
+  ].filter(Boolean).map(b => `<span class="admin-badge">${esc(b)}</span>`).join(' ');
+  return `
+    <div class="admin-ep-item" style="flex-wrap:wrap;">
+      <div class="admin-ep-info" style="flex:1;min-width:220px;">
+        <div class="admin-ep-name">${esc(endpoint.label || endpoint.kind)} ${badges}</div>
+        <div class="admin-ep-detail">${esc(endpoint.url || '')}</div>
+        ${warnings}
+      </div>
+      <div class="admin-ep-actions">
+        <button type="button" class="admin-btn-sm" data-remote-copy="${esc(endpoint.url || '')}">Copy</button>
+      </div>
+    </div>`;
+}
+
+async function loadRemoteAccess() {
+  const statusEl = el('adm-remoteStatus');
+  const endpointsEl = el('adm-remoteEndpointList');
+  const clientsEl = el('adm-remoteClientsList');
+  const invitesEl = el('adm-remoteInvitesList');
+  if (!statusEl || !endpointsEl || !clientsEl || !invitesEl) return;
+
+  try {
+    const [statusRes, clientsRes, invitesRes] = await Promise.all([
+      fetch('/api/remote-access/status', { credentials: 'same-origin' }),
+      fetch('/api/remote-access/clients', { credentials: 'same-origin' }),
+      fetch('/api/remote-access/invites', { credentials: 'same-origin' }),
+    ]);
+    const status = await statusRes.json();
+    const clients = await clientsRes.json();
+    const invites = await invitesRes.json();
+
+    const ts = status.tailscale || {};
+    if (!ts.installed) statusEl.textContent = 'Tailscale command not found';
+    else if (!ts.running) statusEl.textContent = ts.error || 'Tailscale is not running';
+    else {
+      const self = ts.self || {};
+      statusEl.textContent = `Tailscale running${self.dns_name ? ': ' + self.dns_name : ''}${self.tailscale_ip ? ' (' + self.tailscale_ip + ')' : ''}`;
+    }
+
+    const endpoints = Array.isArray(status.endpoints) ? status.endpoints : [];
+    endpointsEl.innerHTML = endpoints.length
+      ? endpoints.map(_remoteEndpointHtml).join('')
+      : '<div class="admin-empty">No endpoints detected</div>';
+    endpointsEl.querySelectorAll('[data-remote-copy]').forEach(btn => {
+      btn.addEventListener('click', () => _remoteCopy(btn.dataset.remoteCopy, el('adm-tsServeMsg')));
+    });
+
+    const clientRows = Array.isArray(clients.clients) ? clients.clients : [];
+    clientsEl.innerHTML = clientRows.length ? clientRows.map(c => {
+      const caps = (c.capabilities || []).map(cap => `<span class="admin-badge">${esc(cap)}</span>`).join(' ');
+      return `
+        <div class="admin-ep-item" style="flex-wrap:wrap;">
+          <div class="admin-ep-info" style="flex:1;min-width:220px;">
+            <div class="admin-ep-name">${esc(c.name || 'Remote client')} ${c.is_active ? '' : '<span class="admin-badge admin-badge-off">revoked</span>'}</div>
+            <div class="admin-ep-detail">${esc(c.client_type || 'client')}${c.platform ? ' / ' + esc(c.platform) : ''} · last seen ${esc(_remoteWhen(c.last_seen_at))}</div>
+            <div style="margin-top:4px;">${caps}</div>
+          </div>
+          <div class="admin-ep-actions">
+            ${c.is_active ? `<button type="button" class="admin-btn-delete" data-remote-revoke-client="${esc(c.id)}">Revoke</button>` : ''}
+          </div>
+        </div>`;
+    }).join('') : '<div class="admin-empty">No known clients</div>';
+    clientsEl.querySelectorAll('[data-remote-revoke-client]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        await fetch(`/api/remote-access/clients/${encodeURIComponent(btn.dataset.remoteRevokeClient)}`, { method: 'DELETE', credentials: 'same-origin' });
+        loadRemoteAccess();
+      });
+    });
+
+    const inviteRows = (Array.isArray(invites.invites) ? invites.invites : []).filter(i => !i.consumed_at && !i.revoked_at);
+    invitesEl.innerHTML = inviteRows.length ? inviteRows.map(i => {
+      const caps = (i.capabilities || []).map(cap => `<span class="admin-badge">${esc(cap)}</span>`).join(' ');
+      return `
+        <div class="admin-ep-item" style="flex-wrap:wrap;">
+          <div class="admin-ep-info" style="flex:1;min-width:220px;">
+            <div class="admin-ep-name">${esc(i.label || 'Remote client')} <span class="admin-badge">${esc(i.client_type || 'client')}</span></div>
+            <div class="admin-ep-detail">Expires ${esc(_remoteWhen(i.expires_at))}</div>
+            <div style="margin-top:4px;">${caps}</div>
+          </div>
+          <div class="admin-ep-actions">
+            <button type="button" class="admin-btn-delete" data-remote-revoke-invite="${esc(i.id)}">Revoke</button>
+          </div>
+        </div>`;
+    }).join('') : '<div class="admin-empty">No pending invites</div>';
+    invitesEl.querySelectorAll('[data-remote-revoke-invite]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        await fetch(`/api/remote-access/invites/${encodeURIComponent(btn.dataset.remoteRevokeInvite)}`, { method: 'DELETE', credentials: 'same-origin' });
+        loadRemoteAccess();
+      });
+    });
+  } catch (e) {
+    statusEl.textContent = 'Failed to load remote access status';
+    statusEl.className = 'admin-error';
+  }
+}
+
+function initRemoteAccess() {
+  const refresh = el('adm-remoteRefreshBtn');
+  const start = el('adm-tsServeStart');
+  const stop = el('adm-tsServeStop');
+  const inviteBtn = el('adm-remoteInviteBtn');
+  if (!refresh || refresh.dataset.bound) return;
+  refresh.dataset.bound = '1';
+
+  refresh.addEventListener('click', loadRemoteAccess);
+  start.addEventListener('click', async () => {
+    const msg = el('adm-tsServeMsg');
+    msg.textContent = 'Starting...'; msg.className = '';
+    try {
+      const res = await fetch('/api/remote-access/tailscale/serve', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || data.error || 'Failed');
+      msg.textContent = 'Serve enabled';
+      msg.className = 'admin-success';
+      loadRemoteAccess();
+    } catch (err) {
+      msg.textContent = err.message || 'Failed';
+      msg.className = 'admin-error';
+    }
+  });
+  stop.addEventListener('click', async () => {
+    const msg = el('adm-tsServeMsg');
+    msg.textContent = 'Stopping...'; msg.className = '';
+    try {
+      const res = await fetch('/api/remote-access/tailscale/serve', {
+        method: 'DELETE',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || data.error || 'Failed');
+      msg.textContent = 'Serve disabled';
+      msg.className = 'admin-success';
+      loadRemoteAccess();
+    } catch (err) {
+      msg.textContent = err.message || 'Failed';
+      msg.className = 'admin-error';
+    }
+  });
+  inviteBtn.addEventListener('click', async () => {
+    const msg = el('adm-remoteInviteMsg');
+    const reveal = el('adm-remoteInviteReveal');
+    const qr = el('adm-remoteInviteQr');
+    msg.textContent = ''; msg.className = ''; reveal.style.display = 'none';
+    const capabilities = Array.from(document.querySelectorAll('.adm-remote-cap:checked')).map(cb => cb.value);
+    try {
+      const res = await fetch('/api/remote-access/invites', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          label: el('adm-remoteInviteLabel').value.trim(),
+          client_type: el('adm-remoteClientType').value,
+          ttl_minutes: el('adm-remoteTtl').value,
+          capabilities,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Failed');
+      const invite = data.invite || {};
+      el('adm-remoteInviteUrl').textContent = invite.pairing_url || '';
+      el('adm-remoteCopyUrl').dataset.copyValue = invite.pairing_url || '';
+      el('adm-remoteCopyToken').dataset.copyValue = invite.token || '';
+      const safeQr = _remoteSafeQr(data.qr);
+      qr.style.display = safeQr ? '' : 'none';
+      if (safeQr) qr.src = safeQr;
+      reveal.style.display = '';
+      msg.textContent = 'Invite created';
+      msg.className = 'admin-success';
+      loadRemoteAccess();
+    } catch (err) {
+      msg.textContent = err.message || 'Failed';
+      msg.className = 'admin-error';
+    }
+  });
+  [el('adm-remoteCopyUrl'), el('adm-remoteCopyToken')].forEach(btn => {
+    btn.addEventListener('click', () => _remoteCopy(btn.dataset.copyValue || '', el('adm-remoteInviteMsg')));
+  });
+}
+
 /* ═══════════════════════════════════════════
    TERMINAL LOGS VIEWER
    ═══════════════════════════════════════════ */
@@ -3074,7 +3286,7 @@ function initAll() {
   modalEl = el('settings-modal');
   const inits = [
     initSignupToggle, initShareDefaultsToggle, initAddUser, initEndpointForm, initMcpForm,
-    initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView,
+    initCalDAV, initBackup, initDangerZone, initTokenForm, initRemoteAccess, initLogsView,
     () => settingsModule.initIntegrations()
   ];
   for (const fn of inits) {
@@ -3090,6 +3302,7 @@ function refreshAll() {
   loadBuiltinTools();
   loadMcpServers();
   loadTokens();
+  loadRemoteAccess();
   loadLogs(false);
 }
 
