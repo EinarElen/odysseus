@@ -210,6 +210,30 @@ def test_native_model_exact_get_workspace_fence_is_executed(monkeypatch):
     assert exec_calls[0].tool_type == "get_workspace"
 
 
+def test_resolve_tool_blocks_recovers_bash_repair_fence_for_native_model():
+    text = "Winvalid tool call? Need no blank?```bash\npwd\n```"
+    blocks, used_native, _ = al._resolve_tool_blocks(text, [], round_num=1, is_api_model=True)
+    assert len(blocks) == 1
+    assert blocks[0].tool_type == "bash"
+    assert blocks[0].content == "pwd"
+    assert used_native is False
+
+
+def test_native_model_bash_repair_fence_is_executed(monkeypatch):
+    exec_calls = []
+    _patch_common(monkeypatch, exec_calls)
+    _run_loop(
+        monkeypatch,
+        "gpt-5.5",
+        ["Winvalid tool call? Need no blank?```bash\npwd\n```"],
+        max_rounds=2,
+        endpoint_url="https://chatgpt.com/backend-api/codex/responses",
+    )
+    assert len(exec_calls) == 1, f"repair bash fence should execute once: {exec_calls}"
+    assert exec_calls[0].tool_type == "bash"
+    assert exec_calls[0].content == "pwd"
+
+
 def test_resolve_tool_blocks_keeps_textual_fallback_for_non_native_models():
     text = "```bash\necho hi\n```"
     blocks, used_native, _ = al._resolve_tool_blocks(text, [], round_num=1, is_api_model=False)
@@ -329,6 +353,37 @@ def test_skip_fenced_recovers_exact_no_arg_tool_fence():
     assert len(blocks) == 1
     assert blocks[0].tool_type == "get_workspace"
     assert strip_tool_blocks(text, skip_fenced=True) == ""
+
+
+def test_skip_fenced_recovers_and_strips_initial_bash_repair_sequence():
+    text = (
+        "Winvalid tool call? Need no blank?```bash\n"
+        "pwd\n"
+        "```\n"
+        "```bash\n"
+        "pwd\n"
+        "```\n\n"
+        "Below is the answer."
+    )
+    blocks = parse_tool_blocks(text, skip_fenced=True, allow_repair_fenced_code=True)
+    assert len(blocks) == 1
+    assert blocks[0].tool_type == "bash"
+    assert blocks[0].content == "pwd"
+    cleaned = strip_tool_blocks(text, skip_fenced=True, allow_repair_fenced_code=True)
+    assert cleaned == "Below is the answer."
+
+
+def test_skip_fenced_does_not_recover_repair_words_inside_normal_prose():
+    text = (
+        "The previous transcript contained the phrase invalid tool call.\n\n"
+        "```bash\n"
+        "pwd\n"
+        "```"
+    )
+    assert parse_tool_blocks(text, skip_fenced=True, allow_repair_fenced_code=True) == []
+    cleaned = strip_tool_blocks(text, skip_fenced=True, allow_repair_fenced_code=True)
+    assert "```bash" in cleaned
+    assert "pwd" in cleaned
 
 
 def test_resolve_tool_blocks_recovers_invoke_markup_for_native_model_with_no_native_calls():

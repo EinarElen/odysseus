@@ -42,6 +42,48 @@ _TOOL_BLOCK_RE = re.compile(
 # executes for them.
 _CODE_FENCE_TAGS = frozenset({"bash", "python"})
 _EMPTY_FENCE_TOOL_TAGS = frozenset(BUILTIN_EMAIL_TOOLS) | {"get_workspace"}
+_FENCED_CODE_REPAIR_RE = re.compile(
+    r"(?:invalid\s+tool\s+call|malformed\s+tool\s+call|need\s+no\s+blank|tool\s+call\s+(?:failed|error))",
+    re.IGNORECASE,
+)
+_FENCED_CODE_REPAIR_CONTEXT_CHARS = 2000
+
+
+def _is_initial_repair_prefix(prefix: str) -> bool:
+    """Whether text before a code fence is only native-tool repair chatter."""
+    if len(prefix) > _FENCED_CODE_REPAIR_CONTEXT_CHARS:
+        return False
+    matches = list(_FENCED_CODE_REPAIR_RE.finditer(prefix))
+    if not matches:
+        return False
+    before = prefix[:matches[0].start()].strip()
+    # Some upstream renderers leak one or two stray characters immediately
+    # before "invalid tool call"; do not let full prose qualify as repair.
+    if before and len(before) > 2:
+        return False
+    after = prefix[matches[-1].end():].strip()
+    return not re.search(r"[A-Za-z0-9_]", after)
+
+
+def _is_repair_fenced_code_context(text: str, match, *, allow_prior_fences: bool = False) -> bool:
+    prefix = text[:match.start()]
+    if allow_prior_fences:
+        prefix = _TOOL_BLOCK_RE.sub("", prefix)
+    return _is_initial_repair_prefix(prefix)
+
+
+def _strip_initial_repair_preamble(text: str) -> str:
+    prefix = text[:_FENCED_CODE_REPAIR_CONTEXT_CHARS]
+    matches = list(_FENCED_CODE_REPAIR_RE.finditer(prefix))
+    if not matches:
+        return text
+    before = text[:matches[0].start()].strip()
+    if before and len(before) > 2:
+        return text
+    i = matches[-1].end()
+    while i < len(text) and (text[i].isspace() or text[i] in "?:;,.!-_"):
+        i += 1
+    return text[i:].lstrip()
 
 
 def _fenced_tool_call(m) -> Optional[Tuple[str, str]]:
@@ -93,9 +135,15 @@ def _strip_executed_fence_skip_code(m) -> str:
     return "" if _is_executable_fenced_call(tag, content, skip_fenced=True) else m.group(0)
 
 
-def _is_executable_fenced_call(tag: str, content: str, *, skip_fenced: bool) -> bool:
+def _is_executable_fenced_call(
+    tag: str,
+    content: str,
+    *,
+    skip_fenced: bool,
+    repair_fenced_code: bool = False,
+) -> bool:
     """Whether a parsed fence should dispatch under the current fence policy."""
-    if skip_fenced and tag in _CODE_FENCE_TAGS:
+    if skip_fenced and tag in _CODE_FENCE_TAGS and not repair_fenced_code:
         return False
     if not content and tag not in _EMPTY_FENCE_TOOL_TAGS:
         return False
@@ -1255,7 +1303,11 @@ def _iter_xml_direct(text):
     return _iter_backref_blocks(text, _XML_DIRECT_OPEN_RE, _XML_DIRECT_CLOSE_ANY_RE, ci=True)
 
 
-def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
+def parse_tool_blocks(
+    text: str,
+    skip_fenced: bool = False,
+    allow_repair_fenced_code: bool = False,
+) -> List[ToolBlock]:
     """Extract executable tool blocks from LLM response text.
 
     Supports multiple formats:
@@ -1276,6 +1328,12 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
     because some API backends emit Odysseus text-tool syntax even when schemas
     were supplied. Patterns 2-5 — explicit [TOOL_CALL]/<invoke>/<tool_code>/DSML
     markup that leaked into content as text — stay fully active regardless.
+
+    `allow_repair_fenced_code`: when True with `skip_fenced`, recover one
+    initial ```bash/```python fence only if the model prefixed it with native
+    tool-call repair chatter such as "invalid tool call" / "need no blank".
+    This catches upstream repair attempts without turning ordinary code
+    examples back into executable tools.
     """
     blocks = []
 
@@ -1290,7 +1348,18 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
         if call is None:
             continue
         tag, content = call
-        if not _is_executable_fenced_call(tag, content, skip_fenced=skip_fenced):
+        repair_fenced_code = (
+            allow_repair_fenced_code
+            and skip_fenced
+            and tag in _CODE_FENCE_TAGS
+            and _is_repair_fenced_code_context(text, m)
+        )
+        if not _is_executable_fenced_call(
+            tag,
+            content,
+            skip_fenced=skip_fenced,
+            repair_fenced_code=repair_fenced_code,
+        ):
             continue
         if not content:
             blocks.append(ToolBlock(tag, ""))
@@ -1422,7 +1491,11 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
     return blocks
 
 
-def strip_tool_blocks(text: str, skip_fenced: bool = False) -> str:
+def strip_tool_blocks(
+    text: str,
+    skip_fenced: bool = False,
+    allow_repair_fenced_code: bool = False,
+) -> str:
     """Remove executable tool blocks from text for clean display.
 
     `skip_fenced`: when True, fenced ```bash/```python code blocks are left
@@ -1435,6 +1508,10 @@ def strip_tool_blocks(text: str, skip_fenced: bool = False) -> str:
     streams once and then disappears on reload (issue #3222 follow-up).
     Patterns 2-5 + DSML markup are always stripped, since that markup should
     never reach the user regardless of whether it converted to a tool call.
+
+    `allow_repair_fenced_code` mirrors `parse_tool_blocks`: initial repair
+    chatter plus adjacent code fences are stripped from native/API displays,
+    while normal code examples remain visible.
     """
     # Normalize DSML first so its markup gets stripped by the <invoke>
     # / <tool_call> removers below instead of leaking to the user.
@@ -1442,8 +1519,34 @@ def strip_tool_blocks(text: str, skip_fenced: bool = False) -> str:
     # Keep the executed-vs-illustrative fence distinction (only strip fences
     # that actually dispatched; leave code examples from native models inert
     # but visible), then remove [TOOL_CALL]{...}[/TOOL_CALL] markup.
-    fence_stripper = _strip_executed_fence_skip_code if skip_fenced else _strip_executed_fence
+    stripped_repair_fence = False
+
+    def fence_stripper(m) -> str:
+        nonlocal stripped_repair_fence
+        call = _fenced_tool_call(m)
+        if call is None:
+            return m.group(0)
+        tag, content = call
+        repair_fenced_code = (
+            allow_repair_fenced_code
+            and skip_fenced
+            and tag in _CODE_FENCE_TAGS
+            and _is_repair_fenced_code_context(text, m, allow_prior_fences=True)
+        )
+        if _is_executable_fenced_call(
+            tag,
+            content,
+            skip_fenced=skip_fenced,
+            repair_fenced_code=repair_fenced_code,
+        ):
+            if repair_fenced_code:
+                stripped_repair_fence = True
+            return ""
+        return m.group(0)
+
     cleaned = _TOOL_BLOCK_RE.sub(fence_stripper, text)
+    if stripped_repair_fence:
+        cleaned = _strip_initial_repair_preamble(cleaned)
     # Forward-only removal mirrors parse_tool_blocks: _strip_delimited pairs each
     # opener with a later closer and stops when none is reachable, so untrusted
     # output can't drive the O(n^2) lazy-rescan (ReDoS); see _iter_delimited.

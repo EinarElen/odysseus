@@ -424,6 +424,9 @@ const TOOL_CALL_RE = /\[TOOL_CALL\][\s\S]*?\[\/TOOL_CALL\]/gi;
 // so a reload always renders clean.
 let EXEC_FENCE_RE = null;
 const EXEC_FENCE_NON_TOOL = new Set(['bash', 'python']);
+const REPAIR_CODE_FENCE_RE = /```(bash|python)(?![\w-])[ \t]*([{\[][^\n]*?)?[ \t]*(?=\r?\n|```)\r?\n?([\s\S]*?)```/gi;
+const FENCED_CODE_REPAIR_PATTERN = '(?:invalid\\s+tool\\s+call|malformed\\s+tool\\s+call|need\\s+no\\s+blank|tool\\s+call\\s+(?:failed|error))';
+const FENCED_CODE_REPAIR_CONTEXT_CHARS = 2000;
 
 function escapeRegex(source) {
   return String(source).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -440,6 +443,44 @@ function stripExecutedFence(match, tag, inline, body) {
     return match;
   }
   return '';
+}
+
+function repairMatches(prefix) {
+  return Array.from(prefix.matchAll(new RegExp(FENCED_CODE_REPAIR_PATTERN, 'gi')));
+}
+
+function isInitialRepairPrefix(prefix) {
+  if (prefix.length > FENCED_CODE_REPAIR_CONTEXT_CHARS) return false;
+  const matches = repairMatches(prefix);
+  if (!matches.length) return false;
+  const before = prefix.slice(0, matches[0].index).trim();
+  if (before && before.length > 2) return false;
+  const last = matches[matches.length - 1];
+  const after = prefix.slice(last.index + last[0].length).trim();
+  return !/[A-Za-z0-9_]/.test(after);
+}
+
+function isRepairCodeFenceContext(fullText, offset) {
+  const prefix = fullText.slice(0, offset).replace(REPAIR_CODE_FENCE_RE, '');
+  return isInitialRepairPrefix(prefix);
+}
+
+function stripRepairCodeFence(match, tag, inline, body, offset, fullText) {
+  if ((inline || '').trim()) return match;
+  if (!(body || '').trim()) return match;
+  return isRepairCodeFenceContext(fullText, offset) ? '' : match;
+}
+
+function stripInitialRepairPreamble(text) {
+  const prefix = text.slice(0, FENCED_CODE_REPAIR_CONTEXT_CHARS);
+  const matches = repairMatches(prefix);
+  if (!matches.length) return text;
+  const before = text.slice(0, matches[0].index).trim();
+  if (before && before.length > 2) return text;
+  const last = matches[matches.length - 1];
+  let i = last.index + last[0].length;
+  while (i < text.length && /[\s?:;,.\-!_]/.test(text[i])) i += 1;
+  return text.slice(i).trimStart();
 }
 
 async function loadExecFenceRegex() {
@@ -914,6 +955,13 @@ export function roleTimestamp(when) {
 export function stripToolBlocks(text) {
   let cleaned = text.replace(TOOL_CALL_RE, '');
   if (EXEC_FENCE_RE) cleaned = cleaned.replace(EXEC_FENCE_RE, stripExecutedFence);
+  let strippedRepairFence = false;
+  cleaned = cleaned.replace(REPAIR_CODE_FENCE_RE, (match, tag, inline, body, offset, fullText) => {
+    const replacement = stripRepairCodeFence(match, tag, inline, body, offset, fullText);
+    if (replacement === '') strippedRepairFence = true;
+    return replacement;
+  });
+  if (strippedRepairFence) cleaned = stripInitialRepairPreamble(cleaned);
   cleaned = cleaned.replace(DSML_TOOL_RE, '');
   cleaned = cleaned.replace(DSML_INVOKE_RE, '');
   cleaned = cleaned.replace(DSML_STRAY_RE, '');

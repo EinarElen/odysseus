@@ -2273,7 +2273,12 @@ def _resolve_tool_blocks(
         # falling back to DSML). Dropping the whole parser would silently lose
         # those too. Non-native / textual-only models keep every pattern,
         # fenced blocks included, since that's their *only* tool channel.
-        tool_blocks = parse_tool_blocks(round_response, skip_fenced=(is_api_model and not allow_fenced_for_api))
+        skip_fenced = is_api_model and not allow_fenced_for_api
+        tool_blocks = parse_tool_blocks(
+            round_response,
+            skip_fenced=skip_fenced,
+            allow_repair_fenced_code=skip_fenced,
+        )
         if tool_blocks:
             logger.info(f"Agent round {round_num}: {len(tool_blocks)} fenced tool block(s) detected")
         tool_invocations = [
@@ -3864,7 +3869,12 @@ async def stream_agent_loop(
         # model with no real native_tool_calls) must not be stripped from the
         # persisted text either — otherwise it streams once and then disappears
         # on reload (#3222 follow-up).
-        cleaned_round = strip_tool_blocks(round_response, skip_fenced=(_is_api_model and not used_native and not guide_only)).strip()
+        skip_fenced_for_clean = _is_api_model and not used_native and not guide_only
+        cleaned_round = strip_tool_blocks(
+            round_response,
+            skip_fenced=skip_fenced_for_clean,
+            allow_repair_fenced_code=skip_fenced_for_clean,
+        ).strip()
         round_texts.append(cleaned_round)
         if _ody_qwen_finetune_model and not tool_blocks and cleaned_round:
             yield f'data: {json.dumps({"delta": cleaned_round})}\n\n'
