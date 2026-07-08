@@ -28,6 +28,7 @@ let _expandedFolders = {};  // folderName -> true if "show more" clicked
 let _sortMode = Storage.get('odysseus-session-sort') || 'active'; // default to last active
 let _autoCreateInProgress = false; // guard against recursive auto-create
 const _INCOGNITO_SESSIONS_KEY = 'ody-incognito-sessions'; // sessionStorage key for incognito session IDs
+const _PENDING_CHAT_KEY = 'ody-pending-chat';
 const _isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 const _mod = _isMac ? '⌘' : 'Ctrl';
 let _historyPager = null;
@@ -1702,7 +1703,7 @@ export async function loadSessions() {
             if (emptyDefault) {
               targetId = emptyDefault.id;
             } else {
-              await createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
+              await createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, dc.provider_options || {});
               // On mobile, hide sidebar so user lands directly in chat
               if (window.innerWidth < 768) {
                 const sb = document.getElementById('sidebar');
@@ -1746,7 +1747,7 @@ export async function loadSessions() {
           const dcRes = await fetch(`${API_BASE}/api/default-chat`);
           const dc = await dcRes.json();
           if (dc.endpoint_url && dc.model) {
-            await createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
+            await createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, dc.provider_options || {});
           }
         } catch (_) { /* no default model — that's fine, user can /setup */ }
         _autoCreateInProgress = false;
@@ -2084,10 +2085,37 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
   }
 }
 
-// Pending session — stored locally until the first message is sent
-let _pendingChat = null; // { url, modelId, endpointId }
+function _readPendingChat() {
+  try {
+    const raw = sessionStorage.getItem(_PENDING_CHAT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (!parsed.url && !parsed.modelId) return null;
+    return {
+      url: parsed.url || '',
+      modelId: parsed.modelId || '',
+      endpointId: parsed.endpointId || '',
+      source: parsed.source || 'manual',
+      providerOptions: parsed.providerOptions && typeof parsed.providerOptions === 'object' ? parsed.providerOptions : {},
+    };
+  } catch {
+    return null;
+  }
+}
 
-export function createDirectChat(url, modelId, endpointId) {
+function _setPendingChat(value) {
+  _pendingChat = value || null;
+  try {
+    if (_pendingChat) sessionStorage.setItem(_PENDING_CHAT_KEY, JSON.stringify(_pendingChat));
+    else sessionStorage.removeItem(_PENDING_CHAT_KEY);
+  } catch {}
+}
+
+// Pending session — stored tab-locally until the first message is sent
+let _pendingChat = _readPendingChat(); // { url, modelId, endpointId, providerOptions, source }
+
+export function createDirectChat(url, modelId, endpointId, providerOptions) {
   _sessionNavToken++;
   // Detach any active stream so it doesn't interfere with the new chat
   if (window.chatModule && window.chatModule.detachCurrentStream) {
@@ -2101,7 +2129,7 @@ export function createDirectChat(url, modelId, endpointId) {
   }
 
   // Don't hit the API — just store the model info and prepare the UI
-  _pendingChat = { url, modelId, endpointId };
+  _setPendingChat({ url, modelId, endpointId, source: 'manual', providerOptions: providerOptions || {} });
   _skipAutoSelect = true;
   _suppressNextSessionLoading = true;
   currentSessionId = null;
@@ -2148,11 +2176,15 @@ export function createDirectChat(url, modelId, endpointId) {
 export async function materializePendingSession() {
   const pending = _pendingChat;
   if (!pending) return false;
-  _pendingChat = null;
 
   const incognitoChk = document.getElementById('incognito-toggle');
   const isIncognito = incognitoChk && incognitoChk.checked;
-  const base = (pending.modelId || 'model').split('/').pop();
+  const harnessCfg = pending.providerOptions && pending.providerOptions.harness;
+  const harnessId = harnessCfg && harnessCfg.id ? String(harnessCfg.id) : '';
+  const harnessLabel = harnessId ? harnessId.charAt(0).toUpperCase() + harnessId.slice(1) : '';
+  const base = harnessId
+    ? `${harnessLabel} ${(pending.modelId || harnessCfg.model || 'harness').split('/').pop()}`
+    : (pending.modelId || 'model').split('/').pop();
   const name = isIncognito ? 'Nobody' : `${base} ${new Date().toLocaleTimeString()}`;
 
   const fd = new FormData();
@@ -2164,6 +2196,9 @@ export async function materializePendingSession() {
   }
   if (pending.endpointId) {
     fd.append('endpoint_id', pending.endpointId);
+  }
+  if (pending.providerOptions && Object.keys(pending.providerOptions).length) {
+    fd.append('provider_options', JSON.stringify(pending.providerOptions));
   }
 
   let res;
@@ -2185,6 +2220,8 @@ export async function materializePendingSession() {
     uiModule.showError(`Session create failed (${res.status}) ${payload.detail || JSON.stringify(payload)}`);
     return false;
   }
+
+  _setPendingChat(null);
 
   if (isIncognito && payload.id) {
     _markIncognito(payload.id);
@@ -2591,7 +2628,7 @@ function _initAllDropdowns() {
     getCurrentSessionId: () => currentSessionId,
     getSessions: () => sessions,
     getPendingChat: () => _pendingChat,
-    setPendingChat: (v) => { _pendingChat = v; },
+    setPendingChat: (v) => { _setPendingChat(v); },
     createDirectChat,
   });
   _initDropdownDismiss();

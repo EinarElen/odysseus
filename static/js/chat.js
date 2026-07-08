@@ -27,6 +27,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   const RESEARCH_TIMEOUT_MS = 360000;
   const DEFAULT_TIMEOUT_MS = 120000;
   const RESEARCH_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
+  const CAPABILITY_OVERRIDES_KEY = 'odysseus_capability_overrides';
 
   let API_BASE = '';
   let currentAbort = null;
@@ -43,6 +44,189 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   let _sendInFlight = false;   // covers the window from click → streaming start
   let _displayOverride = null; // Override visible user bubble text (hides injected prompts)
   let _hideUserBubble = false; // Skip user bubble entirely (e.g. continue after stop)
+  let _capabilityPreviewTimer = null;
+  let _capabilityPreviewAbort = null;
+
+  function _capabilityOverrides() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(CAPABILITY_OVERRIDES_KEY) || '{}');
+      return {
+        domains: Array.isArray(parsed.domains) ? parsed.domains : [],
+        tools: Array.isArray(parsed.tools) ? parsed.tools : [],
+        disabled_tools: Array.isArray(parsed.disabled_tools) ? parsed.disabled_tools : [],
+      };
+    } catch (_) {
+      return { domains: [], tools: [], disabled_tools: [] };
+    }
+  }
+
+  function _isHarnessSessionMeta(session) {
+    if (!session || typeof session !== 'object') return false;
+    const url = String(session.endpoint_url || session.url || '');
+    if (url.startsWith('harness://')) return true;
+    const options = session.provider_options || session.providerOptions || {};
+    return !!(options && typeof options === 'object' && options.harness && options.harness.id);
+  }
+
+  function _saveCapabilityOverrides(overrides) {
+    const clean = {
+      domains: Array.from(new Set(overrides.domains || [])).filter(Boolean),
+      tools: Array.from(new Set(overrides.tools || [])).filter(Boolean),
+      disabled_tools: Array.from(new Set(overrides.disabled_tools || [])).filter(Boolean),
+    };
+    const active = clean.domains.length || clean.tools.length || clean.disabled_tools.length;
+    if (active) localStorage.setItem(CAPABILITY_OVERRIDES_KEY, JSON.stringify(clean));
+    else localStorage.removeItem(CAPABILITY_OVERRIDES_KEY);
+    return clean;
+  }
+
+  function _capabilityPayloadFromUi(message) {
+    const st = Storage.loadToggleState ? Storage.loadToggleState() : {};
+    const mode = (st.mode || 'chat') === 'agent' ? 'agent' : 'chat';
+    const webToggle = document.getElementById('web-toggle');
+    const bashToggle = document.getElementById('bash-toggle');
+    const workspace = (Storage.KEYS && Storage.get(Storage.KEYS.WORKSPACE, '')) || '';
+    const overrides = _capabilityOverrides();
+    return {
+      message: message || '',
+      mode,
+      allow_web_search: webToggle && webToggle.checked ? 'true' : 'false',
+      allow_bash: bashToggle && bashToggle.checked ? 'true' : 'false',
+      workspace,
+      force_domains: overrides.domains,
+      force_tools: overrides.tools,
+      disabled_tools: overrides.disabled_tools,
+    };
+  }
+
+  function _renderCapabilityPreview(data) {
+    const summary = document.getElementById('capability-summary');
+    const domainsEl = document.getElementById('capability-detected-domains');
+    const toolsEl = document.getElementById('capability-allowed-tools');
+    const stateEl = document.getElementById('capability-menu-state');
+    const btn = document.getElementById('overflow-capabilities-btn');
+    if (!summary || !domainsEl || !toolsEl) return;
+
+    const overrides = _capabilityOverrides();
+    const hasOverrides = overrides.domains.length || overrides.tools.length || overrides.disabled_tools.length;
+    const domains = data?.detected_domains || [];
+    const forcedDomains = data?.forced_domains || [];
+    const allowed = data?.allowed_tools || [];
+    const disabled = data?.disabled_tools || [];
+    const mode = data?.mode || 'chat';
+    const workspace = data?.workspace || '';
+    const sourceText = domains.length ? `Detected: ${domains.join(', ')}` : 'No strong tool intent detected';
+    summary.textContent = `${mode === 'agent' ? 'Agent' : 'Chat'} mode. ${sourceText}${workspace ? `. Workspace: ${workspace}` : ''}.`;
+    domainsEl.innerHTML = '';
+    [...domains.map(d => [d, false]), ...forcedDomains.map(d => [d, true])].forEach(([domain, forced]) => {
+      const chip = document.createElement('span');
+      chip.className = 'capability-token';
+      chip.textContent = forced ? `+${domain}` : domain;
+      domainsEl.appendChild(chip);
+    });
+    if (!domainsEl.children.length) {
+      const chip = document.createElement('span');
+      chip.className = 'capability-token';
+      chip.textContent = 'auto';
+      domainsEl.appendChild(chip);
+    }
+    const allowedText = allowed.length ? allowed.slice(0, 14).join(', ') : 'No domain tools preselected';
+    const more = allowed.length > 14 ? `, +${allowed.length - 14} more` : '';
+    const disabledText = disabled.length ? ` Disabled: ${disabled.slice(0, 8).join(', ')}${disabled.length > 8 ? ', ...' : ''}` : '';
+    toolsEl.textContent = `Allowed/seeded: ${allowedText}${more}.${disabledText}`;
+    if (stateEl) stateEl.textContent = hasOverrides ? 'Custom' : 'Auto';
+    if (btn) btn.classList.toggle('active', !!hasOverrides);
+  }
+
+  function _scheduleCapabilityPreview() {
+    if (_capabilityPreviewTimer) clearTimeout(_capabilityPreviewTimer);
+    _capabilityPreviewTimer = setTimeout(async () => {
+      _capabilityPreviewTimer = null;
+      const panel = document.getElementById('capability-panel');
+      const messageInput = uiModule.el ? uiModule.el('message') : document.getElementById('message');
+      if (!panel || panel.classList.contains('hidden')) return;
+      const payload = _capabilityPayloadFromUi(messageInput ? messageInput.value : '');
+      try {
+        if (_capabilityPreviewAbort) _capabilityPreviewAbort.abort();
+        _capabilityPreviewAbort = new AbortController();
+        const res = await fetch(`${API_BASE}/api/agent/capabilities/preview`, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: _capabilityPreviewAbort.signal,
+        });
+        if (!res.ok) throw new Error(`capability preview ${res.status}`);
+        _renderCapabilityPreview(await res.json());
+      } catch (err) {
+        if (err && err.name === 'AbortError') return;
+        _renderCapabilityPreview({
+          mode: payload.mode,
+          workspace: payload.workspace,
+          detected_domains: [],
+          forced_domains: payload.force_domains,
+          allowed_tools: [...payload.force_tools],
+          disabled_tools: payload.disabled_tools,
+        });
+      }
+    }, 160);
+  }
+
+  function _syncCapabilityOverrideInputs() {
+    const overrides = _capabilityOverrides();
+    document.querySelectorAll('[data-cap-domain]').forEach(input => {
+      input.checked = overrides.domains.includes(input.dataset.capDomain);
+    });
+    document.querySelectorAll('[data-cap-tool]').forEach(input => {
+      input.checked = overrides.tools.includes(input.dataset.capTool);
+    });
+    document.querySelectorAll('[data-cap-disable]').forEach(input => {
+      input.checked = overrides.disabled_tools.includes(input.dataset.capDisable);
+    });
+  }
+
+  function _initCapabilityPanel() {
+    const btn = document.getElementById('overflow-capabilities-btn');
+    const panel = document.getElementById('capability-panel');
+    if (!btn || !panel || panel.dataset.bound === '1') return;
+    panel.dataset.bound = '1';
+    _syncCapabilityOverrideInputs();
+    btn.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const open = panel.classList.toggle('hidden') === false;
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      if (open) {
+        _syncCapabilityOverrideInputs();
+        _scheduleCapabilityPreview();
+      }
+    });
+    panel.addEventListener('click', event => event.stopPropagation());
+    panel.addEventListener('pointerdown', event => event.stopPropagation());
+    panel.addEventListener('change', () => {
+      const overrides = {
+        domains: Array.from(panel.querySelectorAll('[data-cap-domain]:checked')).map(i => i.dataset.capDomain),
+        tools: Array.from(panel.querySelectorAll('[data-cap-tool]:checked')).map(i => i.dataset.capTool),
+        disabled_tools: Array.from(panel.querySelectorAll('[data-cap-disable]:checked')).map(i => i.dataset.capDisable),
+      };
+      _saveCapabilityOverrides(overrides);
+      try { document.dispatchEvent(new CustomEvent('overflow-state-change')); } catch (_) {}
+      _scheduleCapabilityPreview();
+    });
+    document.getElementById('capability-reset-btn')?.addEventListener('click', (event) => {
+      event.preventDefault();
+      localStorage.removeItem(CAPABILITY_OVERRIDES_KEY);
+      _syncCapabilityOverrideInputs();
+      try { document.dispatchEvent(new CustomEvent('overflow-state-change')); } catch (_) {}
+      _scheduleCapabilityPreview();
+    });
+    document.getElementById('message')?.addEventListener('input', _scheduleCapabilityPreview);
+    ['web-toggle', 'bash-toggle', 'mode-agent-btn', 'mode-chat-btn'].forEach(id => {
+      document.getElementById(id)?.addEventListener('click', () => setTimeout(_scheduleCapabilityPreview, 0));
+    });
+    document.addEventListener('overflow-state-change', _scheduleCapabilityPreview);
+    _renderCapabilityPreview({ mode: 'chat', detected_domains: [], forced_domains: [], allowed_tools: [], disabled_tools: [] });
+  }
 
   function _setForegroundChatBusy(active) {
     try {
@@ -340,6 +524,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   export function init(apiBase) {
     API_BASE = apiBase;
     initSlashCommands({ apiBase, isStreaming: () => isStreaming });
+    _initCapabilityPanel();
     // Initialize email inbox
     emailInbox.init(documentModule);
     // Wire the slash-command autocomplete popup on the chat composer. The
@@ -828,7 +1013,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         }
         if (dc.endpoint_url && dc.model) {
           _sendPerf.mark('direct_chat_create_begin');
-          await sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
+          await sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, dc.provider_options || {});
           _sendPerf.mark('direct_chat_create_done');
           const ok = await sessionModule.materializePendingSession();
           _sendPerf.mark('direct_chat_materialize_done');
@@ -882,6 +1067,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     _streamSessionId = streamSessionId;
     const streamQuery = msg;
     _lastReaderActivity = Date.now();
+    const _streamSessionMeta = (sessionModule.getSessions && sessionModule.getSessions().find(s => s.id === streamSessionId)) || null;
 
     // Acquire Web Lock to hint browser not to discard this tab while streaming
     if (navigator.locks) {
@@ -909,6 +1095,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     let timeoutId = null;
     let responseTimeoutCleared = false;
     let clearResponseTimeout = () => {};
+    let _isAgentStream = false;
+    let _isHarnessStream = false;
+    _isHarnessStream = _isHarnessSessionMeta(_streamSessionMeta);
     let firstTokenWaitTimers = [];
     const clearFirstTokenWaitTimers = () => {
       firstTokenWaitTimers.forEach(t => { try { clearTimeout(t); } catch (_) {} });
@@ -1233,6 +1422,16 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       if (_ws) {
         fd.append('workspace', _ws);
       }
+      const _capOverrides = _capabilityOverrides();
+      if (_capOverrides.domains.length) {
+        fd.append('capability_domains', JSON.stringify(_capOverrides.domains));
+      }
+      if (_capOverrides.tools.length) {
+        fd.append('capability_tools', JSON.stringify(_capOverrides.tools));
+      }
+      if (_capOverrides.disabled_tools.length) {
+        fd.append('capability_disabled_tools', JSON.stringify(_capOverrides.disabled_tools));
+      }
       if (presetsModule.getSelectedPreset()) {
         fd.append('preset_id', presetsModule.getSelectedPreset());
       }
@@ -1243,29 +1442,32 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       currentAbort = abortCtrl;
 
       const _tState = Storage.loadToggleState();
-      const _isAgent = (_tState.mode || 'chat') === 'agent';
+      _isAgentStream = (_tState.mode || 'chat') === 'agent';
 
-      // Timeout: 6 min for research and agent mode, 3 min otherwise
-      const timeoutMs = el('research-toggle').checked || _isAgent ? RESEARCH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
-      timeoutId = setTimeout(() => {
-        if (!abortCtrl.signal.aborted) {
-          timedOut = true;
-          abortCtrl._reason = 'timeout';
-          try {
-            if (streamSessionId) {
-              fetch(`/api/chat/stop/${encodeURIComponent(streamSessionId)}`, {
-                method: 'POST',
-                credentials: 'same-origin',
-              }).catch(() => {});
-            }
-          } catch (_) {}
-          abortCtrl.abort();
-        }
-      }, timeoutMs);
+      // Timeout: harness sessions use activity/stall detection instead of a
+      // hard full-run abort because the harness owns an internal turn loop.
+      const timeoutMs = el('research-toggle').checked || _isAgentStream ? RESEARCH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
+      if (!_isHarnessStream) {
+        timeoutId = setTimeout(() => {
+          if (!abortCtrl.signal.aborted) {
+            timedOut = true;
+            abortCtrl._reason = 'timeout';
+            try {
+              if (streamSessionId) {
+                fetch(`/api/chat/stop/${encodeURIComponent(streamSessionId)}`, {
+                  method: 'POST',
+                  credentials: 'same-origin',
+                }).catch(() => {});
+              }
+            } catch (_) {}
+            abortCtrl.abort();
+          }
+        }, timeoutMs);
+      }
       clearResponseTimeout = () => {
         if (responseTimeoutCleared) return;
         responseTimeoutCleared = true;
-        clearTimeout(timeoutId);
+        if (timeoutId) clearTimeout(timeoutId);
       };
       
       const box = el('chat-history');
@@ -1280,7 +1482,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
       let loadingText = 'Initializing...';
 
-      if (el('web-toggle').checked && !_isAgent) {
+      if (el('web-toggle').checked && !_isAgentStream) {
         const _searchLabel = searchModule ? searchModule.getProviderLabel() : 'web';
         loadingText = `Searching via ${_searchLabel}...<br>
                        <span style="font-size: 0.9em; opacity: 0.8;">
@@ -1310,7 +1512,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       spinner.start();
       
       // Update spinner message based on mode
-      if (el('web-toggle').checked && !_isAgent) {
+      if (el('web-toggle').checked && !_isAgentStream) {
         spinner.updateMessage('Searching web with ' + (searchModule ? searchModule.getProviderLabel() : 'SearXNG'));
         setTimeout(() => spinner.updateMessage('Processing results'), 1500);
       } else if (el('research-toggle').checked) {
@@ -1417,6 +1619,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       let roundHolder = holder;       // Current AI text bubble (changes per round)
       let roundText = '';             // Text accumulated for current round
       let currentToolBubble = null;   // Current tool execution bubble
+      const harnessToolBubbles = new Map(); // Harness tool id -> native tool timeline node
+      let currentHarnessStatusNode = null; // Current non-tool harness activity node
       let lastToolThread = null;      // Visible tool timeline for tool-only turns
       let roundFinalized = false;     // Whether current round's text is finalized
       let _sourcesHtml = '';          // Sources box HTML to prepend to body
@@ -1474,6 +1678,142 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         roundFinalized = false;
       }
       const esc = uiModule.esc;
+      function _ensureAgentThreadForStream() {
+        const chatBox = document.getElementById('chat-history');
+        if (!chatBox) return null;
+        let threadWrap = null;
+        for (let ci = chatBox.children.length - 1; ci >= Math.max(0, chatBox.children.length - 5); ci--) {
+          const child = chatBox.children[ci];
+          if (child.classList.contains('agent-thread')) {
+            threadWrap = child;
+            break;
+          }
+          if (child.style.display === 'none' || child.classList.contains('agent-thinking-dots')) continue;
+          if (child.classList.contains('msg')) break;
+        }
+        if (!threadWrap) {
+          threadWrap = document.createElement('div');
+          threadWrap.className = 'agent-thread';
+          const prev = chatBox.lastElementChild;
+          if (prev && (prev.classList.contains('msg') || prev.classList.contains('agent-thread'))) {
+            threadWrap.classList.add('has-top');
+          }
+          chatBox.appendChild(threadWrap);
+        }
+        threadWrap.classList.add('streaming');
+        lastToolThread = threadWrap;
+        return threadWrap;
+      }
+
+      function _startThreadNodeMotion(node) {
+        const waveEl = node.querySelector('.agent-thread-wave');
+        if (waveEl) {
+          const waveFrames = ['▁▂▃', '▂▃▄', '▃▄▅', '▄▅▆', '▅▆▇', '▆▅▄', '▅▄▃', '▄▃▂'];
+          let waveIdx = 0;
+          node._waveInterval = setInterval(() => {
+            waveIdx = (waveIdx + 1) % waveFrames.length;
+            waveEl.textContent = waveFrames[waveIdx];
+          }, 100);
+        }
+        node._startTime = Date.now();
+        node._elapsedTicker = setInterval(() => {
+          const hdr = node.querySelector('.agent-thread-header');
+          if (!hdr) return;
+          let el = hdr.querySelector('.agent-thread-elapsed');
+          if (!el) {
+            el = document.createElement('span');
+            el.className = 'agent-thread-elapsed';
+            const icon = hdr.querySelector('.agent-thread-icon');
+            if (icon && icon.nextSibling) hdr.insertBefore(el, icon.nextSibling);
+            else hdr.appendChild(el);
+          }
+          const s = (Date.now() - node._startTime) / 1000;
+          el.textContent = s < 60 ? `${s.toFixed(2)}s` : `${Math.floor(s / 60)}m ${(s % 60).toFixed(2).padStart(5, '0')}s`;
+        }, 50);
+      }
+
+      function _finishHarnessStatusNode(status = 'done') {
+        const node = currentHarnessStatusNode;
+        if (!node || !node.isConnected) {
+          currentHarnessStatusNode = null;
+          return;
+        }
+        if (node._waveInterval) { clearInterval(node._waveInterval); node._waveInterval = null; }
+        if (node._elapsedTicker) { clearInterval(node._elapsedTicker); node._elapsedTicker = null; }
+        node.classList.remove('running');
+        if (status === 'error' || status === 'failed') node.classList.add('error');
+        const wave = node.querySelector('.agent-thread-wave');
+        if (wave) wave.remove();
+        const icon = node.querySelector('.agent-thread-icon');
+        if (icon) icon.textContent = (status === 'error' || status === 'failed') ? '\u2717' : '\u2713';
+        let statusEl = node.querySelector('.agent-thread-status');
+        if (!statusEl) {
+          statusEl = document.createElement('span');
+          statusEl.className = 'agent-thread-status';
+          const hdr = node.querySelector('.agent-thread-header');
+          if (hdr) hdr.appendChild(statusEl);
+        }
+        statusEl.textContent = status === 'failed' ? 'failed' : status;
+        currentHarnessStatusNode = null;
+      }
+
+      function _appendHarnessRuntimeEvent(json) {
+        _cancelThinkingTimer();
+        _removeThinkingSpinner();
+        if (spinner && spinner.element) spinner.destroy();
+        if (roundText && roundText.trim()) _renderStream();
+        const threadWrap = _ensureAgentThreadForStream();
+        if (!threadWrap) return;
+
+        const data = json.data && typeof json.data === 'object' ? json.data : {};
+        const status = json.type === 'harness_control_request'
+          ? (data.blocking ? 'waiting' : 'yielded')
+          : (data.status || (json.type === 'harness_status' ? 'running' : 'done'));
+        const isRunning = status === 'running' || status === 'waiting';
+        const isTerminal = status === 'done' || status === 'failed' || status === 'error';
+        const eventKind = data.kind || data.event_type || data.phase || json.type;
+        const title = json.type === 'harness_status'
+          ? (data.label || 'Harness activity')
+          : json.type === 'harness_start'
+            ? 'Harness started'
+            : json.type === 'harness_control_result'
+              ? 'Harness control result'
+              : json.type === 'harness_event'
+                ? (data.label || 'Harness event')
+                : 'Harness yielded control';
+        if ((isTerminal || isRunning) && currentHarnessStatusNode) {
+          _finishHarnessStatusNode(isTerminal ? status : 'done');
+        }
+        const detail = {
+          phase: data.phase,
+          kind: eventKind,
+          detail: data.detail,
+          request_id: data.request_id || data.id,
+          session_id: data.session_id,
+          event_type: data.event_type,
+          payload: data.payload,
+          result: data.result,
+          event: data.event,
+        };
+        const compactDetail = Object.fromEntries(Object.entries(detail).filter(([, v]) => v !== undefined && v !== null && v !== ''));
+        const detailText = Object.keys(compactDetail).length ? JSON.stringify(compactDetail, null, 2) : '';
+        const detailHtml = detailText
+          ? `<details class="agent-tool-output"><summary>Details</summary><pre>${esc(detailText.slice(0, 4000))}</pre></details>`
+          : '';
+        const node = document.createElement('div');
+        node.className = 'agent-thread-node';
+        if (isRunning) node.classList.add('running');
+        if (status === 'error' || status === 'failed' || data.ok === false) node.classList.add('error');
+        const icon = isRunning ? '\u25B6' : (node.classList.contains('error') ? '\u2717' : '\u2713');
+        const motion = isRunning ? '<span class="agent-thread-wave">▁▂▃</span>' : `<span class="agent-thread-status">${esc(String(status))}</span><span class="agent-thread-chevron">\u25B6</span>`;
+        node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${icon}</span><span class="agent-thread-tool">${esc(title)}</span>${motion}</div><div class="agent-thread-content">${detailHtml}</div>`;
+        threadWrap.appendChild(node);
+        if (isRunning) {
+          currentHarnessStatusNode = node;
+          _startThreadNodeMotion(node);
+        }
+        uiModule.scrollHistory();
+      }
       // Remove thinking spinner helper
       _removeThinkingSpinner = () => {
         const el = document.querySelector('.agent-thinking-dots');
@@ -1768,6 +2108,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 // will detect 'completed' and reload history cleanly
                 break;
               }
+              _finishHarnessStatusNode('done');
               // Force-close thinking if still open (model never output boundary)
               if (isThinking) {
                 isThinking = false;
@@ -1822,7 +2163,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 typewriterInto(roundHolder.querySelector('.body'), errMsg);
                 break;
               }
-              if (json.delta || json.type === 'agent_prep' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
+              if (json.delta || json.type === 'agent_prep' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress' || json.type === 'harness_start' || json.type === 'harness_status' || json.type === 'harness_control_request' || json.type === 'harness_control_result' || json.type === 'harness_event') {
                 clearResponseTimeout();
                 clearProcessingProbe();
                 clearFirstTokenWaitTimers();
@@ -1837,6 +2178,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               if (json.delta) {
                 _cancelThinkingTimer();
                 _removeThinkingSpinner();
+                _finishHarnessStatusNode('done');
                 // Text arrived after tools — connect thread line to this bubble
                 const _threadAbove = roundHolder?.previousElementSibling;
                 if (_threadAbove && _threadAbove.classList.contains('agent-thread') && !_threadAbove.classList.contains('has-bottom')) {
@@ -2467,10 +2809,21 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 if (_isBg) continue;
                 if (currentHolder && json.id) currentHolder.dataset.dbId = json.id;
 
+              } else if (json.type === 'harness_start' || json.type === 'harness_status' || json.type === 'harness_control_request' ||
+                         json.type === 'harness_control_result' || json.type === 'harness_event') {
+                if (_isBg) continue;
+                _appendHarnessRuntimeEvent(json);
+                try {
+                  if (sessionModule && typeof sessionModule.updateModelPicker === 'function') {
+                    sessionModule.updateModelPicker();
+                  }
+                } catch (_) {}
+
               } else if (json.type === 'tool_start') {
                 if (_isBg) continue;
                 _cancelThinkingTimer();
                 _removeThinkingSpinner();
+                _finishHarnessStatusNode('done');
                 // Force-close thinking if still open — tools are real content, not thinking
                 if (isThinking) {
                   isThinking = false;
@@ -2507,6 +2860,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 _lastToolName = json.tool || '';
 
                 // --- Thread timeline: group tools in a thread container ---
+                const harnessToolId = json.harness_tool_id || '';
+                if (harnessToolId && harnessToolBubbles.has(harnessToolId)) {
+                  currentToolBubble = harnessToolBubbles.get(harnessToolId);
+                  continue;
+                }
                 const cmd = json.command || '';
                 const chatBox = document.getElementById('chat-history');
                 // Find existing thread to append to — check last few children
@@ -2550,6 +2908,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 // Expand/collapse via delegated click handler (init at module bottom).
                 threadWrap.appendChild(node);
                 currentToolBubble = node;
+                if (harnessToolId) {
+                  node.dataset.harnessToolId = String(harnessToolId);
+                  harnessToolBubbles.set(String(harnessToolId), node);
+                }
                 // Animate the wave
                 const waveEl = node.querySelector('.agent-thread-wave');
                 if (waveEl) {
@@ -2588,6 +2950,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 // elapsed-time + tail of its stdout/stderr so the
                 // user doesn't stare at a blind "Running…" spinner.
                 if (_isBg) continue;
+                if (json.harness_tool_id && harnessToolBubbles.has(String(json.harness_tool_id))) {
+                  currentToolBubble = harnessToolBubbles.get(String(json.harness_tool_id));
+                }
                 if (!currentToolBubble) continue;
                 // The per-second ticker (started in tool_start) owns the
                 // elapsed display; here we just surface the live output tail.
@@ -2608,6 +2973,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
               } else if (json.type === 'tool_output') {
                 if (_isBg) continue;
+                if (json.harness_tool_id && harnessToolBubbles.has(String(json.harness_tool_id))) {
+                  currentToolBubble = harnessToolBubbles.get(String(json.harness_tool_id));
+                }
                 // --- Update the current thread node ---
                 if (currentToolBubble) {
                   // Stop wave animation + the per-second cooking ticker
@@ -3221,7 +3589,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           const abortReason = currentAbort._reason || '';
           // Timeout-triggered aborts should remain visible instead of disappearing.
           if (timedOut || abortReason === 'timeout') {
-            const timeoutMsg = _isAgent
+            const timeoutMsg = _isAgentStream
               ? 'Agent response timed out. Try again, switch to a faster model, or reduce tool usage.'
               : 'Response timed out. Try again.';
 
@@ -3852,7 +4220,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                      json.type === 'tool_progress' || json.type === 'agent_step' ||
                      json.type === 'web_sources' || json.type === 'rag_sources' ||
                      json.type === 'research_progress' || json.type === 'research_sources' ||
-                     json.type === 'research_findings' || json.type === 'research_done') {
+                     json.type === 'research_findings' || json.type === 'research_done' ||
+                     json.type === 'harness_start' || json.type === 'harness_status' || json.type === 'harness_control_request' ||
+                     json.type === 'harness_control_result' || json.type === 'harness_event') {
             rich = true;
           }
         }

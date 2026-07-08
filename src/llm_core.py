@@ -15,6 +15,7 @@ from src.model_context import get_context_length, DEFAULT_CONTEXT, is_local_endp
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+PROVIDER_OPTIONS_HEADER_KEY = "__odysseus_provider_options"
 
 _LOCAL_MODEL_LOCK = asyncio.Lock()
 _LOCAL_MODEL_WAITING_FOREGROUND = 0
@@ -119,8 +120,9 @@ def _stream_timeout(read_timeout) -> httpx.Timeout:
 
 
 # Cache for LLM responses
-def _get_cache_key(url: str, model: str, messages: List[Dict], 
-                   temperature: float, max_tokens: int) -> str:
+def _get_cache_key(url: str, model: str, messages: List[Dict],
+                   temperature: float, max_tokens: int,
+                   provider_options: Optional[Dict] = None) -> str:
     """Generate cache key for LLM requests."""
     hashable_messages = []
     for msg in messages:
@@ -132,7 +134,8 @@ def _get_cache_key(url: str, model: str, messages: List[Dict],
         'model': model, 
         'messages': hashable_messages,
         'temp': temperature,
-        'max_tokens': max_tokens
+        'max_tokens': max_tokens,
+        'provider_options': provider_options or {},
     }, sort_keys=True)
     return hashlib.sha256(content.encode()).hexdigest()
 
@@ -948,7 +951,7 @@ def _apply_local_generation_stability(payload: Dict, url: str, model: str) -> No
 def _provider_headers(provider: str, headers: Optional[Dict] = None) -> Dict[str, str]:
     h = {"Content-Type": "application/json"}
     if isinstance(headers, dict):
-        h.update(headers)
+        h.update({k: v for k, v in headers.items() if not str(k).startswith("__")})
     if provider == "openrouter":
         h.setdefault("HTTP-Referer", "https://github.com/pewdiepie-archdaemon/odysseus")
         h.setdefault("X-OpenRouter-Title", "Odysseus")
@@ -1010,6 +1013,22 @@ def _provider_label(url: str) -> str:
     return host or "provider"
 
 
+def _provider_options_from_headers(headers: Optional[Dict], explicit: Optional[Dict] = None) -> Dict:
+    if isinstance(explicit, dict):
+        return explicit
+    if isinstance(headers, dict):
+        value = headers.get(PROVIDER_OPTIONS_HEADER_KEY)
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                return {}
+    return {}
+
+
 def _normalize_chatgpt_subscription_url(url: str) -> str:
     base = (url or "").strip().rstrip("/")
     if base.endswith("/responses"):
@@ -1055,8 +1074,10 @@ def _build_chatgpt_responses_payload(
     max_tokens: int,
     *,
     stream: bool = False,
+    provider_options: Optional[Dict] = None,
 ) -> Dict:
     from src.chatgpt_subscription import build_responses_input
+    from src.provider_options import sanitize_provider_options
 
     conversation = [msg for msg in (messages or []) if (msg.get("role") or "") != "system"]
     payload: Dict = {
@@ -1068,6 +1089,13 @@ def _build_chatgpt_responses_payload(
     }
     if not _restricts_temperature(model):
         payload["temperature"] = temperature
+    options = sanitize_provider_options("https://chatgpt.com/backend-api/codex", model, provider_options or {})
+    effort = options.get("reasoning_effort")
+    if effort and effort != "auto":
+        payload["reasoning"] = {"effort": effort}
+    tier = options.get("service_tier")
+    if tier and tier != "standard":
+        payload["service_tier"] = tier
     # ChatGPT Subscription Codex API does not support max_output_tokens —
     # passing it returns HTTP 400 "Unsupported parameter: max_output_tokens".
     # Do not include it in the payload.
@@ -1731,7 +1759,8 @@ def normalize_model_id(
 
 def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
              max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None, 
-             timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None) -> str:
+             timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None,
+             provider_options: Optional[Dict] = None) -> str:
     """Synchronous LLM call with optional prompt type enhancement."""
     h = _provider_headers(_detect_provider(url))
     # Tolerate headers that arrive as a JSON string (some sessions stored them
@@ -1744,6 +1773,8 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
             headers = None
     if isinstance(headers, dict):
         h.update(headers)
+    provider_options = _provider_options_from_headers(headers, provider_options)
+    h = {k: v for k, v in h.items() if not str(k).startswith("__")}
 
     messages_copy = _sanitize_llm_messages(messages)
 
@@ -1761,7 +1792,7 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         messages_copy = non_sys
 
     provider = _detect_provider(url)
-    cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens)
+    cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens, provider_options)
     cached_response = _get_cached_response(cache_key)
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
@@ -1776,6 +1807,12 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         payload = _build_ollama_payload(
             model, messages_copy, temperature, max_tokens,
             stream=False, num_ctx=get_context_length(url, model),
+        )
+    elif provider == "chatgpt-subscription":
+        target_url = _normalize_chatgpt_subscription_url(url)
+        payload = _build_chatgpt_responses_payload(
+            model, messages_copy, temperature, max_tokens,
+            stream=False, provider_options=provider_options,
         )
     else:
         target_url = _normalize_openai_chat_url(url)
@@ -1808,6 +1845,17 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
             response = _parse_anthropic_response(data)
         elif provider == "ollama":
             response = _parse_ollama_response(data)
+        elif provider == "chatgpt-subscription":
+            response = data.get("output_text") or ""
+            if not response:
+                parts = []
+                for item in data.get("output") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    for content in item.get("content") or []:
+                        if isinstance(content, dict) and content.get("text"):
+                            parts.append(str(content.get("text")))
+                response = "".join(parts)
         else:
             msg = data["choices"][0]["message"]
             content = msg.get("content")
@@ -1862,10 +1910,14 @@ def llm_call_with_fallback(candidates, messages, **kwargs) -> str:
     cands = _dedupe_candidates(candidates)
     if not cands:
         raise HTTPException(503, "No model endpoint configured")
+    primary_provider_options = kwargs.pop("provider_options", None)
     last_err = None
     for i, (url, model, headers) in enumerate(cands):
         try:
-            return llm_call(url, model, messages, headers=headers, **kwargs)
+            call_kwargs = dict(kwargs)
+            if i == 0 and primary_provider_options is not None:
+                call_kwargs["provider_options"] = primary_provider_options
+            return llm_call(url, model, messages, headers=headers, **call_kwargs)
         except Exception as e:
             last_err = e
             tag = "primary" if i == 0 else "candidate"
@@ -1879,10 +1931,14 @@ async def llm_call_async_with_fallback(candidates, messages, **kwargs) -> str:
     cands = _dedupe_candidates(candidates)
     if not cands:
         raise HTTPException(503, "No model endpoint configured")
+    primary_provider_options = kwargs.pop("provider_options", None)
     last_err = None
     for i, (url, model, headers) in enumerate(cands):
         try:
-            return await llm_call_async(url, model, messages, headers=headers, **kwargs)
+            call_kwargs = dict(kwargs)
+            if i == 0 and primary_provider_options is not None:
+                call_kwargs["provider_options"] = primary_provider_options
+            return await llm_call_async(url, model, messages, headers=headers, **call_kwargs)
         except Exception as e:
             last_err = e
             tag = "primary" if i == 0 else "candidate"
@@ -1903,9 +1959,11 @@ async def llm_call_async(
     prompt_type: Optional[str] = None,
     session_id: Optional[str] = None,
     workload: str = "foreground",
+    provider_options: Optional[Dict] = None,
 ) -> str:
     """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging."""
     provider = _detect_provider(url)
+    provider_options = _provider_options_from_headers(headers, provider_options)
     messages_copy = _sanitize_llm_messages(messages)
 
     # Consolidate multiple system messages into one at the start.
@@ -1921,7 +1979,7 @@ async def llm_call_async(
     else:
         messages_copy = non_sys
 
-    cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens)
+    cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens, provider_options)
     cached_response = _get_cached_response(cache_key)
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
@@ -1941,6 +1999,7 @@ async def llm_call_async(
             headers=headers,
             timeout=timeout,
             workload=workload,
+            provider_options=provider_options,
         ):
             event_is_error = False
             for line in str(chunk).splitlines():
@@ -2077,7 +2136,8 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                      max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                      timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
                      tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
-                     tool_choice_none: bool = False, workload: str = "foreground"):
+                     tool_choice_none: bool = False, workload: str = "foreground",
+                     provider_options: Optional[Dict] = None):
     target_url = _stream_target_url(url)
     async with _local_model_slot(target_url, model, workload):
         async for chunk in _stream_llm_inner(
@@ -2092,6 +2152,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             tools=tools,
             session_id=session_id,
             tool_choice_none=tool_choice_none,
+            provider_options=provider_options,
         ):
             yield chunk
 
@@ -2100,7 +2161,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                             max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                             timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
                             tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
-                            tool_choice_none: bool = False):
+                            tool_choice_none: bool = False, provider_options: Optional[Dict] = None):
     """Stream LLM responses with improved error handling.
 
     Yields SSE chunks:
@@ -2110,6 +2171,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
       - data: [DONE]                       — end of stream
     """
     provider = _detect_provider(url)
+    provider_options = _provider_options_from_headers(headers, provider_options)
     messages_copy = _sanitize_llm_messages(messages)
 
     # Consolidate multiple system messages into one at the start.
@@ -2142,7 +2204,10 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     elif provider == "chatgpt-subscription":
         target_url = _normalize_chatgpt_subscription_url(url)
         h = _provider_headers(provider, headers)
-        payload = _build_chatgpt_responses_payload(model, messages_copy, temperature, max_tokens, stream=True)
+        payload = _build_chatgpt_responses_payload(
+            model, messages_copy, temperature, max_tokens,
+            stream=True, provider_options=provider_options,
+        )
     else:
         target_url = _normalize_openai_chat_url(url)
         payload = {
@@ -2753,13 +2818,17 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
         yield f'event: error\ndata: {json.dumps({"error": "No model endpoint configured", "status": 503})}\n\n'
         return
 
+    primary_provider_options = kwargs.pop("provider_options", None)
     primary_model = cands[0][1]
     last_error = None
     for i, (url, model, headers) in enumerate(cands):
         is_last = (i == len(cands) - 1)
         emitted = False
         retried = False
-        async for chunk in stream_llm(url, model, messages, headers=headers, **kwargs):
+        call_kwargs = dict(kwargs)
+        if i == 0 and primary_provider_options is not None:
+            call_kwargs["provider_options"] = primary_provider_options
+        async for chunk in stream_llm(url, model, messages, headers=headers, **call_kwargs):
             if chunk.startswith("event: error"):
                 if not emitted and not is_last:
                     # Pre-content failure with fallbacks left — swallow and

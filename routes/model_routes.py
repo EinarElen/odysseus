@@ -320,6 +320,7 @@ def _rewrite_loopback_for_docker(base_url: str, *, container_local: bool = False
 # A model ID matches if it starts with or equals a curated entry.
 _PROVIDER_CURATED = {
     "openai": [
+        "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark",
         "gpt-5.2", "gpt-5.2-pro", "gpt-5", "gpt-5-pro", "gpt-5-mini", "gpt-5-nano",
         "gpt-4o", "gpt-4o-mini", "o3", "o4-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano",
         "gpt-image-1.5", "gpt-image-1", "dall-e-3", "tts-1", "whisper-1",
@@ -593,8 +594,8 @@ _NON_CHAT_PREFIXES = (
     "snowflake/arctic-embed", "nvidia/nv-embed", "embed",
 )
 _NON_CHAT_CONTAINS = (
-    "-realtime", "-transcribe", "-tts", "-codex",
-    "codex-", "content-safety", "-safety", "-reward", "nvclip",
+    "-realtime", "-transcribe", "-tts",
+    "content-safety", "-safety", "-reward", "nvclip",
     "kosmos", "fuyu", "deplot", "vila", "neva",
     "gliner", "riva", "-parse", "-embedqa", "-nemoretriever",
     "topic-control", "calibration",
@@ -1202,6 +1203,21 @@ def _visible_models(cached_models, hidden_models, pinned_models=None):
     return [m for m in merged if m not in hidden]
 
 
+def _provider_option_payload(base: str, model_ids: List[str]) -> Dict[str, Any]:
+    try:
+        from src.provider_options import endpoint_options_schema, provider_options_schema
+        return {
+            "provider_options_schema": endpoint_options_schema(base, model_ids),
+            "model_provider_options_schema": {
+                mid: provider_options_schema(base, mid)
+                for mid in model_ids
+                if provider_options_schema(base, mid)
+            },
+        }
+    except Exception:
+        return {"provider_options_schema": [], "model_provider_options_schema": {}}
+
+
 def _api_key_fingerprint(api_key: Optional[str]) -> str:
     """Stable, non-secret label for distinguishing same-URL credentials."""
     key = (api_key or "").strip()
@@ -1413,6 +1429,7 @@ def setup_model_routes(model_discovery):
             category = _classify_endpoint(base, kind)
 
             if model_ids:
+                option_payload = _provider_option_payload(base, model_ids)
                 curated_key = _match_provider_curated(base, None)
                 curated, extra = _curate_models(model_ids, curated_key)
                 # Pinned models are admin-selected — they always belong in the
@@ -1435,8 +1452,10 @@ def setup_model_routes(model_discovery):
                     "category": category,
                     "endpoint_kind": kind,
                     "model_type": ep_model_type,
+                    **option_payload,
                 })
             else:
+                option_payload = _provider_option_payload(base, [])
                 # Endpoint unreachable but still show it greyed out
                 items.append({
                     "host": "custom",
@@ -1452,6 +1471,7 @@ def setup_model_routes(model_discovery):
                     "endpoint_kind": kind,
                     "model_type": ep_model_type,
                     "offline": True,
+                    **option_payload,
                 })
 
         return {"hosts": [], "items": items}
@@ -1791,6 +1811,7 @@ def setup_model_routes(model_discovery):
                 ping = None
                 base = _normalize_base(r.base_url)
                 kind = _effective_endpoint_kind(r, base)
+                option_payload = _provider_option_payload(base, visible)
                 results.append({
                     "id": r.id,
                     "name": r.name,
@@ -1811,6 +1832,7 @@ def setup_model_routes(model_discovery):
                     "model_refresh_mode": _endpoint_refresh_mode(r, kind),
                     "model_refresh_interval": getattr(r, "model_refresh_interval", None),
                     "model_refresh_timeout": getattr(r, "model_refresh_timeout", None),
+                    **option_payload,
                 })
             return results
         finally:
@@ -2249,6 +2271,7 @@ def setup_model_routes(model_discovery):
             _user_prefs = _load_for_user(_user) or {}
             ep_id = (_user_prefs.get("default_endpoint_id") or "").strip()
             model = (_user_prefs.get("default_model") or "").strip()
+            provider_options = _user_prefs.get("default_provider_options") or {}
             _fallbacks = _user_prefs.get("default_model_fallbacks") or []
             # If user has no personal default, fall back to global default
             # But only based on the "share_defaults_with_users" flag
@@ -2258,11 +2281,14 @@ def setup_model_routes(model_discovery):
                     ep_id = settings.get("default_endpoint_id", "")
                 if not model:
                     model = settings.get("default_model", "")
+                if not provider_options:
+                    provider_options = settings.get("default_provider_options") or {}
                 if not _fallbacks:
                     _fallbacks = settings.get("default_model_fallbacks") or []
         else:
             ep_id = settings.get("default_endpoint_id", "")
             model = settings.get("default_model", "")
+            provider_options = settings.get("default_provider_options") or {}
             _fallbacks = settings.get("default_model_fallbacks") or []
         db = SessionLocal()
         try:
@@ -2304,6 +2330,7 @@ def setup_model_routes(model_discovery):
                         # this fallback — the cached-models lookup below then
                         # fills it from the fallback endpoint.
                         model = (entry.get("model") or "").strip()
+                        provider_options = entry.get("provider_options") or {}
                         break
             # Last resort: first enabled endpoint owned by THIS user. Do not
             # include null-owner/shared endpoints here: a brand-new user with
@@ -2326,7 +2353,17 @@ def setup_model_routes(model_discovery):
                         model = visible[0]
                 except Exception:
                     pass
-            return {"endpoint_id": ep.id, "endpoint_url": chat_url, "model": model}
+            try:
+                from src.provider_options import sanitize_provider_options
+                provider_options = sanitize_provider_options(base, model, provider_options)
+            except Exception:
+                provider_options = {}
+            return {
+                "endpoint_id": ep.id,
+                "endpoint_url": chat_url,
+                "model": model,
+                "provider_options": provider_options,
+            }
         finally:
             db.close()
 
@@ -2459,6 +2496,7 @@ def setup_model_routes(model_discovery):
         for row in rows:
             if _session_uses_endpoint_url(row.endpoint_url or "", base_url):
                 row.headers = {}
+                row.provider_options = {}
                 row.updated_at = datetime.utcnow()
                 cleared += 1
         return cleared
@@ -2476,6 +2514,7 @@ def setup_model_routes(model_discovery):
             for sess in list(getattr(manager, "sessions", {}).values()):
                 if _session_uses_endpoint_url(getattr(sess, "endpoint_url", "") or "", base_url):
                     sess.headers = {}
+                    sess.provider_options = {}
                     cleared += 1
         except Exception:
             return cleared

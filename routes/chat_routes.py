@@ -6,8 +6,9 @@ import os
 import re
 import time
 import logging
+import uuid
 from datetime import datetime
-from typing import Dict, Any, AsyncGenerator, List, Optional
+from typing import Dict, Any, AsyncGenerator, List, Optional, Set
 
 from fastapi import APIRouter, Request, HTTPException, Form, Query
 from fastapi.responses import StreamingResponse
@@ -16,7 +17,7 @@ from pydantic import ValidationError
 from core.models import ChatMessage
 from src.request_models import ChatRequest
 from src.llm_core import llm_call_async, stream_llm, stream_llm_with_fallback
-from src.agent_loop import stream_agent_loop
+from src.agent_loop import classify_agent_setup, stream_agent_loop, tools_for_agent_domains
 from src import agent_runs
 from src.model_context import estimate_tokens
 from src.chat_helpers import coerce_message_and_session
@@ -43,6 +44,7 @@ from routes.chat_helpers import (
 )
 from src.action_intents import ToolIntent, classify_tool_intent as _classify_tool_intent
 from src.tool_policy import build_effective_tool_policy
+from src.harness import get_harness_adapter, harness_config_from_session, is_harness_session
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +85,33 @@ def _last_user_plain_text(messages: List[Dict[str, Any]]) -> str:
         if msg.get("role") == "user":
             return _message_plain_text(msg.get("content"))
     return ""
+
+
+def _coerce_string_list(value: Any) -> List[str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            parsed = value.split(",")
+    else:
+        parsed = value
+    if not isinstance(parsed, list):
+        return []
+    out: List[str] = []
+    for item in parsed:
+        text = str(item or "").strip()
+        if text:
+            out.append(text)
+    return out
+
+
+def _request_list_field(form_data: Any, body: Optional[Dict[str, Any]], key: str) -> List[str]:
+    raw = form_data.get(key)
+    if (raw is None or raw == "") and isinstance(body, dict):
+        raw = body.get(key)
+    return _coerce_string_list(raw)
 
 
 def _ensure_current_request_is_latest_user(messages: List[Dict[str, Any]], current_message: str) -> List[Dict[str, Any]]:
@@ -180,6 +209,8 @@ def _clear_orphaned_session_endpoint(sess, owner: str | None = None) -> bool:
     """Clear a session model if its endpoint was deleted from ModelEndpoint."""
     if not getattr(sess, "endpoint_url", ""):
         return False
+    if is_harness_session(sess):
+        return False
     db = SessionLocal()
     try:
         q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
@@ -194,16 +225,32 @@ def _clear_orphaned_session_endpoint(sess, owner: str | None = None) -> bool:
         if db_session:
             db_session.endpoint_url = ""
             db_session.model = ""
+            db_session.provider_options = {}
             db_session.updated_at = datetime.utcnow()
             db.commit()
         sess.endpoint_url = ""
         sess.model = ""
         sess.headers = {}
+        sess.provider_options = {}
         return True
     except Exception as e:
         logger.warning("Failed to clear orphaned session endpoint", exc_info=e)
         db.rollback()
         return False
+    finally:
+        db.close()
+
+
+def _persist_session_provider_options(session_id: str, sess: Any, provider_options: Dict[str, Any]) -> None:
+    """Persist provider options so harness state survives frontend/server reloads."""
+    sess.provider_options = provider_options
+    db = SessionLocal()
+    try:
+        db_session = db.query(DBSession).filter(DBSession.id == session_id).first()
+        if db_session:
+            db_session.provider_options = provider_options
+            db_session.updated_at = datetime.utcnow()
+            db.commit()
     finally:
         db.close()
 
@@ -505,6 +552,7 @@ def setup_chat_routes(
             max_tokens=ctx.preset.max_tokens,
             prompt_type=preset_id,
             session_id=session,
+            provider_options=getattr(sess, "provider_options", None) or {},
         )
         _clean_reply, _clean_md = clean_thinking_for_save(reply, {"model": sess.model})
         sess.add_message(ChatMessage("assistant", _clean_reply, metadata=_clean_md))
@@ -523,6 +571,126 @@ def setup_chat_routes(
         )
 
         return {"response": reply}
+
+    # ------------------------------------------------------------------ #
+    # POST /api/agent/capabilities/preview
+    # ------------------------------------------------------------------ #
+    @router.post("/api/agent/capabilities/preview")
+    async def agent_capabilities_preview(request: Request) -> Dict[str, Any]:
+        body: Dict[str, Any] = {}
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+
+        message = str(body.get("message") or "")
+        mode = str(body.get("mode") or "chat").lower()
+        allow_bash = body.get("allow_bash")
+        allow_web_search = body.get("allow_web_search")
+        workspace = str(body.get("workspace") or "")
+        forced_domains = _coerce_string_list(body.get("force_domains"))
+        forced_tools = set(_coerce_string_list(body.get("force_tools")))
+        disabled_tools = set(_coerce_string_list(body.get("disabled_tools")))
+
+        setup = classify_agent_setup(message)
+        detected_domains = set(setup.get("domains") or [])
+        detected_tools = set(setup.get("domain_tools") or [])
+        override_tools = tools_for_agent_domains(forced_domains) | forced_tools
+
+        if allow_bash is not None and str(allow_bash).lower() != "true":
+            disabled_tools.add("bash")
+        if allow_web_search is not None and str(allow_web_search).lower() != "true":
+            disabled_tools.update({"web_search", "web_fetch"})
+        user = effective_user(request)
+        if user and hasattr(request.app.state, "auth_manager") and request.app.state.auth_manager:
+            privs = request.app.state.auth_manager.get_privileges(user)
+            if privs:
+                if not privs.get("can_use_bash", True):
+                    disabled_tools.update({"bash", "python", "read_file", "write_file"})
+                if not privs.get("can_use_browser", True):
+                    disabled_tools.add("builtin_browser")
+                if not privs.get("can_use_documents", True):
+                    disabled_tools.update({"create_document", "edit_document", "update_document", "suggest_document"})
+                if not privs.get("can_generate_images", True):
+                    disabled_tools.add("generate_image")
+                if not privs.get("can_manage_memory", True):
+                    disabled_tools.update({"manage_memory", "manage_skills"})
+                if not privs.get("can_use_research", True):
+                    disabled_tools.update({"trigger_research", "manage_research"})
+        from src.settings import get_setting
+        global_disabled = get_setting("disabled_tools", [])
+        if isinstance(global_disabled, list):
+            explicit_web_allowed = allow_web_search is not None and str(allow_web_search).lower() == "true"
+            if explicit_web_allowed:
+                disabled_tools.update(t for t in global_disabled if t not in {"web_search", "web_fetch"})
+            else:
+                disabled_tools.update(global_disabled)
+        preview_policy = build_effective_tool_policy(
+            disabled_tools=disabled_tools,
+            last_user_message=message,
+        )
+        disabled_tools = set(preview_policy.all_disabled_names())
+
+        return {
+            "mode": "agent" if mode == "agent" else "chat",
+            "workspace": workspace,
+            "detected_domains": sorted(detected_domains),
+            "detected_tools": sorted(detected_tools),
+            "forced_domains": sorted(set(forced_domains)),
+            "forced_tools": sorted(override_tools),
+            "disabled_tools": sorted(disabled_tools),
+            "allowed_tools": sorted((detected_tools | override_tools) - disabled_tools),
+            "low_signal": bool(setup.get("low_signal")),
+            "continuation": bool(setup.get("continuation")),
+            "retrieval_query": setup.get("retrieval_query") or "",
+        }
+
+    @router.get("/api/harnesses")
+    async def list_harnesses(request: Request) -> Dict[str, Any]:
+        from src.harness import list_harness_capabilities
+
+        return {"harnesses": list_harness_capabilities()}
+
+    @router.post("/api/harnesses/{session_id}/command")
+    async def harness_command(session_id: str, request: Request) -> Dict[str, Any]:
+        _verify_session_owner(request, session_id, session_manager)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        command = str((body or {}).get("command") or "").strip()
+        if not command:
+            raise HTTPException(400, "Missing harness command")
+        payload = (body or {}).get("payload") or {}
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "Harness command payload must be an object")
+
+        sess = session_manager.get_session(session_id)
+        if not sess:
+            raise HTTPException(404, "Session not found")
+        if not is_harness_session(sess):
+            raise HTTPException(400, "Session is not backed by a harness")
+        config = dict(harness_config_from_session(sess))
+        harness_id = str(config.get("id") or "").strip()
+        config.update({
+            "odysseus_session_id": session_id,
+            "workspace": config.get("workspace") or getattr(sess, "workspace", None),
+            "owner": effective_user(request),
+        })
+        adapter = get_harness_adapter(harness_id)
+        from src.harness import HarnessSessionRef
+        ref = HarnessSessionRef(
+            adapter_id=adapter.id,
+            odysseus_session_id=session_id,
+            harness_session_id=str(config.get("harness_session_id") or session_id),
+            workspace=config.get("workspace"),
+            config=config,
+        )
+        try:
+            data = await adapter.command(ref, command, payload)
+        except Exception as exc:
+            raise HTTPException(409, str(exc))
+        return {"ok": True, "data": data}
 
     # ------------------------------------------------------------------ #
     # POST /api/chat_stream
@@ -560,6 +728,9 @@ def setup_chat_routes(
         search_context = form_data.get("search_context")  # pre-fetched web search results (compare mode)
         compare_mode = str(form_data.get("compare_mode", "")).lower() == "true"
         incognito = str(form_data.get("incognito", "")).lower() == "true"
+        capability_domains = _request_list_field(form_data, body, "capability_domains")
+        capability_tools = _request_list_field(form_data, body, "capability_tools")
+        capability_disabled_tools = _request_list_field(form_data, body, "capability_disabled_tools")
         # Plan mode is not part of the merge-ready UI. Ignore stale clients or
         # manual form posts that still send plan_mode=true.
         plan_mode = False
@@ -583,9 +754,16 @@ def setup_chat_routes(
         # below). Skill extraction should only learn from real agent sessions,
         # not chats we quietly promoted for a notes/calendar intent.
         user_requested_agent = (chat_mode == "agent")
+        _web_search_explicitly_denied = (
+            allow_web_search is not None
+            and str(allow_web_search).lower() != "true"
+        )
         _search_enabled = (
-            str(allow_web_search).lower() == "true"
-            or str(use_web).lower() == "true"
+            not _web_search_explicitly_denied
+            and (
+                str(allow_web_search).lower() == "true"
+                or str(use_web).lower() == "true"
+            )
         )
         # Intent auto-escalation: if the user is clearly asking the assistant
         # to create a todo, reminder, or calendar event, promote chat → agent
@@ -718,6 +896,11 @@ def setup_chat_routes(
             raise HTTPException(404, str(e))
         except (ValueError, ValidationError):
             raise HTTPException(400, "Invalid request parameters")
+
+        _explicit_web_intent = (
+            not _web_search_explicitly_denied
+            and bool(_tool_intent and _tool_intent.needs_tools and _tool_intent.category == "web")
+        )
 
         # ------------------------------------------------------------------ #
         # Privilege gates that must fire BEFORE any LLM work / token spend.
@@ -994,12 +1177,16 @@ def setup_chat_routes(
         if plan_mode:
             from src.tool_security import plan_mode_disabled_tools
             disabled_tools.update(plan_mode_disabled_tools())
+        disabled_tools.update(capability_disabled_tools)
 
         tool_policy = build_effective_tool_policy(
             disabled_tools=disabled_tools,
             last_user_message=message,
         )
         disabled_tools = tool_policy.all_disabled_names()
+        capability_forced_tools: Set[str] = (
+            tools_for_agent_domains(capability_domains) | set(capability_tools)
+        ) - set(disabled_tools)
         research_blocked_by_policy = bool(
             tool_policy.blocks("trigger_research")
             or tool_policy.blocks("manage_research")
@@ -1202,6 +1389,283 @@ def setup_chat_routes(
                 _model_info["character_name"] = ctx.preset.character_name
             yield f'data: {json.dumps(_model_info)}\n\n'
 
+            if is_harness_session(sess):
+                _harness_start = time.time()
+                _harness_config = dict(harness_config_from_session(sess))
+                _harness_id = str(_harness_config.get("id") or "").strip()
+                _harness_workspace = workspace or _harness_config.get("workspace") or None
+                _harness_config.update({
+                    "odysseus_session_id": session,
+                    "workspace": _harness_workspace,
+                    "owner": _user,
+                    "disabled_tools": sorted(set(disabled_tools or [])),
+                })
+                if _harness_config.get("new_session") and not _harness_config.get("requested_session_id"):
+                    _existing_provider_options = getattr(sess, "provider_options", None) or {}
+                    _updated_provider_options = dict(_existing_provider_options)
+                    _updated_harness_options = dict(_updated_provider_options.get("harness") or {})
+                    _requested_session_id = f"{session}-{uuid.uuid4().hex[:12]}"
+                    _updated_harness_options["requested_session_id"] = _requested_session_id
+                    _updated_harness_options["new_session"] = True
+                    _updated_harness_options["resume"] = False
+                    _updated_harness_options["resume_mode"] = "create"
+                    _updated_provider_options["harness"] = _updated_harness_options
+                    _persist_session_provider_options(session, sess, _updated_provider_options)
+                    _harness_config["requested_session_id"] = _requested_session_id
+                _harness_verbosity = str(_harness_config.get("verbosity") or "normal").strip().lower()
+                _harness_quiet = _harness_verbosity == "quiet"
+                _harness_debug = _harness_verbosity == "debug"
+                try:
+                    _adapter = get_harness_adapter(_harness_id)
+                except KeyError as _e:
+                    yield f'event: error\ndata: {json.dumps({"status": 400, "text": str(_e)})}\n\n'
+                    yield "data: [DONE]\n\n"
+                    _active_streams.pop(session, None)
+                    return
+
+                _harness_tool_events = []
+                try:
+                    if not _harness_quiet:
+                        yield f'data: {json.dumps({"type": "harness_status", "data": {"phase": "session_starting", "label": f"Starting {_adapter.label}", "status": "running", "detail": _harness_workspace or ""}})}\n\n'
+                    _startup_events: asyncio.Queue = asyncio.Queue()
+
+                    async def _queue_startup_event(event) -> None:
+                        await _startup_events.put(event)
+
+                    _start_task = asyncio.create_task(_adapter.start(_harness_config, startup_event_cb=_queue_startup_event))
+                    _startup_inactivity_timeout = 45
+                    _startup_last_activity = time.monotonic()
+                    _startup_ready_event = None
+                    try:
+                        while not _start_task.done():
+                            if time.monotonic() - _startup_last_activity >= _startup_inactivity_timeout:
+                                if _startup_ready_event is not None:
+                                    _start_task.cancel()
+                                    from src.harness import HarnessSessionRef
+                                    _ref = HarnessSessionRef(
+                                        adapter_id=_adapter.id,
+                                        odysseus_session_id=session,
+                                        harness_session_id=str(_startup_ready_event.data.get("detail") or session),
+                                        workspace=_harness_workspace,
+                                        config=dict(_harness_config),
+                                    )
+                                    break
+                                raise asyncio.TimeoutError()
+                            try:
+                                _event = await asyncio.wait_for(_startup_events.get(), timeout=0.5)
+                            except asyncio.TimeoutError:
+                                continue
+                            _startup_last_activity = time.monotonic()
+                            if _event.type == "harness_status" and _event.data.get("phase") == "agent_session_ready":
+                                _startup_ready_event = _event
+                            if _event.type == "harness_status":
+                                _phase = str(_event.data.get("phase") or "")
+                                if _harness_debug or (not _harness_quiet and _phase == "agent_session_ready"):
+                                    yield f'data: {json.dumps({"type": "harness_status", "data": _event.data})}\n\n'
+                                if _event.data.get("phase") == "agent_session_ready":
+                                    try:
+                                        _ref = await asyncio.wait_for(asyncio.shield(_start_task), timeout=1.0)
+                                    except asyncio.TimeoutError:
+                                        _start_task.cancel()
+                                        from src.harness import HarnessSessionRef
+                                        _ref = HarnessSessionRef(
+                                            adapter_id=_adapter.id,
+                                            odysseus_session_id=session,
+                                            harness_session_id=str(_event.data.get("detail") or session),
+                                            workspace=_harness_workspace,
+                                            config=dict(_harness_config),
+                                        )
+                                    break
+                            elif _event.type == "harness_event":
+                                yield f'data: {json.dumps({"type": "harness_event", "data": _event.data.get("event", _event.data)})}\n\n'
+                            elif _event.type == "error":
+                                yield f'event: error\ndata: {json.dumps({"status": 502, "text": _event.data.get("message") or "Harness startup failed"})}\n\n'
+                                yield "data: [DONE]\n\n"
+                                _start_task.cancel()
+                                return
+                        else:
+                            _ref = await _start_task
+                    except asyncio.TimeoutError:
+                        _start_task.cancel()
+                        yield f'event: error\ndata: {json.dumps({"status": 504, "text": f"{_adapter.label} startup did not finish"})}\n\n'
+                        yield "data: [DONE]\n\n"
+                        return
+                    yield f'data: {json.dumps({"type": "harness_start", "harness": _adapter.id, "mode": _harness_config.get("mode", "observe"), "workspace": _ref.workspace})}\n\n'
+                    if _harness_debug or (not _harness_quiet and _startup_ready_event is None):
+                        yield f'data: {json.dumps({"type": "harness_status", "data": {"phase": "session_ready", "label": f"{_adapter.label} ready", "status": "done", "detail": _ref.harness_session_id}})}\n\n'
+                    _ref_config = dict(getattr(_ref, "config", None) or {})
+                    _persistable_ref_keys = ("session_file", "session_dir")
+                    _persistable_ref = {
+                        k: _ref_config.get(k)
+                        for k in _persistable_ref_keys
+                        if _ref_config.get(k) and _harness_config.get(k) != _ref_config.get(k)
+                    }
+                    if _persistable_ref or _harness_config.get("new_session"):
+                        _existing_provider_options = getattr(sess, "provider_options", None) or {}
+                        _updated_provider_options = dict(_existing_provider_options)
+                        _updated_harness_options = dict(_updated_provider_options.get("harness") or {})
+                        _updated_harness_options.update(_persistable_ref)
+                        _updated_harness_options["new_session"] = False
+                        if _updated_harness_options.get("session_file"):
+                            _updated_harness_options.pop("requested_session_id", None)
+                            _updated_harness_options["resume"] = True
+                            _updated_harness_options["resume_mode"] = "open"
+                        _updated_provider_options["harness"] = _updated_harness_options
+                        _persist_session_provider_options(session, sess, _updated_provider_options)
+                    from src.harness.context import reconcile_prompt_for_harness
+                    _harness_reconciliation = reconcile_prompt_for_harness(
+                        messages=ctx.messages,
+                        current_message=message,
+                        harness_id=_adapter.id,
+                    )
+                    async for event in _adapter.send(
+                        _ref,
+                        message,
+                        attachments=ctx.uploaded_files,
+                        reconciliation=_harness_reconciliation,
+                    ):
+                        etype = event.type
+                        data = event.data
+                        if etype == "text_delta":
+                            delta = str(data.get("text") or "")
+                            if delta:
+                                full_response += delta
+                                _stream_set(session, partial=full_response)
+                                yield f'data: {json.dumps({"delta": delta})}\n\n'
+                        elif etype == "final_text":
+                            text = str(data.get("text") or "")
+                            if text and not full_response:
+                                full_response = text
+                                _stream_set(session, partial=full_response)
+                                yield f'data: {json.dumps({"delta": text})}\n\n'
+                        elif etype == "thinking_delta":
+                            delta = str(data.get("text") or "")
+                            if delta:
+                                thinking_response += delta
+                                yield f'data: {json.dumps({"delta": delta, "thinking": True})}\n\n'
+                        elif etype == "tool_start":
+                            _event = {
+                                "type": "tool_start",
+                                "tool": data.get("name") or "harness_tool",
+                                "command": json.dumps(data.get("input"), ensure_ascii=False)[:1000],
+                                "harness_tool_id": data.get("id"),
+                            }
+                            _harness_tool_events.append({
+                                "phase": "start",
+                                "tool": _event["tool"],
+                                "command": _event["command"],
+                                "harness_tool_id": data.get("id"),
+                            })
+                            yield f"data: {json.dumps(_event)}\n\n"
+                        elif etype == "tool_update":
+                            _partial = data.get("partial")
+                            _tail = _partial if isinstance(_partial, str) else json.dumps(_partial, ensure_ascii=False, default=str)
+                            yield f'data: {json.dumps({"type": "tool_progress", "tool": data.get("name") or "harness_tool", "data": _partial, "tail": _tail[-4000:], "harness_tool_id": data.get("id")})}\n\n'
+                        elif etype == "tool_end":
+                            _result = data.get("result")
+                            _output = _result if isinstance(_result, str) else json.dumps(_result, ensure_ascii=False, default=str)
+                            _event = {
+                                "type": "tool_output",
+                                "tool": data.get("name") or "harness_tool",
+                                "command": "",
+                                "output": _output[:12000],
+                                "exit_code": 1 if data.get("is_error") else 0,
+                                "harness_tool_id": data.get("id"),
+                            }
+                            if data.get("diff"):
+                                _event["diff"] = data["diff"]
+                            _harness_tool_events.append({
+                                "phase": "end",
+                                "tool": _event["tool"],
+                                "output": _event["output"],
+                                "exit_code": _event["exit_code"],
+                                "harness_tool_id": data.get("id"),
+                                **({"diff": data["diff"]} if data.get("diff") else {}),
+                            })
+                            yield f"data: {json.dumps(_event)}\n\n"
+                        elif etype == "harness_ui_request":
+                            yield f'data: {json.dumps({"type": "harness_ui_request", "data": data})}\n\n'
+                        elif etype == "harness_status":
+                            yield f'data: {json.dumps({"type": "harness_status", "data": data})}\n\n'
+                        elif etype == "control_request":
+                            _harness_tool_events.append({
+                                "phase": "control_request",
+                                "kind": data.get("kind") or "control",
+                                "blocking": bool(data.get("blocking")),
+                                "harness_request_id": data.get("id"),
+                            })
+                            yield f'data: {json.dumps({"type": "harness_control_request", "data": data})}\n\n'
+                        elif etype == "control_result":
+                            _harness_tool_events.append({
+                                "phase": "control_result",
+                                "kind": data.get("kind") or "control",
+                                "status": data.get("status"),
+                                "harness_request_id": data.get("id"),
+                            })
+                            yield f'data: {json.dumps({"type": "harness_control_result", "data": data})}\n\n'
+                        elif etype == "harness_event":
+                            yield f'data: {json.dumps({"type": "harness_event", "data": data.get("event", data)})}\n\n'
+                        elif etype == "error":
+                            yield f'event: error\ndata: {json.dumps({"status": 502, "text": data.get("message") or "Harness request failed"})}\n\n'
+                            yield "data: [DONE]\n\n"
+                            return
+                        elif etype == "done":
+                            break
+
+                    _elapsed = time.time() - _harness_start
+                    last_metrics = {
+                        "response_time": round(_elapsed, 2),
+                        "input_tokens": estimate_tokens(messages),
+                        "output_tokens": len(full_response) // 4,
+                        "tokens_per_second": round((len(full_response) // 4) / _elapsed, 2) if _elapsed > 0 else 0,
+                        "model": sess.model,
+                        "harness": _adapter.id,
+                        "tool_events": _harness_tool_events,
+                        "usage_source": "estimated",
+                    }
+                    if thinking_response.strip():
+                        last_metrics["thinking"] = thinking_response.strip()
+                    yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
+                    if full_response or _harness_tool_events:
+                        _response_to_save = full_response or "Done."
+                        _saved_id = save_assistant_response(
+                            sess, session_manager, session, _response_to_save, last_metrics,
+                            character_name=ctx.preset.character_name,
+                            web_sources=web_sources,
+                            rag_sources=ctx.rag_sources,
+                            used_memories=ctx.used_memories,
+                            incognito=incognito,
+                        )
+                        if _saved_id:
+                            yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
+                        run_post_response_tasks(
+                            sess, session_manager, session, message, _response_to_save,
+                            last_metrics, ctx.uprefs, memory_manager, memory_vector, webhook_manager,
+                            incognito=incognito, compare_mode=compare_mode,
+                            character_name=ctx.preset.character_name,
+                            owner=_user,
+                            allow_background_extraction=not tool_policy.block_all_tool_calls,
+                        )
+                    _stream_set(session, status="done")
+                    yield "data: [DONE]\n\n"
+                except (asyncio.CancelledError, GeneratorExit):
+                    if full_response:
+                        sess.add_message(ChatMessage(
+                            "assistant",
+                            full_response,
+                            metadata={"stopped": True, "model": sess.model, "harness": _harness_id},
+                        ))
+                        if not incognito:
+                            session_manager.save_sessions()
+                    raise
+                except Exception as _e:
+                    logger.exception("Harness stream failed")
+                    yield f'event: error\ndata: {json.dumps({"status": 502, "text": str(_e)})}\n\n'
+                    yield "data: [DONE]\n\n"
+                finally:
+                    _active_streams.pop(session, None)
+                return
+
             if _is_image_generation_session(sess, owner=_user):
                 from src.settings import get_setting
                 if tool_policy.blocks("generate_image"):
@@ -1262,6 +1726,7 @@ def setup_chat_routes(
                         prompt_type=preset_id,
                         tools=None,
                         session_id=session,
+                        provider_options=getattr(sess, "provider_options", None) or {},
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:
@@ -1409,11 +1874,13 @@ def setup_chat_routes(
                         _max_rounds = _DEFAULT_ROUNDS
                     _max_rounds = max(1, min(_max_rounds, 200))
 
-                    _forced_tools = None
+                    _forced_tools = set(capability_forced_tools) if capability_forced_tools else None
                     if _explicit_web_intent:
-                        _forced_tools = {"web_search", "web_fetch"}
+                        _forced_tools = set(_forced_tools or set())
+                        _forced_tools.update({"web_search", "web_fetch"})
                     elif _search_enabled:
-                        _forced_tools = {"web_search", "web_fetch"}
+                        _forced_tools = set(_forced_tools or set())
+                        _forced_tools.update({"web_search", "web_fetch"})
 
                     async for chunk in stream_agent_loop(
                         sess.endpoint_url,
@@ -1438,6 +1905,7 @@ def setup_chat_routes(
                         workspace=workspace or None,
                         forced_tools=_forced_tools,
                         uploaded_files=ctx.uploaded_files,
+                        provider_options=getattr(sess, "provider_options", None) or {},
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:
@@ -1724,6 +2192,7 @@ def setup_chat_routes(
                     # on "Rewriting...". Same fix as the chat max_tokens cap.
                     max_tokens=0,
                     tools=None,
+                    provider_options=getattr(sess, "provider_options", None) or {},
                 ):
                     if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                         try:

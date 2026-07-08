@@ -125,6 +125,10 @@ class Session(TimestampMixin, Base):
     
     # Headers stored as JSON
     headers = Column(JSON, default=dict)
+    # Provider-specific request options such as Codex service tier / reasoning
+    # effort. Kept separate from headers so auth metadata and model controls do
+    # not get conflated.
+    provider_options = Column(JSON, default=dict)
     
     # Timestamps are provided by TimestampMixin
     last_accessed = Column(DateTime, default=func.now(), onupdate=func.now())
@@ -177,6 +181,7 @@ class Session(TimestampMixin, Base):
             'total_input_tokens': self.total_input_tokens or 0,
             'total_output_tokens': self.total_output_tokens or 0,
             'crew_member_id': self.crew_member_id,
+            'provider_options': self.provider_options or {},
         }
 
 class ChatMessage(Base):
@@ -1016,6 +1021,25 @@ def _migrate_add_cached_models_column():
             conn.commit()
     except Exception as e:
         logging.getLogger(__name__).warning(f"cached_models migration failed: {e}")
+
+
+def _migrate_add_session_provider_options_column():
+    """Add provider_options JSON column to sessions if it doesn't exist."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute("PRAGMA table_info(sessions)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if columns and "provider_options" not in columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN provider_options JSON")
+            conn.commit()
+            logging.getLogger(__name__).info("Migrated: added sessions.provider_options column")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"sessions.provider_options migration failed: {e}")
     finally:
         try:
             conn.close()
@@ -1831,6 +1855,7 @@ def init_db():
     _migrate_add_task_run_model_column()
     _migrate_add_owner_column()
     _migrate_add_document_archived_column()
+    _migrate_add_session_provider_options_column()
     _migrate_add_last_message_at_column()
     _migrate_add_folder_column()
     _migrate_add_token_columns()

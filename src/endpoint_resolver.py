@@ -13,6 +13,7 @@ from urllib.parse import urlparse, urlunparse
 
 from core.database import SessionLocal, ModelEndpoint
 from src.llm_core import _detect_provider, _host_match, _is_kimi_code_url, KIMI_CODE_USER_AGENT, _ollama_api_root
+from src.llm_core import PROVIDER_OPTIONS_HEADER_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,16 @@ def _endpoint_enabled_models(ep) -> list:
         merged.append(m)
     merged = _filter_mlx_deepseek_v4_repo_when_shimmed(merged)
     return [m for m in merged if m not in hidden]
+
+
+def _attach_provider_options(headers: Dict, base: str, model: str, options) -> Dict:
+    from src.provider_options import sanitize_provider_options
+
+    clean = sanitize_provider_options(base, model, options)
+    if clean:
+        headers = dict(headers or {})
+        headers[PROVIDER_OPTIONS_HEADER_KEY] = clean
+    return headers
 
 
 def resolve_endpoint_runtime(ep, owner: Optional[str] = None) -> Tuple[str, Optional[str]]:
@@ -388,6 +399,12 @@ def resolve_endpoint(
         if not model and not fallback_model:
             logger.warning('[resolve_endpoint] no usable model (all models hidden or list empty)')
 
+        options = get_user_setting(
+            f"{setting_prefix}_provider_options",
+            owner_str,
+            settings.get(f"{setting_prefix}_provider_options", {}) or {},
+        ) or {}
+        headers = _attach_provider_options(headers, base, model or fallback_model or "", options)
         return chat_url, model or fallback_model, headers
     except Exception as e:
         logger.debug(f"Could not resolve {setting_prefix} endpoint: {e}")
@@ -397,7 +414,8 @@ def resolve_endpoint(
 
 
 def resolve_endpoint_by_id(
-    ep_id: str, model: Optional[str] = None, owner: Optional[str] = None
+    ep_id: str, model: Optional[str] = None, owner: Optional[str] = None,
+    provider_options: Optional[dict] = None,
 ) -> Optional[Tuple[str, str, Dict]]:
     """Resolve a specific endpoint id (+ optional model) to (chat_url, model, headers).
 
@@ -434,6 +452,7 @@ def resolve_endpoint_by_id(
             m = _first_chat_model(_endpoint_enabled_models(ep)) or ""
         if not m:
             return None
+        headers = _attach_provider_options(headers, base, m, provider_options or {})
         return chat_url, m, headers
     except Exception as e:
         logger.debug(f"Could not resolve endpoint {ep_id}: {e}")
@@ -484,7 +503,12 @@ def _resolve_fallback_candidates(setting_key: str, owner: Optional[str] = None) 
     for entry in chain:
         if not isinstance(entry, dict):
             continue
-        resolved = resolve_endpoint_by_id(entry.get("endpoint_id", ""), entry.get("model", ""), owner=owner)
+        resolved = resolve_endpoint_by_id(
+            entry.get("endpoint_id", ""),
+            entry.get("model", ""),
+            owner=owner,
+            provider_options=entry.get("provider_options") or {},
+        )
         if resolved:
             out.append(resolved)
     return out

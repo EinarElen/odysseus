@@ -70,6 +70,7 @@ class Session:
     rag: bool = False
     archived: bool = False
     headers: Optional[Dict[str, str]] = None
+    provider_options: Optional[Dict[str, Any]] = None
     history: List[ChatMessage] = None
     owner: Optional[str] = None
     is_important: bool = False
@@ -78,6 +79,8 @@ class Session:
     def __post_init__(self):
         if self.headers is None:
             self.headers = {}
+        if self.provider_options is None:
+            self.provider_options = {}
         # Ensure each session gets its OWN list (not the shared dataclass default)
         if self.history is None:
             self.history = []

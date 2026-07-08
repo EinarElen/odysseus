@@ -305,6 +305,65 @@ function _fillModelSelect(selectEl, models, selected, keepBlank) {
   _syncModelLogo(selectEl);
 }
 
+function _providerOptionSchemaFor(endpoints, epId, modelId) {
+  if (!epId || !modelId) return [];
+  var ep = (endpoints || []).find(function(e) { return e.id === epId; });
+  if (!ep) return [];
+  var perModel = ep.model_provider_options_schema || {};
+  return perModel[modelId] || ep.provider_options_schema || [];
+}
+
+function _normalizeProviderOptions(schema, raw) {
+  var src = raw && typeof raw === 'object' ? raw : {};
+  var out = {};
+  (schema || []).forEach(function(item) {
+    if (!item || !item.key) return;
+    var vals = Array.isArray(item.options) ? item.options.map(function(o) { return String(o.value); }) : [];
+    var fallback = String(item.default || '');
+    var val = String(src[item.key] || fallback || '');
+    out[item.key] = vals.indexOf(val) >= 0 ? val : fallback;
+  });
+  return out;
+}
+
+function _renderProviderOptions(containerId, endpoints, epId, modelId, rawOptions, onChange) {
+  var box = el(containerId);
+  if (!box) return {};
+  var schema = _providerOptionSchemaFor(endpoints, epId, modelId);
+  if (!schema.length) {
+    box.classList.add('hidden');
+    box.innerHTML = '';
+    return {};
+  }
+  var values = _normalizeProviderOptions(schema, rawOptions);
+  box.classList.remove('hidden');
+  box.innerHTML = '';
+  schema.forEach(function(item) {
+    if (!item || item.type !== 'select') return;
+    var wrap = document.createElement('label');
+    wrap.className = 'settings-provider-option';
+    var label = document.createElement('span');
+    label.textContent = item.label || item.key;
+    var select = document.createElement('select');
+    select.className = 'settings-select settings-provider-option-select';
+    (item.options || []).forEach(function(opt) {
+      var o = document.createElement('option');
+      o.value = opt.value;
+      o.textContent = opt.label || opt.value;
+      select.appendChild(o);
+    });
+    select.value = values[item.key] || item.default || '';
+    select.addEventListener('change', function() {
+      values[item.key] = select.value;
+      if (onChange) onChange(values);
+    });
+    wrap.appendChild(label);
+    wrap.appendChild(select);
+    box.appendChild(wrap);
+  });
+  return values;
+}
+
 function _registerAiEndpointRefresh(fn) {
   _aiEndpointRefreshers.add(fn);
 }
@@ -449,6 +508,7 @@ async function initDefaultChat() {
   var addFbBtn = el('set-defaultAddFallback');
   var _endpoints = [];
   var _fallbacks = []; // [{endpoint_id, model}] — tried in order if primary fails
+  var _providerOptions = {};
 
   function enabledEndpoints() {
     return _endpoints.filter(function(e) { return e.is_enabled; });
@@ -465,7 +525,21 @@ async function initDefaultChat() {
     _fillEndpointSelect(epSel, _endpoints, epSel.value, false);
   } catch (e) { console.warn('Failed to load endpoints for default chat', e); }
 
-  function refreshModels(selectedModel) { fillModels(modelSel, epSel.value, selectedModel); }
+  function renderProviderOptions() {
+    _providerOptions = _renderProviderOptions(
+      'set-defaultProviderOptions',
+      _endpoints,
+      epSel.value,
+      modelSel.value,
+      _providerOptions,
+      function(values) { _providerOptions = values || {}; saveDefault(); }
+    );
+  }
+
+  function refreshModels(selectedModel) {
+    fillModels(modelSel, epSel.value, selectedModel);
+    renderProviderOptions();
+  }
   function refreshEndpointOptions(selectedEndpoint, selectedModel) {
     _fillEndpointSelect(epSel, _endpoints, selectedEndpoint !== undefined ? selectedEndpoint : epSel.value, false);
     refreshModels(selectedModel !== undefined ? selectedModel : modelSel.value);
@@ -533,6 +607,7 @@ async function initDefaultChat() {
     var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
     var settings = await res.json();
     if (settings.default_endpoint_id) epSel.value = settings.default_endpoint_id;
+    _providerOptions = settings.default_provider_options || {};
     refreshModels(settings.default_model || '');
     _fallbacks = Array.isArray(settings.default_model_fallbacks)
       ? settings.default_model_fallbacks.map(function(f) {
@@ -542,8 +617,8 @@ async function initDefaultChat() {
     renderFallbacks();
   } catch (e) { console.warn('Failed to load default chat settings', e); }
 
-  epSel.addEventListener('change', function() { refreshModels(''); saveDefault(); });
-  modelSel.addEventListener('change', saveDefault);
+  epSel.addEventListener('change', function() { _providerOptions = {}; refreshModels(''); saveDefault(); });
+  modelSel.addEventListener('change', function() { _providerOptions = {}; renderProviderOptions(); saveDefault(); });
 
   async function saveDefault() {
     try {
@@ -553,6 +628,7 @@ async function initDefaultChat() {
         body: JSON.stringify({
           default_endpoint_id: epSel.value,
           default_model: modelSel.value,
+          default_provider_options: _providerOptions || {},
           default_model_fallbacks: clean
         })
       });
@@ -574,6 +650,106 @@ async function initDefaultChat() {
   });
 }
 
+/* ── Harness Runtime ── */
+async function initHarnessSettings() {
+  var harnessSel = el('set-harnessSelect');
+  var modeSel = el('set-harnessMode');
+  var thinkingSel = el('set-harnessThinking');
+  var verbositySel = el('set-harnessVerbosity');
+  var modelInput = el('set-harnessModel');
+  var agentDirInput = el('set-harnessAgentDir');
+  var sessionDirInput = el('set-harnessSessionDir');
+  var persistSel = el('set-harnessPersist');
+  var msg = el('set-harnessMsg');
+  if (!harnessSel || !modeSel || !thinkingSel || !verbositySel || !modelInput || !agentDirInput || !sessionDirInput || !persistSel) return;
+
+  var harnesses = [];
+  var defaults = {};
+  function activeId() { return harnessSel.value || (harnesses[0] && harnesses[0].id) || ''; }
+  function currentDefaults() {
+    var id = activeId();
+    var value = defaults[id];
+    return value && typeof value === 'object' ? value : {};
+  }
+  function renderHarnessList() {
+    var prev = harnessSel.value;
+    harnessSel.innerHTML = '';
+    harnesses.forEach(function(h) {
+      var o = document.createElement('option');
+      o.value = h.id;
+      o.textContent = h.label || h.id;
+      harnessSel.appendChild(o);
+    });
+    if (prev && Array.from(harnessSel.options).some(function(o) { return o.value === prev; })) {
+      harnessSel.value = prev;
+    }
+  }
+  function renderValues() {
+    var h = currentDefaults();
+    modeSel.value = h.mode || 'bridged';
+    thinkingSel.value = h.thinking_level || '';
+    verbositySel.value = h.verbosity || 'normal';
+    modelInput.value = h.model || h.model_id || '';
+    agentDirInput.value = h.agent_dir || h.agentDir || '';
+    sessionDirInput.value = h.session_dir || h.sessionDir || h.pi_session_dir || h.piSessionDir || '';
+    persistSel.value = h.persist === false || h.in_memory === true || h.inMemory === true ? 'memory' : 'persist';
+  }
+  function collect() {
+    var out = {
+      id: activeId(),
+      mode: modeSel.value || 'bridged',
+      provide_odysseus_tools: true,
+      accept_harness_tools: true,
+    };
+    if (thinkingSel.value) out.thinking_level = thinkingSel.value;
+    if (verbositySel.value && verbositySel.value !== 'normal') out.verbosity = verbositySel.value;
+    if (modelInput.value.trim()) out.model = modelInput.value.trim();
+    if (agentDirInput.value.trim()) out.agent_dir = agentDirInput.value.trim();
+    if (sessionDirInput.value.trim()) out.session_dir = sessionDirInput.value.trim();
+    if (persistSel.value === 'memory') out.persist = false;
+    return out;
+  }
+  async function save() {
+    var id = activeId();
+    if (!id) return;
+    defaults[id] = collect();
+    try {
+      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ harness_defaults: defaults })
+      });
+      if (msg) {
+        msg.textContent = 'Saved';
+        msg.style.color = 'var(--fg)';
+        setTimeout(function() { msg.textContent = ''; }, 1500);
+      }
+    } catch (e) {
+      if (msg) {
+        msg.textContent = 'Failed to save';
+        msg.style.color = 'var(--red)';
+      }
+    }
+  }
+
+  try {
+    var capsRes = await fetch('/api/harnesses', { credentials: 'same-origin' });
+    var caps = capsRes.ok ? await capsRes.json() : {};
+    harnesses = Array.isArray(caps.harnesses) ? caps.harnesses : [];
+    renderHarnessList();
+  } catch (e) { console.warn('Failed to load harnesses', e); }
+  try {
+    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    var settings = await res.json();
+    defaults = settings.harness_defaults && typeof settings.harness_defaults === 'object' ? settings.harness_defaults : {};
+  } catch (e) { console.warn('Failed to load harness defaults', e); }
+  renderValues();
+  harnessSel.addEventListener('change', renderValues);
+  [modeSel, thinkingSel, verbositySel, modelInput, agentDirInput, sessionDirInput, persistSel].forEach(function(control) {
+    control.addEventListener('change', save);
+    if (control.tagName === 'INPUT') control.addEventListener('blur', save);
+  });
+}
+
 /* ── Utility Model ── */
 async function initUtilityModel() {
   var epSel = el('set-utilityEpSelect');
@@ -581,6 +757,7 @@ async function initUtilityModel() {
   var msg = el('set-utilityChatMsg');
   var _endpoints = [];
   var fallbackWidget = null;
+  var _providerOptions = {};
   if (epSel && epSel.options[0]) epSel.options[0].textContent = 'Same as chat';
   if (modelSel && modelSel.options[0]) modelSel.options[0].textContent = 'Same as chat';
 
@@ -593,12 +770,21 @@ async function initUtilityModel() {
     var epId = epSel.value;
     var ep = _endpoints.find(function(e) { return e.id === epId; });
     _fillModelSelect(modelSel, ep ? ep.models : [], selectedModel, true);
+    _providerOptions = _renderProviderOptions(
+      'set-utilityProviderOptions',
+      _endpoints,
+      epSel.value,
+      modelSel.value,
+      _providerOptions,
+      function(values) { _providerOptions = values || {}; saveUtility(); }
+    );
   }
 
   try {
     var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
     var settings = await res.json();
     if (settings.utility_endpoint_id) epSel.value = settings.utility_endpoint_id;
+    _providerOptions = settings.utility_provider_options || {};
     refreshModels(settings.utility_model || '');
     fallbackWidget = _bindFallbackWidget({
       containerId: 'set-utilityFallbacks',
@@ -620,7 +806,8 @@ async function initUtilityModel() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           utility_endpoint_id: epSel.value || '',
-          utility_model: modelSel.value || ''
+          utility_model: modelSel.value || '',
+          utility_provider_options: _providerOptions || {}
         })
       });
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
@@ -628,14 +815,84 @@ async function initUtilityModel() {
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
   }
 
-  epSel.addEventListener('change', function() { refreshModels(''); saveUtility(); });
-  modelSel.addEventListener('change', saveUtility);
+  epSel.addEventListener('change', function() { _providerOptions = {}; refreshModels(''); saveUtility(); });
+  modelSel.addEventListener('change', function() { _providerOptions = {}; refreshModels(modelSel.value); saveUtility(); });
 
   _registerAiEndpointRefresh(function(endpoints) {
     _endpoints = endpoints;
     _fillEndpointSelect(epSel, _endpoints, epSel.value, true);
     refreshModels(modelSel.value);
     if (fallbackWidget && fallbackWidget.refresh) fallbackWidget.refresh();
+  });
+}
+
+/* ── Background Tasks Model ── */
+async function initTaskModel() {
+  var epSel = el('set-taskEpSelect');
+  var modelSel = el('set-taskModelSelect');
+  var msg = el('set-taskChatMsg');
+  var _endpoints = [];
+  var _providerOptions = {};
+  if (!epSel || !modelSel) return;
+  if (epSel.options[0]) epSel.options[0].textContent = 'Same as utility';
+  if (modelSel.options[0]) modelSel.options[0].textContent = 'Same as utility';
+
+  try {
+    _endpoints = await _fetchModelEndpoints();
+    _fillEndpointSelect(epSel, _endpoints, epSel.value, true);
+  } catch (e) { console.warn('Failed to load endpoints for background task model', e); }
+
+  function refreshModels(selectedModel) {
+    var ep = _endpoints.find(function(e) { return e.id === epSel.value; });
+    _fillModelSelect(modelSel, ep ? ep.models : [], selectedModel, true);
+    _providerOptions = _renderProviderOptions(
+      'set-taskProviderOptions',
+      _endpoints,
+      epSel.value,
+      modelSel.value,
+      _providerOptions,
+      function(values) { _providerOptions = values || {}; saveTask(); }
+    );
+  }
+
+  try {
+    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    var settings = await res.json();
+    if (settings.task_endpoint_id) epSel.value = settings.task_endpoint_id;
+    _providerOptions = settings.task_provider_options || {};
+    refreshModels(settings.task_model || '');
+  } catch (e) { console.warn('Failed to load background task model settings', e); }
+
+  async function saveTask() {
+    try {
+      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          task_endpoint_id: epSel.value || '',
+          task_model: modelSel.value || '',
+          task_provider_options: _providerOptions || {}
+        })
+      });
+      if (msg) {
+        msg.textContent = 'Saved';
+        msg.style.color = 'var(--fg)';
+        setTimeout(function() { msg.textContent = ''; }, 1500);
+      }
+    } catch (e) {
+      if (msg) {
+        msg.textContent = 'Failed to save';
+        msg.style.color = 'var(--red)';
+      }
+    }
+  }
+
+  epSel.addEventListener('change', function() { _providerOptions = {}; refreshModels(''); saveTask(); });
+  modelSel.addEventListener('change', function() { _providerOptions = {}; refreshModels(modelSel.value); saveTask(); });
+
+  _registerAiEndpointRefresh(function(endpoints) {
+    _endpoints = endpoints;
+    _fillEndpointSelect(epSel, _endpoints, epSel.value, true);
+    refreshModels(modelSel.value);
   });
 }
 
@@ -1515,6 +1772,7 @@ async function initResearchSettings() {
   var runTimeoutInput = el('set-researchRunTimeout');
   var msg = el('set-researchMsg');
   var endpoints = [];
+  var providerOptions = {};
 
   try {
     endpoints = await _fetchModelEndpoints();
@@ -1525,12 +1783,21 @@ async function initResearchSettings() {
     var epId = epSel.value;
     var ep = endpoints.find(function(e) { return e.id === epId; });
     _fillModelSelect(modelSel, ep ? ep.models : [], selectedModel, true);
+    providerOptions = _renderProviderOptions(
+      'set-researchProviderOptions',
+      endpoints,
+      epSel.value,
+      modelSel.value,
+      providerOptions,
+      function(values) { providerOptions = values || {}; saveResearch(); }
+    );
   }
 
   try {
     var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
     var settings = await res.json();
     if (settings.research_endpoint_id) epSel.value = settings.research_endpoint_id;
+    providerOptions = settings.research_provider_options || {};
     refreshModels(settings.research_model || '');
     if (settings.research_max_tokens) tokensInput.value = settings.research_max_tokens;
     if (settings.research_extraction_timeout_seconds) extractTimeoutInput.value = settings.research_extraction_timeout_seconds;
@@ -1550,6 +1817,10 @@ async function initResearchSettings() {
     if (tokensInput.value) {
       parts.push('Max tokens: ' + tokensInput.value);
     }
+    Object.keys(providerOptions || {}).forEach(function(k) {
+      var v = providerOptions[k];
+      if (v) parts.push(k.replace(/_/g, ' ') + ': ' + v);
+    });
     if (extractTimeoutInput.value) {
       parts.push('Extract: ' + extractTimeoutInput.value + 's');
     }
@@ -1576,6 +1847,7 @@ async function initResearchSettings() {
     var payload = {
       research_endpoint_id: epSel.value,
       research_model: modelSel.value,
+      research_provider_options: providerOptions || {},
     };
     var tv = parseInt(tokensInput.value, 10);
     if (tv && tv >= 1024) payload.research_max_tokens = tv;
@@ -1601,10 +1873,15 @@ async function initResearchSettings() {
   }
 
   epSel.addEventListener('change', async function() {
+    providerOptions = {};
     refreshModels('');
     saveResearch();
   });
-  modelSel.addEventListener('change', saveResearch);
+  modelSel.addEventListener('change', function() {
+    providerOptions = {};
+    refreshModels(modelSel.value);
+    saveResearch();
+  });
   tokensInput.addEventListener('change', saveResearch);
   extractTimeoutInput.addEventListener('change', saveResearch);
   extractConcurrencyInput.addEventListener('change', saveResearch);
@@ -2324,8 +2601,10 @@ function initAll() {
   initOpacityToggle();
   initialized = true;
   initDefaultChat();
+  initHarnessSettings();
   initTeacherModel();
   initUtilityModel();
+  initTaskModel();
   initImageSettings();
   initVisionSettings();
   initTtsSettings();

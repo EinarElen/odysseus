@@ -90,6 +90,7 @@ DEFAULT_SETTINGS = {
     "serper_api_key": "",
     "research_endpoint_id": "",
     "research_model": "",
+    "research_provider_options": {},
     "research_search_provider": "",
     "research_max_tokens": 16384,
     "research_extraction_timeout_seconds": 90,
@@ -134,8 +135,13 @@ DEFAULT_SETTINGS = {
     "tool_path_extra_roots": [],
     "task_endpoint_id": "",
     "task_model": "",
+    "task_provider_options": {},
     "default_endpoint_id": "",
     "default_model": "",
+    "default_provider_options": {},
+    # Per-harness defaults keyed by harness id. Values are sanitized again when
+    # copied into a session's provider_options.harness payload.
+    "harness_defaults": {},
     # Optional prose style used only for normal document writing/editing.
     # Email replies use email_writing_style instead because greetings,
     # signatures, and mailbox identity rules are medium-specific.
@@ -151,6 +157,7 @@ DEFAULT_SETTINGS = {
     "share_defaults_with_users": False,
     "utility_endpoint_id": "",
     "utility_model": "",
+    "utility_provider_options": {},
     # Ordered fallback chain for the Utility model (summarization, naming,
     # tidy actions, etc.).
     "utility_model_fallbacks": [],
@@ -272,9 +279,10 @@ _PER_USER_KEYS = {
     # Default chat endpoint / model — without per-user resolution every new
     # account inherited whatever the most-recent admin picked, which then
     # got injected into the chat composer on first open.
-    "default_endpoint_id", "default_model", "default_model_fallbacks",
-    "utility_endpoint_id", "utility_model", "utility_model_fallbacks",
-    "research_endpoint_id", "research_model",
+    "default_endpoint_id", "default_model", "default_model_fallbacks", "default_provider_options",
+    "utility_endpoint_id", "utility_model", "utility_model_fallbacks", "utility_provider_options",
+    "research_endpoint_id", "research_model", "research_provider_options",
+    "task_endpoint_id", "task_model", "task_provider_options",
 }
 
 

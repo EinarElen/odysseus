@@ -128,6 +128,7 @@ class SessionManager:
             rag=db_session.rag,
             archived=db_session.archived,
             headers=headers,
+            provider_options=getattr(db_session, "provider_options", None) or {},
             history=[],
             owner=getattr(db_session, "owner", None),
             is_important=getattr(db_session, "is_important", False) or False,
@@ -186,6 +187,7 @@ class SessionManager:
             rag=db_session.rag,
             archived=db_session.archived,
             headers=headers,
+            provider_options=getattr(db_session, "provider_options", None) or {},
             history=history,
             owner=getattr(db_session, 'owner', None),
             is_important=getattr(db_session, 'is_important', False) or False,
@@ -414,6 +416,7 @@ class SessionManager:
             session.endpoint_url = db_session.endpoint_url or ""
             session.model = db_session.model or ""
             session.headers = headers or {}
+            session.provider_options = getattr(db_session, "provider_options", None) or {}
             session.rag = db_session.rag
             session.archived = db_session.archived
             session.owner = getattr(db_session, "owner", None)
@@ -474,7 +477,8 @@ class SessionManager:
         endpoint_url: str,
         model: str,
         rag: bool = False,
-        owner: str = None
+        owner: str = None,
+        provider_options: dict = None,
     ) -> Session:
         """Create a new session and save to database."""
         db = SessionLocal()
@@ -486,6 +490,7 @@ class SessionManager:
                 model=model,
                 rag=rag,
                 headers={},
+                provider_options=provider_options or {},
                 owner=owner,
                 created_at=datetime.now(timezone.utc),
                 updated_at=datetime.now(timezone.utc)
@@ -500,6 +505,7 @@ class SessionManager:
                 model=model,
                 rag=rag,
                 headers={},
+                provider_options=provider_options or {},
                 owner=owner,
             )
 

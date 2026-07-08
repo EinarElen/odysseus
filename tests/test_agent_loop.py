@@ -41,6 +41,9 @@ try:
         _append_tool_results,
         _insert_before_latest_user,
         _MCP_KEYWORDS,
+        TOOL_SECTIONS,
+        classify_agent_setup,
+        tools_for_agent_domains,
     )
     _IMPORTED_AGENT_LOOP = sys.modules.get("src.agent_loop")
 finally:
@@ -72,6 +75,64 @@ def test_polish_internet_search_request_classifies_as_web():
 
     assert intent["low_signal"] is False
     assert "web" in intent["domains"]
+
+
+def test_study_architecture_request_classifies_as_research():
+    intent = _classify_agent_request(
+        [],
+        "Study the typst web application, tinymist, etc for how they handle live preview aspects SOTA",
+    )
+
+    assert intent["low_signal"] is False
+    assert "research" in intent["domains"]
+
+
+def test_implementation_request_classifies_as_files():
+    intent = _classify_agent_request(
+        [],
+        "Produce a fully featured version with hybrid support but Tinymist as the default and implemented version.",
+    )
+
+    assert intent["low_signal"] is False
+    assert "files" in intent["domains"]
+
+
+def test_typst_document_notes_extension_prompt_targets_codebase_not_cookbook():
+    intent = _classify_agent_request(
+        [],
+        "We have odysseus set up in ~/junk/odysseus\n\n"
+        "I want to extend the current document / notes features with typst-based capabilities",
+    )
+
+    assert intent["low_signal"] is False
+    assert "files" in intent["domains"]
+    assert "documents" in intent["domains"]
+    assert "notes_calendar_tasks" in intent["domains"]
+    assert "cookbook" not in intent["domains"]
+
+
+def test_app_api_prompt_does_not_advertise_blocked_research_start():
+    app_api_prompt = TOOL_SECTIONS["app_api"]
+
+    assert "/api/research/start" not in app_api_prompt
+    assert "trigger_research" in app_api_prompt
+
+
+def test_capability_preview_helper_exposes_detected_domains_and_tools():
+    setup = classify_agent_setup(
+        "Study Tinymist preview architecture and implement support in this repo"
+    )
+
+    assert "research" in setup["domains"]
+    assert "files" in setup["domains"]
+    assert "trigger_research" in setup["domain_tools"]
+    assert "bash" in setup["domain_tools"]
+
+
+def test_tools_for_agent_domains_supports_ui_overrides():
+    tools = tools_for_agent_domains(["research", "web", "missing"])
+
+    assert tools >= {"trigger_research", "web_search", "web_fetch"}
 
 
 def test_insert_before_latest_user_places_context_before_last_user_turn():

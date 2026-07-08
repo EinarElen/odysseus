@@ -265,6 +265,11 @@ _DOMAIN_RULES = {
 - For web lookup/search/latest/current requests, use `web_search` or `web_fetch`.
 - Do not use shell, Python, curl, requests, or scraping code for web lookup unless web tools are unavailable or already failed.
 - "Research X" means `trigger_research`, not a one-off `web_search`, unless the user explicitly asks for a quick lookup.""",
+    "research": """\
+## Deep research rules
+- For "research", "study", "look into", "investigate", "deep dive", or "report on" requests, use `trigger_research`.
+- Do not start deep research through `app_api`; that route is intentionally blocked.
+- Use `web_search` only when the user asks for a quick inline lookup rather than a full research job.""",
     "documents": """\
 ## Document rules
 - For long code/content (>15 lines), use `create_document` instead of pasting into chat.
@@ -322,6 +327,7 @@ _DOMAIN_RULES = {
 
 _DOMAIN_TOOL_MAP = {
     "web": {"web_search", "web_fetch"},
+    "research": {"trigger_research"},
     "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents"},
     "email": {"list_email_accounts", "list_emails", "read_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
     "cookbook": {"download_model", "serve_model", "serve_preset", "list_serve_presets", "list_served_models", "stop_served_model", "tail_serve_output", "list_downloads", "cancel_download", "search_hf_models", "list_cached_models", "list_cookbook_servers", "adopt_served_model"},
@@ -333,6 +339,31 @@ _DOMAIN_TOOL_MAP = {
     "contacts": {"resolve_contact", "manage_contact"},
     "integrations": {"api_call"},
 }
+
+
+def tools_for_agent_domains(domains) -> Set[str]:
+    """Return built-in tool names seeded by the agent intent domains."""
+    tools: Set[str] = set()
+    for domain in domains or []:
+        tools.update(_DOMAIN_TOOL_MAP.get(str(domain), set()))
+    return tools
+
+
+def classify_agent_setup(message: str, messages: Optional[List[Dict]] = None) -> Dict[str, object]:
+    """Public preview wrapper for UI/debug surfaces.
+
+    The streaming loop keeps the classifier private for behavior, but the
+    composer needs to show the same intent domains before a turn is sent.
+    """
+    intent = _classify_agent_request(messages or [], message or "")
+    domains = set(intent.get("domains") or set())
+    return {
+        "low_signal": bool(intent.get("low_signal")),
+        "continuation": bool(intent.get("continuation")),
+        "domains": sorted(domains),
+        "retrieval_query": intent.get("retrieval_query") or "",
+        "domain_tools": sorted(tools_for_agent_domains(domains)),
+    }
 
 def _domain_rules_for_tools(tool_names: set) -> list[str]:
     names = set(tool_names or set())
@@ -556,7 +587,7 @@ GENERIC LOOPBACK to allowed Odysseus internal endpoints. Use this whenever the u
 - Sessions: `/api/sessions`, `/api/session/{id}`, `/api/session/{id}/truncate`
 - Themes: `/api/prefs/themes`, `/api/prefs/custom-themes`
 - Settings: `/api/settings`, `/api/prefs/{key}`
-- Research: `/api/research/start`, `/api/research/tasks` (note: `/api/research/report/{id}` renders HTML — to READ a report's text use the `manage_research` tool with `action:read`, not this endpoint)
+- Research: use `trigger_research` to start a new deep-research job. `/api/research/tasks` is allowed for UI/task status. `/api/research/report/{id}` renders HTML — to READ a report's text use the `manage_research` tool with `action:read`, not this endpoint.
 - Compare: `/api/compare/sessions`, `/api/compare/start`
 - Email: use named email tools (`list_email_accounts`, `list_emails`, `read_email`, `send_email`, `reply_to_email`). Do NOT use `/api/email/accounts`; it is owner-filtered in tool context and may falsely return empty.
 - Endpoints (model providers): `/api/endpoints`, `/api/endpoints/{id}`
@@ -1011,7 +1042,7 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     def has(*patterns: str) -> bool:
         return any(re.search(p, q) for p in patterns)
 
-    if has(r"\b(cookbook|serve|serving|served|launch|start|preset|vllm|sglang|llama\.?cpp|ollama|download|downloading|pull|cached models?|running models?|model servers?|models? (?:are )?running|what models?|model picker|gpu box|kierkegaard|odysseus|ajax|qwen|gemma|llama|mistral|minimax)\b"):
+    if has(r"\b(cookbook|serve|serving|served|launch|start|preset|vllm|sglang|llama\.?cpp|ollama|download|downloading|pull|cached models?|running models?|model servers?|models? (?:are )?running|what models?|model picker|gpu box|kierkegaard|ajax|qwen|gemma|llama|mistral|minimax)\b"):
         domains.add("cookbook")
     if has(r"\b(emails?|mails?|gmail|inbox|reply|forward|cc|bcc|send email|compose email|draft email|message chris|message him|message her)\b"):
         domains.add("email")
@@ -1038,15 +1069,19 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         r"\b(aktualn\w*|bieżąc\w*|biezac\w*|dzisiaj|teraz)\b.*\b(pogod\w*|temperatur\w*)\b",
     ):
         domains.add("web")
-    if has(r"\b(research|deep dive|investigate|look into)\b"):
-        domains.add("web")
+    if has(r"\b(research|deep dive|investigate|look into|study|study up on|report on)\b"):
+        domains.add("research")
     if has(r"\b(open|show|toggle|turn on|turn off|disable|enable|switch model|change model|settings|theme|panel)\b"):
         domains.add("ui")
     if has(r"\b(session|chat history|rename chat|delete chat|archive chat|fork chat|list chats)\b"):
         domains.add("sessions")
     if has(r"\b(file|folder|directory|repo|git|grep|find in files|read file|edit file|shell|terminal|bash)\b"):
         domains.add("files")
+    if has(r"(?:^|\s|['\"])(?:~?/|/)[^\s]+"):
+        domains.add("files")
     if has(
+        r"\b(?:implement|build|add|create|produce|write|extend)\b.{0,120}\b(?:feature|features|version|support|capabilities|framework|subsystem|backend|frontend|api|route|component|integration)\b",
+        r"\b(?:fully featured|production-ready|working implementation|codebase|workspace)\b",
         r"\b(run|execute|test|debug|fix|save|create|edit|read|open)\b.{0,40}\b("
         r"python|javascript|typescript|java|c\+\+|cpp|c#|csharp|rust|go|golang|"
         r"ruby|php|swift|kotlin|bash|shell|html|css|sql|code|script|program|game"
@@ -2407,7 +2442,7 @@ def _build_actions_snapshot(tool_events: list, limit: int = 8000) -> str:
 
 async def _run_verifier_subagent(
     instruction: str, actions_snapshot: str,
-    *, endpoint_url: str, model: str, headers: dict,
+    *, endpoint_url: str, model: str, headers: dict, provider_options: Optional[Dict] = None,
 ) -> list:
     """Fresh-context completion verifier. A second model instance with NO
     shared history reads the user's request + a record of what the agent did
@@ -2440,6 +2475,7 @@ async def _run_verifier_subagent(
             url=endpoint_url, model=model,
             messages=[{"role": "user", "content": prompt}],
             headers=headers, temperature=0.0, max_tokens=600, timeout=60,
+            provider_options=provider_options or {},
         )
     except Exception as e:
         logger.warning(f"[agent] verifier subagent failed: {e}")
@@ -2563,6 +2599,7 @@ async def stream_agent_loop(
     forced_tools: Optional[Set[str]] = None,
     uploaded_files: Optional[List[Dict]] = None,
     workload: str = "foreground",
+    provider_options: Optional[Dict] = None,
     _is_teacher_run: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
@@ -2855,6 +2892,8 @@ async def stream_agent_loop(
                     "[agent-intent] web turn forced search tools enabled; removed disabled=%s",
                     _removed_web_blocks,
                 )
+        if "research" in (_intent.get("domains") or set()):
+            _relevant_tools.add("trigger_research")
         if "ui" in (_intent.get("domains") or set()):
             _relevant_tools.add("ui_control")
 
@@ -3113,6 +3152,16 @@ async def stream_agent_loop(
             _ody_memory_identity_turn,
             len(messages),
         )
+    try:
+        from src.dev_mode import developer_context_note
+        _dev_mode_note = developer_context_note(workspace)
+        if _dev_mode_note and not guide_only:
+            if messages and messages[0].get("role") == "system":
+                messages[0]["content"] = _dev_mode_note + "\n\n" + (messages[0].get("content") or "")
+            else:
+                messages.insert(0, {"role": "system", "content": _dev_mode_note})
+    except Exception as _e:
+        logger.debug("[agent] developer mode context skipped: %s", _e)
     if plan_mode and not guide_only:
         # Steer the model to investigate-then-propose. Hard tool gating handles
         # every write path except shell; this directive is what keeps the
@@ -3376,6 +3425,7 @@ async def stream_agent_loop(
             timeout=agent_stream_timeout,
             session_id=session_id,
             workload=workload,
+            provider_options=provider_options or {},
         ):
             if not _round_first_event_logged:
                 _round_first_event_logged = True
@@ -3709,6 +3759,7 @@ async def stream_agent_loop(
                     _raw = await llm_call_async(
                         url=endpoint_url, model=model, messages=_synth_messages,
                         headers=headers, temperature=0.3, max_tokens=max_tokens, timeout=60,
+                        provider_options=provider_options or {},
                     )
                     _synth = _strip_think_blocks(strip_tool_blocks(_raw or "")).strip()
                 except Exception as _e:
@@ -3789,6 +3840,7 @@ async def stream_agent_loop(
                     _verifier_instruction,
                     _build_actions_snapshot(tool_events),
                     endpoint_url=endpoint_url, model=model, headers=headers,
+                    provider_options=provider_options or {},
                 )
                 if _vfail:
                     _verifier_rounds += 1

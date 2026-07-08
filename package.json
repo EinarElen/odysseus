@@ -3,6 +3,9 @@
     "type": "git",
     "url": "https://github.com/pewdiepie-archdaemon/odysseus.git"
   },
+  "optionalDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.78.0"
+  },
   "devDependencies": {
     "@antithesishq/bombadil": "^0.6.1"
   }
