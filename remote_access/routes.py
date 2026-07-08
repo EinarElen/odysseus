@@ -37,9 +37,10 @@ def _invalidate_token_cache(request: Request) -> None:
 
 def _client_payload(body: dict[str, Any], request: Request) -> dict[str, Any]:
     metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+    raw_client_type = body.get("client_type")
     return {
         "label": str(body.get("label") or body.get("name") or "Remote client").strip()[:100],
-        "client_type": pairing.normalize_client_type(body.get("client_type")),
+        "client_type": pairing.normalize_client_type(raw_client_type) if raw_client_type else None,
         "platform": str(body.get("platform") or metadata.get("platform") or "").strip()[:100] or None,
         "user_agent": request.headers.get("user-agent"),
         "last_endpoint": str(body.get("endpoint") or "").strip()[:500] or None,
@@ -96,7 +97,9 @@ def setup_remote_access_routes() -> APIRouter:
         body = await _json_body(request)
         local_port = body.get("local_port") or getattr(request.url, "port", None) or 7000
         https_port = body.get("https_port") or 443
-        local_host = str(body.get("local_host") or "127.0.0.1")
+        local_host = str(body.get("local_host") or "127.0.0.1").strip()
+        if local_host not in {"127.0.0.1", "localhost"}:
+            raise _json_error(400, "Tailscale Serve target must be loopback")
         result = endpoints.enable_tailscale_serve(
             int(local_port),
             https_port=int(https_port),

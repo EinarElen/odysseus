@@ -12,6 +12,10 @@ from remote_access.routes import setup_remote_access_routes
 def test_normalize_capabilities_drops_unknown_values():
     assert pairing.normalize_capabilities(["chat", "bogus", "models", "chat"]) == ["chat", "models"]
     assert pairing.normalize_capabilities("") == ["chat"]
+    assert pairing.normalize_capabilities(["remote_support:control"]) == [
+        "remote_support:read",
+        "remote_support:control",
+    ]
 
 
 def test_invite_secret_hash_verifies_without_persisting_plaintext():

@@ -66,6 +66,8 @@ def normalize_capabilities(value: Any) -> list[str]:
             continue
         if capability not in out:
             out.append(capability)
+    if "remote_support:control" in out and "remote_support:read" not in out:
+        out.insert(out.index("remote_support:control"), "remote_support:read")
     return out or list(DEFAULT_CAPABILITIES)
 
 
