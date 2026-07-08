@@ -90,8 +90,8 @@ function writeStatus(config, level, phase, label, status = "running", detail = "
 	write(statusEvent(phase, label, status, detail, extra));
 }
 
-function statusFromPiEvent(event, phase, label, status = "running", detail = "") {
-	if (verbosityRank(currentConfig?.verbosity) < verbosityRank("debug")) return null;
+function statusFromPiEvent(event, phase, label, status = "running", detail = "", level = "debug") {
+	if (verbosityRank(currentConfig?.verbosity) < verbosityRank(level)) return null;
 	return statusEvent(phase, label, status, detail, {
 		event_type: event.type,
 		event: compactValue(event),
@@ -143,29 +143,29 @@ function convertEvent(event) {
 			return { type: "done", data: {} };
 		}
 		case "agent_start":
-			return statusFromPiEvent(event, "agent_start", "Agent started", "running", "Preparing tools and context");
+			return statusFromPiEvent(event, "agent_start", "Pi agent started", "running", "Preparing tools and context", "normal");
 		case "turn_start":
-			return statusFromPiEvent(event, "turn_start", "Turn started", "running", "");
+			return statusFromPiEvent(event, "turn_start", "Pi turn started", "running", "", "normal");
 		case "turn_end":
-			return statusFromPiEvent(event, "turn_end", "Turn complete", "done", "");
+			return statusFromPiEvent(event, "turn_end", "Pi turn complete", "done", "", "normal");
 		case "message_start":
-			return statusFromPiEvent(event, "message_start", "Model response started", "running", "");
+			return statusFromPiEvent(event, "message_start", "Model response started", "running", "", "normal");
 		case "message_end":
-			return statusFromPiEvent(event, "message_end", "Model response complete", "done", "");
+			return statusFromPiEvent(event, "message_end", "Model response complete", "done", "", "normal");
 		case "queue_update":
 			return statusFromPiEvent(event, "queue", "Queue updated", "info", "");
 		case "compaction_start":
-			return statusFromPiEvent(event, "compaction", "Compacting context", "running", "");
+			return statusFromPiEvent(event, "compaction", "Compacting context", "running", "", "normal");
 		case "compaction_end":
-			return statusFromPiEvent(event, "compaction", "Context compacted", "done", "");
+			return statusFromPiEvent(event, "compaction", "Context compacted", "done", "", "normal");
 		case "session_info_changed":
 			return statusFromPiEvent(event, "session_info", "Session updated", "info", "");
 		case "thinking_level_changed":
 			return statusFromPiEvent(event, "thinking_level", "Thinking level changed", "info", "");
 		case "auto_retry_start":
-			return statusFromPiEvent(event, "retry", "Retrying", "running", "");
+			return statusFromPiEvent(event, "retry", "Retrying", "running", "", "normal");
 		case "auto_retry_end":
-			return statusFromPiEvent(event, "retry", "Retry complete", "done", "");
+			return statusFromPiEvent(event, "retry", "Retry complete", "done", "", "normal");
 		case "approval_request":
 		case "permission_request":
 			return {
@@ -236,9 +236,9 @@ function makeTool(definition) {
 		label: definition.label ?? definition.name,
 		description: definition.description ?? "",
 		parameters: definition.parameters ?? { type: "object", properties: {} },
-		promptSnippet: definition.promptSnippet,
-		promptGuidelines: definition.promptGuidelines,
-		executionMode: definition.executionMode,
+		promptSnippet: definition.prompt_snippet,
+		promptGuidelines: definition.prompt_guidelines,
+		executionMode: definition.execution_mode,
 		async execute(toolCallId, params, signal, onUpdate) {
 			const requestId = `tool-${toolCallId}-${Math.random().toString(16).slice(2)}`;
 			const resultPromise = new Promise((resolve, reject) => {
@@ -258,7 +258,7 @@ function makeTool(definition) {
 			write({
 				id: requestId,
 				type: "tool_call",
-				toolCallId,
+				tool_call_id: toolCallId,
 				name: definition.name,
 				arguments: params ?? {},
 			});
@@ -266,7 +266,7 @@ function makeTool(definition) {
 			if (onUpdate && result?.details?.progress) {
 				onUpdate(result.details.progress);
 			}
-			if (result?.isError) {
+			if (result?.is_error) {
 				throw new Error(String(result?.content ?? "Odysseus tool call failed"));
 			}
 			return {
@@ -295,7 +295,7 @@ async function startSession(id, payload) {
 	const cwd = config.workspace || process.cwd();
 	const agentDir = config.agent_dir;
 	const sessionDir = config.session_dir;
-	const resumeMode = config.resume_mode ?? config.resumeMode ?? "create";
+	const resumeMode = config.resume_mode ?? "create";
 	const sessionFile = config.session_file;
 	writeStatus(config, "debug", "auth_loading", "Loading Pi auth and models", "running", agentDir || "default agent dir");
 	const authStorage = agentDir ? mod.AuthStorage.create(join(agentDir, "auth.json")) : mod.AuthStorage.create();
@@ -309,7 +309,7 @@ async function startSession(id, payload) {
 	} else if (resumeMode === "continue" || config.resume === true) {
 		writeStatus(config, "debug", "session_manager_loading", "Continuing recent Pi session", "running", cwd);
 		sessionManager = mod.SessionManager.continueRecent(cwd, sessionDir ? String(sessionDir) : undefined);
-	} else if (config.persist === false || config.in_memory === true || config.inMemory === true) {
+	} else if (config.persist === false || config.in_memory === true) {
 		writeStatus(config, "debug", "session_manager_loading", "Creating in-memory Pi session", "running", cwd);
 		sessionManager = mod.SessionManager.inMemory(cwd);
 	} else {
@@ -327,7 +327,7 @@ async function startSession(id, payload) {
 		authStorage,
 		modelRegistry,
 		model,
-		thinkingLevel: config.thinking_level ?? config.thinkingLevel,
+		thinkingLevel: config.thinking_level,
 		sessionManager,
 		customTools,
 		noTools: config.disable_native_tools === false ? undefined : config.provide_odysseus_tools ? undefined : config.no_tools,
@@ -335,18 +335,18 @@ async function startSession(id, payload) {
 		excludeTools: Array.isArray(config.exclude_tools) ? config.exclude_tools : undefined,
 	});
 	session = created.session;
-	writeStatus(config, "normal", "agent_session_ready", "Pi agent session ready", "done", session.sessionId ?? session.sessionFile ?? "");
+	writeStatus(config, "normal", "session_ready", "Pi agent session ready", "done", session.sessionId ?? session.sessionFile ?? "");
 	session.subscribe((event) => {
 		const converted = convertEvent(event);
 		if (converted) write(converted);
 	});
 	ok(id, "start_session", {
-		harnessSessionId: session.sessionId ?? session.sessionFile,
-		sessionId: session.sessionId,
+		harness_session_id: session.sessionId ?? session.sessionFile,
+		session_id: session.sessionId,
 		session_file: session.sessionFile,
 		session_dir: sessionManager?.getSessionDir?.(),
-		modelFallbackMessage: created.modelFallbackMessage,
-		activeTools: session.getActiveToolNames(),
+		model_fallback_message: created.modelFallbackMessage,
+		active_tools: session.getActiveToolNames(),
 	});
 }
 
@@ -403,7 +403,7 @@ async function command(id, payload) {
 			break;
 		case "set_model": {
 			const provider = data.provider ?? data.model_provider;
-			const modelId = data.modelId ?? data.model_id ?? data.model;
+			const modelId = data.model_id ?? data.model;
 			const model = modelRegistry?.find(String(provider), String(modelId));
 			if (!model) throw new Error(`Pi model not found: ${provider}/${modelId}`);
 			await session.setModel(model);
@@ -414,16 +414,24 @@ async function command(id, payload) {
 			await session.setThinkingLevel(String(data.level ?? data.thinking_level));
 			ok(id, commandName, { level: session.thinkingLevel });
 			break;
+		case "set_verbosity": {
+			const verbosity = String(data.verbosity ?? data.level ?? "normal").toLowerCase();
+			if (!["quiet", "normal", "debug"].includes(verbosity)) throw new Error(`Unsupported verbosity: ${verbosity}`);
+			currentConfig = { ...currentConfig, verbosity };
+			ok(id, commandName, { verbosity });
+			break;
+		}
 		case "get_state":
 			ok(id, commandName, {
-				sessionId: session.sessionId,
+				session_id: session.sessionId,
 				session_file: session.sessionFile,
 				session_dir: sessionManager?.getSessionDir?.(),
 				model: compactValue(session.model),
-				thinkingLevel: session.thinkingLevel,
-				isStreaming: session.isStreaming,
-				activeTools: session.getActiveToolNames?.() ?? [],
-				allTools: compactValue(session.getAllTools?.() ?? []),
+				thinking_level: session.thinkingLevel,
+				verbosity: currentConfig?.verbosity ?? "normal",
+				is_streaming: session.isStreaming,
+				active_tools: session.getActiveToolNames?.() ?? [],
+				all_tools: compactValue(session.getAllTools?.() ?? []),
 			});
 			break;
 		default:
@@ -436,7 +444,7 @@ function resolveToolResult(payload) {
 	const pending = pendingToolCalls.get(requestId);
 	if (!pending) return;
 	pendingToolCalls.delete(requestId);
-	pending.resolve(payload.result ?? { content: "", isError: false, details: {} });
+	pending.resolve(payload.result ?? { content: "", is_error: false, details: {} });
 }
 
 function resolveControlResult(payload) {

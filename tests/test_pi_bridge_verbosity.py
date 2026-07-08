@@ -41,7 +41,7 @@ def test_pi_bridge_normal_verbosity_suppresses_startup_checklist():
         if item.get("type") == "harness_status"
     ]
 
-    assert "agent_session_ready" in phases
+    assert "session_ready" in phases
     assert "sdk_loading" not in phases
     assert "auth_loading" not in phases
     assert "session_manager_loading" not in phases
@@ -57,4 +57,4 @@ def test_pi_bridge_debug_verbosity_includes_startup_checklist():
     assert "sdk_loading" in phases
     assert "auth_loading" in phases
     assert "session_manager_loading" in phases
-    assert "agent_session_ready" in phases
+    assert "session_ready" in phases

@@ -85,6 +85,18 @@ def _clean_text(value: Any, *, max_len: int = 256, allow_path: bool = False) -> 
     return text if _SAFE_CONFIG_TEXT.match(text) else ""
 
 
+def _clean_number(value: Any, *, minimum: float, maximum: float) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number < minimum or number > maximum:
+        return None
+    return number
+
+
 def _sanitize_harness_options(raw: Any) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
@@ -111,7 +123,7 @@ def _sanitize_harness_options(raw: Any) -> Dict[str, Any]:
         if value:
             out[key] = value
 
-    resume_mode = _clean_text(raw.get("resume_mode") or raw.get("resumeMode"), max_len=32)
+    resume_mode = _clean_text(raw.get("resume_mode"), max_len=32)
     if resume_mode in {"create", "continue", "open"}:
         out["resume_mode"] = resume_mode
 
@@ -123,9 +135,18 @@ def _sanitize_harness_options(raw: Any) -> Dict[str, Any]:
     if verbosity in _HARNESS_VERBOSITY:
         out["verbosity"] = verbosity
 
-    for key in ("provide_odysseus_tools", "accept_harness_tools", "disable_native_tools", "resume", "persist", "in_memory", "inMemory", "new_session"):
+    for key in ("provide_odysseus_tools", "accept_harness_tools", "disable_native_tools", "resume", "persist", "in_memory", "new_session"):
         if isinstance(raw.get(key), bool):
             out[key] = raw[key]
+
+    for key, minimum, maximum in (
+        ("startup_activity_timeout_seconds", 5.0, 600.0),
+        ("activity_timeout_seconds", 10.0, 3600.0),
+        ("heartbeat_interval_seconds", 1.0, 120.0),
+    ):
+        value = _clean_number(raw.get(key), minimum=minimum, maximum=maximum)
+        if value is not None:
+            out[key] = int(value) if value.is_integer() else value
 
     no_tools = raw.get("no_tools")
     if isinstance(no_tools, bool):

@@ -34,10 +34,10 @@ def reconcile_prompt_for_harness(
 ) -> Dict[str, Any]:
     """Build a deterministic Odysseus context envelope for an external harness.
 
-    The normal LLM path already receives `messages` directly. Harnesses such as
-    Pi own their own conversation state, so Odysseus sends a compact,
-    deterministic reconciliation envelope with the prompt. Keeping this isolated
-    to harness sessions avoids perturbing regular provider cache keys.
+    The normal LLM path already receives `messages` directly. Harnesses can own
+    their own conversation state, so Odysseus sends a compact, deterministic
+    reconciliation envelope with the prompt. Keeping this isolated to harness
+    sessions avoids perturbing regular provider cache keys.
     """
 
     current = str(current_message or "").strip()

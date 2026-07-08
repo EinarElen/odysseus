@@ -65,6 +65,21 @@ A bridge sends:
 - cooperative requests such as `approval_request`, `user_input_request`,
   `policy_check`, `ui_request`, `state_update`, or generic `control_yield`.
 
+Bridge payload fields are snake_case. A successful `start_session` response may
+return `harness_session_id`, `session_id`, `session_file`, and `session_dir`.
+Tool definitions use fields such as `prompt_snippet`, `prompt_guidelines`, and
+`execution_mode`. Tool calls use `tool_call_id`; tool results use `is_error`.
+Runtime state commands should return JSON-safe summaries using fields such as
+`session_id`, `session_file`, `thinking_level`, `is_streaming`, `active_tools`,
+and `all_tools`. Harness SDK names can be camelCase internally, but adapters
+must translate them at the bridge boundary.
+
+Harness runs are activity-driven, not duration-driven. `heartbeat_interval_seconds`
+controls how often Odysseus emits a visible "still running" status while a
+bridge is quiet. `activity_timeout_seconds` is the no-activity stall guard for a
+prompt turn, and `startup_activity_timeout_seconds` is the equivalent guard for
+SDK/session startup.
+
 This is the long-term path for bidirectional integration: the harness SDK host
 receives Odysseus tools at construction/start time, exposes them to its model
 loop, calls back through `tool_call` when the model invokes one, and yields

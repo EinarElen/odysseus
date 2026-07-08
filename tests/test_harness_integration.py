@@ -37,6 +37,10 @@ def test_harness_provider_options_are_sanitized_and_preserved():
                 "thinking_level": "high",
                 "verbosity": "debug",
                 "accept_harness_tools": True,
+                "resumeMode": "continue",
+                "inMemory": True,
+                "activity_timeout_seconds": 600,
+                "heartbeat_interval_seconds": 4,
                 "unexpected": "drop-me",
             },
             "service_tier": "fast",
@@ -53,6 +57,8 @@ def test_harness_provider_options_are_sanitized_and_preserved():
             "thinking_level": "high",
             "verbosity": "debug",
             "accept_harness_tools": True,
+            "activity_timeout_seconds": 600,
+            "heartbeat_interval_seconds": 4,
         }
     }
 
@@ -120,6 +126,8 @@ def test_pi_capabilities_publish_bidirectional_integration_contract():
     assert caps["pi"]["control_flow"]["cooperative_turns"] is True
     assert caps["pi"]["control_flow"]["yield_control"] is True
     assert caps["pi"]["control_flow"]["resume_with_result"] is True
+    assert caps["pi"]["defaults"]["activity_timeout_seconds"] == 300
+    assert caps["pi"]["defaults"]["heartbeat_interval_seconds"] == 8
     assert "bridged" in caps["pi"]["modes"]
 
 
@@ -146,6 +154,34 @@ def test_harness_sdk_tool_definition_from_openai_schema():
         "label": "read_file",
         "description": "Read a file",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+    }
+
+
+def test_harness_sdk_tool_definition_uses_snake_case_protocol_fields():
+    definition = HarnessToolDefinition(
+        name="edit_file",
+        description="Edit a file",
+        prompt_snippet="Use for direct edits.",
+        prompt_guidelines=["Prefer small patches."],
+        execution_mode="blocking",
+    )
+
+    assert definition.to_dict() == {
+        "name": "edit_file",
+        "label": "edit_file",
+        "description": "Edit a file",
+        "parameters": {},
+        "prompt_snippet": "Use for direct edits.",
+        "prompt_guidelines": ["Prefer small patches."],
+        "execution_mode": "blocking",
+    }
+
+
+def test_harness_sdk_tool_result_uses_snake_case_protocol_fields():
+    assert HarnessToolResult("bad", {"exit_code": 1}, is_error=True).to_dict() == {
+        "content": "bad",
+        "details": {"exit_code": 1},
+        "is_error": True,
     }
 
 
@@ -240,6 +276,18 @@ class _FakeBroker(HarnessToolBroker):
         return HarnessToolResult("ok", {"value": 7})
 
 
+class _ProgressBroker(HarnessToolBroker):
+    def list_tools(self):
+        return [HarnessToolDefinition(name="fake_tool", description="Fake")]
+
+    async def execute(self, call: HarnessToolCall, **kwargs):
+        progress_cb = kwargs.get("progress_cb")
+        assert progress_cb is not None
+        await progress_cb({"tail": "line 1"})
+        await progress_cb({"tail": "line 2"})
+        return HarnessToolResult("ok", {"value": call.arguments.get("value")})
+
+
 class _FakeControlBroker(HarnessControlBroker):
     async def handle(self, request: HarnessControlRequest, **kwargs):
         assert request.kind == "approval"
@@ -264,6 +312,19 @@ class _FakeProcess:
         return await self.request(command_type, payload)
 
 
+class _SilentProcess(_FakeProcess):
+    def __init__(self):
+        super().__init__()
+        import asyncio
+
+        self.lock = asyncio.Lock()
+
+    async def next_message(self):
+        import asyncio
+
+        await asyncio.sleep(60)
+
+
 @pytest.mark.asyncio
 async def test_sdk_harness_adapter_command_uses_bridge_request():
     adapter = SdkHarnessAdapter(
@@ -283,6 +344,33 @@ async def test_sdk_harness_adapter_command_uses_bridge_request():
 
     assert await adapter.command(ref, "get_state", {}) == {"ok": True, "command": "get_state"}
     assert process.sent == [{"type": "command", "command": "get_state", "payload": {}}]
+
+
+@pytest.mark.asyncio
+async def test_sdk_harness_adapter_emits_waiting_status_during_quiet_prompt():
+    adapter = SdkHarnessAdapter(
+        adapter_id="example",
+        label="Example",
+        command=["node", "bridge.mjs"],
+        capabilities=HarnessCapabilities(id="example", label="Example"),
+    )
+    process = _SilentProcess()
+    adapter._processes["s1"] = process
+    ref = types.SimpleNamespace(
+        harness_session_id="s1",
+        odysseus_session_id="s1",
+        workspace="/tmp/work",
+        config={"heartbeat_interval_seconds": 1, "activity_timeout_seconds": 5},
+    )
+
+    stream = adapter.send(ref, "hello")
+    event = await stream.__anext__()
+    await stream.aclose()
+
+    assert event.type == "harness_status"
+    assert event.data["phase"] == "harness_waiting"
+    assert event.data["status"] == "running"
+    assert process.sent[0]["type"] == "prompt"
 
 
 @pytest.mark.asyncio
@@ -326,7 +414,7 @@ async def test_sdk_harness_adapter_brokers_external_tool_call():
     events = [
         event async for event in adapter._handle_tool_call(
             ref,
-            {"id": "req1", "type": "tool_call", "toolCallId": "tc1", "name": "fake_tool", "arguments": {"value": 7}},
+            {"id": "req1", "type": "tool_call", "tool_call_id": "tc1", "name": "fake_tool", "arguments": {"value": 7}},
         )
     ]
 
@@ -334,9 +422,41 @@ async def test_sdk_harness_adapter_brokers_external_tool_call():
     assert process.sent == [{
         "id": "req1",
         "type": "tool_result",
-        "toolCallId": "tc1",
-        "result": {"content": "ok", "details": {"value": 7}, "isError": False},
+        "tool_call_id": "tc1",
+        "result": {"content": "ok", "details": {"value": 7}, "is_error": False},
     }]
+
+
+@pytest.mark.asyncio
+async def test_sdk_harness_adapter_streams_external_tool_progress():
+    adapter = SdkHarnessAdapter(
+        adapter_id="example",
+        label="Example",
+        command=["node", "bridge.mjs"],
+        capabilities=HarnessCapabilities(id="example", label="Example"),
+        tool_broker_factory=lambda _config: _ProgressBroker(),
+    )
+    process = _FakeProcess()
+    adapter._processes["s1"] = process
+    adapter._brokers["s1"] = _ProgressBroker()
+    ref = types.SimpleNamespace(
+        harness_session_id="s1",
+        odysseus_session_id="s1",
+        workspace="/tmp/work",
+        config={},
+    )
+
+    events = [
+        event async for event in adapter._handle_tool_call(
+            ref,
+            {"id": "req1", "type": "tool_call", "tool_call_id": "tc1", "name": "fake_tool", "arguments": {"value": 7}},
+        )
+    ]
+
+    assert [event.type for event in events] == ["tool_start", "tool_update", "tool_update", "tool_end"]
+    assert events[1].data["partial"] == {"tail": "line 1"}
+    assert events[2].data["partial"] == {"tail": "line 2"}
+    assert process.sent[-1]["type"] == "tool_result"
 
 
 @pytest.mark.asyncio

@@ -692,7 +692,7 @@ async function initHarnessSettings() {
     modelInput.value = h.model || h.model_id || '';
     agentDirInput.value = h.agent_dir || '';
     sessionDirInput.value = h.session_dir || '';
-    persistSel.value = h.persist === false || h.in_memory === true || h.inMemory === true ? 'memory' : 'persist';
+    persistSel.value = h.persist === false || h.in_memory === true ? 'memory' : 'persist';
   }
   function collect() {
     var out = {

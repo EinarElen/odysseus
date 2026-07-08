@@ -1765,29 +1765,38 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         const threadWrap = _ensureAgentThreadForStream();
         if (!threadWrap) return;
 
-        const data = json.data && typeof json.data === 'object' ? json.data : {};
-        const status = json.type === 'harness_control_request'
+        const data = json.data && typeof json.data === 'object'
+          ? json.data
+          : (json.type === 'harness_start' ? {
+              harness: json.harness,
+              mode: json.mode,
+              workspace: json.workspace,
+            } : {});
+        const status = json.type === 'harness_control_request' || json.type === 'harness_ui_request'
           ? (data.blocking ? 'waiting' : 'yielded')
           : (data.status || (json.type === 'harness_status' ? 'running' : 'done'));
         const isRunning = status === 'running' || status === 'waiting';
-        const isTerminal = status === 'done' || status === 'failed' || status === 'error';
+        const isTerminal = !isRunning || status === 'done' || status === 'failed' || status === 'error';
         const eventKind = data.kind || data.event_type || data.phase || json.type;
         const title = json.type === 'harness_status'
           ? (data.label || 'Harness activity')
           : json.type === 'harness_start'
             ? 'Harness started'
-            : json.type === 'harness_control_result'
-              ? 'Harness control result'
-              : json.type === 'harness_event'
-                ? (data.label || 'Harness event')
-                : 'Harness yielded control';
-        if ((isTerminal || isRunning) && currentHarnessStatusNode) {
-          _finishHarnessStatusNode(isTerminal ? status : 'done');
-        }
+            : json.type === 'harness_ui_request'
+              ? (data.label || 'Harness UI request')
+              : json.type === 'harness_control_result'
+                ? 'Harness control result'
+                : json.type === 'harness_event'
+                  ? (data.label || 'Harness event')
+                  : 'Harness yielded control';
         const detail = {
           phase: data.phase,
           kind: eventKind,
           detail: data.detail,
+          idle_seconds: data.idle_seconds,
+          harness: data.harness,
+          mode: data.mode,
+          workspace: data.workspace,
           request_id: data.request_id || data.id,
           session_id: data.session_id,
           event_type: data.event_type,
@@ -1800,8 +1809,20 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         const detailHtml = detailText
           ? `<details class="agent-tool-output"><summary>Details</summary><pre>${esc(detailText.slice(0, 4000))}</pre></details>`
           : '';
+        if (isRunning && currentHarnessStatusNode && currentHarnessStatusNode.dataset.harnessPhase === String(eventKind)) {
+          const titleEl = currentHarnessStatusNode.querySelector('.agent-thread-tool');
+          if (titleEl) titleEl.textContent = title;
+          const contentEl = currentHarnessStatusNode.querySelector('.agent-thread-content');
+          if (contentEl) contentEl.innerHTML = detailHtml;
+          uiModule.scrollHistory();
+          return;
+        }
+        if ((isTerminal || isRunning) && currentHarnessStatusNode) {
+          _finishHarnessStatusNode(isTerminal ? status : 'done');
+        }
         const node = document.createElement('div');
         node.className = 'agent-thread-node';
+        node.dataset.harnessPhase = String(eventKind);
         if (isRunning) node.classList.add('running');
         if (status === 'error' || status === 'failed' || data.ok === false) node.classList.add('error');
         const icon = isRunning ? '\u25B6' : (node.classList.contains('error') ? '\u2717' : '\u2713');
@@ -2163,7 +2184,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 typewriterInto(roundHolder.querySelector('.body'), errMsg);
                 break;
               }
-              if (json.delta || json.type === 'agent_prep' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress' || json.type === 'harness_start' || json.type === 'harness_status' || json.type === 'harness_control_request' || json.type === 'harness_control_result' || json.type === 'harness_event') {
+              if (json.delta || json.type === 'agent_prep' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress' || json.type === 'harness_start' || json.type === 'harness_status' || json.type === 'harness_ui_request' || json.type === 'harness_control_request' || json.type === 'harness_control_result' || json.type === 'harness_event') {
                 clearResponseTimeout();
                 clearProcessingProbe();
                 clearFirstTokenWaitTimers();
@@ -2809,7 +2830,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 if (_isBg) continue;
                 if (currentHolder && json.id) currentHolder.dataset.dbId = json.id;
 
-              } else if (json.type === 'harness_start' || json.type === 'harness_status' || json.type === 'harness_control_request' ||
+              } else if (json.type === 'harness_start' || json.type === 'harness_status' || json.type === 'harness_ui_request' || json.type === 'harness_control_request' ||
                          json.type === 'harness_control_result' || json.type === 'harness_event') {
                 if (_isBg) continue;
                 _appendHarnessRuntimeEvent(json);
@@ -4221,7 +4242,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                      json.type === 'web_sources' || json.type === 'rag_sources' ||
                      json.type === 'research_progress' || json.type === 'research_sources' ||
                      json.type === 'research_findings' || json.type === 'research_done' ||
-                     json.type === 'harness_start' || json.type === 'harness_status' || json.type === 'harness_control_request' ||
+                     json.type === 'harness_start' || json.type === 'harness_status' || json.type === 'harness_ui_request' || json.type === 'harness_control_request' ||
                      json.type === 'harness_control_result' || json.type === 'harness_event') {
             rich = true;
           }
@@ -4518,26 +4539,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         const stillStale = Date.now() - _lastReaderActivity;
         if (stillStale < 5000) return; // Came back to life
 
-        console.warn('[tab-recovery] Stream confirmed dead. Aborting and reloading session.');
-
-        // Abort the frozen stream, but preserve the visible bubble.
-        if (currentAbort) {
-          currentAbort._reason = 'recovery';
-          currentAbort.abort();
-        }
-        isStreaming = false;
-
-        // Release Web Lock
-        if (_webLockRelease) {
-          _webLockRelease();
-          _webLockRelease = null;
-        }
-
-        // Reset UI state
-        var _submitBtn = document.getElementById('submit');
-        updateSubmitButton('idle', _submitBtn);
-        var _msgInput = document.getElementById('message');
-        if (_msgInput) _msgInput.disabled = false;
+        console.warn('[tab-recovery] Stream still silent. Probing server before local recovery.');
+        _probeStaleLocalStream();
       }, 2000); // 2 second grace period
     });
 

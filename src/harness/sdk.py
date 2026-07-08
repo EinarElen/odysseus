@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import shlex
+import time
 import uuid
 from collections import namedtuple
 from dataclasses import dataclass, field
@@ -20,6 +21,16 @@ from .base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _bounded_float(value: Any, *, default: float, minimum: float, maximum: float) -> float:
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(number, maximum))
 
 
 class HarnessSdkError(RuntimeError):
@@ -62,11 +73,11 @@ class HarnessToolDefinition:
             "parameters": dict(self.parameters or {}),
         }
         if self.prompt_snippet:
-            out["promptSnippet"] = self.prompt_snippet
+            out["prompt_snippet"] = self.prompt_snippet
         if self.prompt_guidelines:
-            out["promptGuidelines"] = list(self.prompt_guidelines)
+            out["prompt_guidelines"] = list(self.prompt_guidelines)
         if self.execution_mode:
-            out["executionMode"] = self.execution_mode
+            out["execution_mode"] = self.execution_mode
         return out
 
 
@@ -88,7 +99,7 @@ class HarnessToolResult:
         return {
             "content": self.content,
             "details": dict(self.details or {}),
-            "isError": self.is_error,
+            "is_error": self.is_error,
         }
 
 
@@ -386,9 +397,7 @@ class SdkHarnessAdapter:
             event_cb=_forward_startup_event if startup_event_cb is not None else None,
         )
         harness_session_id = str(
-            start_data.get("harnessSessionId")
-            or start_data.get("harness_session_id")
-            or start_data.get("sessionId")
+            start_data.get("harness_session_id")
             or start_data.get("session_id")
             or start_data.get("session_file")
             or session_id
@@ -430,15 +439,42 @@ class SdkHarnessAdapter:
             })
             saw_prompt_ack = False
             saw_harness_activity = False
+            last_activity = time.monotonic()
+            heartbeat_interval = _bounded_float(
+                ref.config.get("heartbeat_interval_seconds"),
+                default=8.0,
+                minimum=1.0,
+                maximum=120.0,
+            )
+            inactivity_timeout = _bounded_float(
+                ref.config.get("activity_timeout_seconds"),
+                default=180.0,
+                minimum=heartbeat_interval,
+                maximum=3600.0,
+            )
             while True:
                 try:
-                    raw = await asyncio.wait_for(process.next_message(), timeout=90)
+                    raw = await asyncio.wait_for(process.next_message(), timeout=heartbeat_interval)
                 except asyncio.TimeoutError:
-                    if not saw_harness_activity:
+                    idle_for = time.monotonic() - last_activity
+                    if idle_for >= inactivity_timeout and not saw_harness_activity:
                         yield HarnessEvent("error", {"message": f"{self.label} did not emit any prompt activity"})
-                    else:
+                        return
+                    if idle_for >= inactivity_timeout:
                         yield HarnessEvent("error", {"message": f"{self.label} prompt stalled"})
-                    return
+                        return
+                    yield HarnessEvent(
+                        "harness_status",
+                        {
+                            "phase": "harness_waiting",
+                            "label": f"{self.label} is still running",
+                            "status": "running",
+                            "detail": f"idle {int(idle_for)}s",
+                            "idle_seconds": round(idle_for, 2),
+                        },
+                    )
+                    continue
+                last_activity = time.monotonic()
                 if raw.get("type") == "response" and raw.get("id") == request_id:
                     if not raw.get("success"):
                         yield HarnessEvent("error", {"message": raw.get("error") or f"{self.label} prompt failed"})
@@ -501,7 +537,7 @@ class SdkHarnessAdapter:
             data = raw.get("data")
             return HarnessEvent(etype, data if isinstance(data, dict) else {})
         if etype == "event":
-            event_type = str(raw.get("event_type") or raw.get("eventType") or "harness_event")
+            event_type = str(raw.get("event_type") or "harness_event")
             data = raw.get("data")
             if event_type == "done":
                 return HarnessEvent("done", data if isinstance(data, dict) else {})
@@ -509,9 +545,9 @@ class SdkHarnessAdapter:
         return None
 
     def control_request_from_raw(self, raw: Dict[str, Any]) -> HarnessControlRequest:
-        request_id = str(raw.get("id") or raw.get("requestId") or raw.get("request_id") or uuid.uuid4().hex)
+        request_id = str(raw.get("id") or raw.get("request_id") or uuid.uuid4().hex)
         raw_type = str(raw.get("type") or "control_yield")
-        kind = str(raw.get("kind") or raw.get("requestKind") or raw_type).strip()
+        kind = str(raw.get("kind") or raw.get("request_kind") or raw_type).strip()
         kind = {
             "approval_request": "approval",
             "user_input_request": "user_input",
@@ -522,13 +558,13 @@ class SdkHarnessAdapter:
             data = {
                 key: value
                 for key, value in raw.items()
-                if key not in {"id", "requestId", "request_id", "type", "kind", "requestKind", "blocking"}
+                if key not in {"id", "request_id", "type", "kind", "request_kind", "blocking"}
             }
         return HarnessControlRequest(
             id=request_id,
             kind=kind or "control",
             data=data,
-            blocking=bool(raw.get("blocking") or raw.get("requiresResult")),
+            blocking=bool(raw.get("blocking") or raw.get("requires_result")),
         )
 
     async def _handle_control_request(
@@ -570,7 +606,7 @@ class SdkHarnessAdapter:
         ref: HarnessSessionRef,
         raw: Dict[str, Any],
     ) -> AsyncIterator[HarnessEvent]:
-        call_id = str(raw.get("toolCallId") or raw.get("tool_call_id") or raw.get("id") or uuid.uuid4().hex)
+        call_id = str(raw.get("tool_call_id") or raw.get("id") or uuid.uuid4().hex)
         name = str(raw.get("name") or raw.get("tool") or "").strip()
         arguments = raw.get("arguments") or raw.get("args") or {}
         if not isinstance(arguments, dict):
@@ -582,18 +618,33 @@ class SdkHarnessAdapter:
 
         yield HarnessEvent("tool_start", {"id": call_id, "name": name, "input": arguments, "external": True})
 
-        async def progress_cb(update: Dict[str, Any]) -> None:
-            del update
-
         try:
-            result = await broker.execute(
+            progress_queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
+
+            async def progress_cb(update: Dict[str, Any]) -> None:
+                if isinstance(update, dict):
+                    await progress_queue.put(update)
+                else:
+                    await progress_queue.put({"message": str(update)})
+
+            execute_task = asyncio.create_task(broker.execute(
                 HarnessToolCall(name=name, arguments=arguments, id=call_id, raw=raw),
                 session_id=ref.odysseus_session_id,
                 owner=ref.config.get("owner"),
                 workspace=ref.workspace,
                 disabled_tools=set(ref.config.get("disabled_tools") or []),
                 progress_cb=progress_cb,
-            )
+            ))
+            while not execute_task.done():
+                try:
+                    update = await asyncio.wait_for(progress_queue.get(), timeout=0.25)
+                except asyncio.TimeoutError:
+                    continue
+                yield HarnessEvent("tool_update", {"id": call_id, "name": name, "partial": update, "external": True})
+            result = await execute_task
+            while not progress_queue.empty():
+                update = progress_queue.get_nowait()
+                yield HarnessEvent("tool_update", {"id": call_id, "name": name, "partial": update, "external": True})
         except Exception as exc:
             logger.exception("Harness SDK tool call failed")
             result = HarnessToolResult(str(exc), is_error=True)
@@ -611,11 +662,11 @@ class SdkHarnessAdapter:
 
     async def _send_tool_result(self, ref: HarnessSessionRef, raw: Dict[str, Any], result: HarnessToolResult) -> None:
         process = self._require_process(ref)
-        response_id = raw.get("id") or raw.get("requestId") or raw.get("request_id")
+        response_id = raw.get("id") or raw.get("request_id")
         await process.send_json({
             "id": response_id,
             "type": "tool_result",
-            "toolCallId": raw.get("toolCallId") or raw.get("tool_call_id"),
+            "tool_call_id": raw.get("tool_call_id") or raw.get("id"),
             "result": result.to_dict(),
         })
 
@@ -626,7 +677,7 @@ class SdkHarnessAdapter:
         result: HarnessControlResult,
     ) -> None:
         process = self._require_process(ref)
-        response_id = raw.get("id") or raw.get("requestId") or raw.get("request_id") or result.id
+        response_id = raw.get("id") or raw.get("request_id") or result.id
         await process.send_json({
             "id": response_id,
             "type": "control_result",

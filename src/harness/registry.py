@@ -30,6 +30,9 @@ _ADAPTERS: Dict[str, HarnessAdapter] = {
                 "thinking_level": "medium",
                 "provide_odysseus_tools": True,
                 "accept_harness_tools": True,
+                "startup_activity_timeout_seconds": 120,
+                "activity_timeout_seconds": 300,
+                "heartbeat_interval_seconds": 8,
             },
             session={
                 "resume": True,

@@ -390,6 +390,14 @@ async function _sendHarnessCommand(sessionId, command, payload = {}) {
   return data && data.data;
 }
 
+function _harnessStateSummary(state) {
+  if (!state || typeof state !== 'object') return 'Harness state loaded';
+  if (state.session_file) return `Harness state: ${state.session_file}`;
+  if (state.session_id) return `Harness state: ${state.session_id}`;
+  if (Array.isArray(state.active_tools)) return `Harness state: ${state.active_tools.length} active tools`;
+  return 'Harness state loaded';
+}
+
 function _renderHarnessRuntimeStrip() {
   const strip = document.getElementById('harness-runtime-strip');
   if (!strip || !_deps) return;
@@ -438,6 +446,28 @@ function _renderHarnessRuntimeStrip() {
   });
   strip.appendChild(thinking);
 
+  const verbosity = document.createElement('select');
+  verbosity.className = 'harness-runtime-select';
+  verbosity.title = 'Harness event detail';
+  ['quiet', 'normal', 'debug'].forEach(value => {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = value;
+    verbosity.appendChild(opt);
+  });
+  verbosity.value = config.verbosity || 'normal';
+  verbosity.addEventListener('change', async () => {
+    const nextConfig = { ...config, verbosity: verbosity.value };
+    try {
+      await _saveHarnessConfigForContext(ctx, nextConfig);
+      if (canCommand) await _sendHarnessCommand(ctx.sessionId, 'set_verbosity', { verbosity: verbosity.value });
+      uiModule.showToast('Harness settings saved');
+    } catch (e) {
+      uiModule.showError(e.message || 'Failed to update harness');
+    }
+  });
+  strip.appendChild(verbosity);
+
   const stateBtn = document.createElement('button');
   stateBtn.type = 'button';
   stateBtn.className = 'harness-runtime-btn';
@@ -447,7 +477,7 @@ function _renderHarnessRuntimeStrip() {
   stateBtn.addEventListener('click', async () => {
     try {
       const state = await _sendHarnessCommand(ctx.sessionId, 'get_state');
-      uiModule.showToast(state && state.session_file ? `Harness state: ${state.session_file}` : 'Harness state loaded');
+      uiModule.showToast(_harnessStateSummary(state));
       console.debug('[harness state]', state);
     } catch (e) {
       uiModule.showError(e.message || 'Harness is not running');
