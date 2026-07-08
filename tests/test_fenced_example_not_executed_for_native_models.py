@@ -183,6 +183,28 @@ def test_resolve_tool_blocks_skips_textual_fallback_for_native_models_with_no_na
     assert used_native is False
 
 
+def test_resolve_tool_blocks_recovers_exact_get_workspace_fence_for_native_model():
+    blocks, used_native, _ = al._resolve_tool_blocks("```get_workspace\n```", [], round_num=1, is_api_model=True)
+    assert len(blocks) == 1
+    assert blocks[0].tool_type == "get_workspace"
+    assert blocks[0].content == ""
+    assert used_native is False
+
+
+def test_native_model_exact_get_workspace_fence_is_executed(monkeypatch):
+    exec_calls = []
+    _patch_common(monkeypatch, exec_calls)
+    events = _run_loop(
+        monkeypatch,
+        "gpt-5.5",
+        ["```get_workspace\n```"],
+        max_rounds=2,
+        endpoint_url="https://chatgpt.com/backend-api/codex/responses",
+    )
+    assert len(exec_calls) == 1, f"exact no-arg tool fence should execute: {exec_calls}"
+    assert exec_calls[0].tool_type == "get_workspace"
+
+
 def test_resolve_tool_blocks_keeps_textual_fallback_for_non_native_models():
     text = "```bash\necho hi\n```"
     blocks, used_native, _ = al._resolve_tool_blocks(text, [], round_num=1, is_api_model=False)
@@ -294,6 +316,14 @@ def test_skip_fenced_ignores_only_the_fenced_pattern():
     text = "```bash\nnpm run plan:articles\n```"
     assert parse_tool_blocks(text, skip_fenced=True) == []
     assert len(parse_tool_blocks(text, skip_fenced=False)) == 1
+
+
+def test_skip_fenced_recovers_exact_no_arg_tool_fence():
+    text = "```get_workspace\n```"
+    blocks = parse_tool_blocks(text, skip_fenced=True)
+    assert len(blocks) == 1
+    assert blocks[0].tool_type == "get_workspace"
+    assert strip_tool_blocks(text, skip_fenced=True) == ""
 
 
 def test_resolve_tool_blocks_recovers_invoke_markup_for_native_model_with_no_native_calls():

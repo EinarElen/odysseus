@@ -41,6 +41,7 @@ _TOOL_BLOCK_RE = re.compile(
 # "setup"}), never inline tool args — only the classic tag-then-newline form
 # executes for them.
 _CODE_FENCE_TAGS = frozenset({"bash", "python"})
+_EMPTY_FENCE_TOOL_TAGS = frozenset(BUILTIN_EMAIL_TOOLS) | {"get_workspace"}
 
 
 def _fenced_tool_call(m) -> Optional[Tuple[str, str]]:
@@ -76,7 +77,29 @@ def _fenced_tool_call(m) -> Optional[Tuple[str, str]]:
 
 def _strip_executed_fence(m) -> str:
     """re.sub callback: remove only fences that parse as tool calls."""
-    return "" if _fenced_tool_call(m) is not None else m.group(0)
+    call = _fenced_tool_call(m)
+    if call is None:
+        return m.group(0)
+    tag, content = call
+    return "" if _is_executable_fenced_call(tag, content, skip_fenced=False) else m.group(0)
+
+
+def _strip_executed_fence_skip_code(m) -> str:
+    """Remove only fences that execute when code fences are suppressed."""
+    call = _fenced_tool_call(m)
+    if call is None:
+        return m.group(0)
+    tag, content = call
+    return "" if _is_executable_fenced_call(tag, content, skip_fenced=True) else m.group(0)
+
+
+def _is_executable_fenced_call(tag: str, content: str, *, skip_fenced: bool) -> bool:
+    """Whether a parsed fence should dispatch under the current fence policy."""
+    if skip_fenced and tag in _CODE_FENCE_TAGS:
+        return False
+    if not content and tag not in _EMPTY_FENCE_TOOL_TAGS:
+        return False
+    return True
 
 # Pattern 2: [TOOL_CALL] ... [/TOOL_CALL] blocks (some models use this format)
 # Matches: {tool => "shell", args => {--command "ls -la"}} etc.
@@ -1245,16 +1268,14 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
     7. Non-native local model fallback: prose mentioning web_search followed by
        bare JSON args, e.g. {"query":"...", "time_filter":"week"}
 
-    `skip_fenced`: when True, Pattern 1 (fenced ```bash/```python/```json code
-    blocks) is not matched at all. Native function-calling models (GPT/Claude/
-    Grok/Qwen3/DeepSeek-V, etc.) commonly write illustrative fenced examples in
-    prose; for those models we trust the structured tool_calls channel for real
-    invocations and treat a bare fence as display text rather than an action
-    (issue #3222). Patterns 2-5 — explicit [TOOL_CALL]/<invoke>/<tool_code>/DSML
-    markup that leaked into content as text — stay fully active regardless,
-    since that markup is never an illustrative example and dropping it would
-    silently lose real calls (e.g. DeepSeek-V falling back to DSML when it
-    can't emit structured tool_calls).
+    `skip_fenced`: when True, code fences such as ```bash and ```python are
+    left inert. Native function-calling models (GPT/Claude/Grok/Qwen3/
+    DeepSeek-V, etc.) commonly write illustrative code examples in prose; for
+    those models we trust the structured tool_calls channel for shell/code
+    execution. Exact non-code tool fences such as ```get_workspace still run,
+    because some API backends emit Odysseus text-tool syntax even when schemas
+    were supplied. Patterns 2-5 — explicit [TOOL_CALL]/<invoke>/<tool_code>/DSML
+    markup that leaked into content as text — stay fully active regardless.
     """
     blocks = []
 
@@ -1262,43 +1283,37 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
     # XML patterns below catch it.
     text = _normalize_dsml(text)
 
-    # Pattern 1: fenced code blocks (skipped when `skip_fenced` — see docstring).
-    if not skip_fenced:
-        for m in _TOOL_BLOCK_RE.finditer(text):
-            call = _fenced_tool_call(m)
-            if call is None:
-                continue
-            tag, content = call
-            if not content:
-                # An empty fence is still an unambiguous call for the email
-                # tools — ```list_email_accounts``` with no body is a shape
-                # local models really emit for no-arg tools. Dispatch with
-                # empty args and let the tool's own validation answer;
-                # silently dropping the call left models concluding email was
-                # broken. Other tags (bash, python, ...) keep skipping: empty
-                # content is nothing to run.
-                if tag in BUILTIN_EMAIL_TOOLS:
-                    blocks.append(ToolBlock(tag, ""))
-                continue
-            # If a code block's content is an <invoke> XML call (some models wrap
-            # tool calls in ```python or ```xml fences), parse the invoke instead.
-            if '<invoke' in content:
-                for inv_name, inv_body in _iter_xml_invoke(content):
-                    block = _parse_xml_invoke(inv_name, inv_body)
-                    if block:
-                        blocks.append(block)
-                # This fenced block is <invoke> markup, not literal code. Whether or
-                # not any call converted, never fall through to append the raw XML as
-                # a python/bash block — e.g. a hyphenated/namespaced tool name that
-                # _XML_INVOKE_RE's \w+ can't match would otherwise be executed as code.
-                continue
-            if tag in ("python", "bash"):
-                block = (_parse_misfenced_web_lookup(content)
-                         or _parse_misfenced_read_file_lookup(content, allow_shell_style=(tag == "bash")))
+    # Pattern 1: fenced tool blocks. In skip_fenced mode, code-execution tags
+    # stay inert but exact non-code tool fences can still dispatch.
+    for m in _TOOL_BLOCK_RE.finditer(text):
+        call = _fenced_tool_call(m)
+        if call is None:
+            continue
+        tag, content = call
+        if not _is_executable_fenced_call(tag, content, skip_fenced=skip_fenced):
+            continue
+        if not content:
+            blocks.append(ToolBlock(tag, ""))
+            continue
+        # If a code block's content is an <invoke> XML call (some models wrap
+        # tool calls in ```python or ```xml fences), parse the invoke instead.
+        if '<invoke' in content:
+            for inv_name, inv_body in _iter_xml_invoke(content):
+                block = _parse_xml_invoke(inv_name, inv_body)
                 if block:
                     blocks.append(block)
-                    continue
-            blocks.append(ToolBlock(tag, content))
+            # This fenced block is <invoke> markup, not literal code. Whether or
+            # not any call converted, never fall through to append the raw XML as
+            # a python/bash block — e.g. a hyphenated/namespaced tool name that
+            # _XML_INVOKE_RE's \w+ can't match would otherwise be executed as code.
+            continue
+        if tag in ("python", "bash"):
+            block = (_parse_misfenced_web_lookup(content)
+                     or _parse_misfenced_read_file_lookup(content, allow_shell_style=(tag == "bash")))
+            if block:
+                blocks.append(block)
+                continue
+        blocks.append(ToolBlock(tag, content))
 
     # Pattern 2: [TOOL_CALL] blocks (only if no fenced blocks found)
     # _iter_delimited scans the delimiter-bounded formats forward-only so
@@ -1410,8 +1425,9 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
 def strip_tool_blocks(text: str, skip_fenced: bool = False) -> str:
     """Remove executable tool blocks from text for clean display.
 
-    `skip_fenced`: when True, fenced ```bash/```python/```json code blocks
-    (Pattern 1) are left intact instead of being stripped. This must mirror
+    `skip_fenced`: when True, fenced ```bash/```python code blocks are left
+    intact instead of being stripped. Non-code tool fences that still execute
+    are stripped. This must mirror
     whatever `skip_fenced` value `parse_tool_blocks` was called with for the
     same response: if a fence wasn't executed as a tool call (because it's an
     illustrative example from a native function-calling model), it shouldn't
@@ -1424,9 +1440,10 @@ def strip_tool_blocks(text: str, skip_fenced: bool = False) -> str:
     # / <tool_call> removers below instead of leaking to the user.
     text = _normalize_dsml(text)
     # Keep the executed-vs-illustrative fence distinction (only strip fences
-    # that actually dispatched; leave example fences from native models inert
+    # that actually dispatched; leave code examples from native models inert
     # but visible), then remove [TOOL_CALL]{...}[/TOOL_CALL] markup.
-    cleaned = text if skip_fenced else _TOOL_BLOCK_RE.sub(_strip_executed_fence, text)
+    fence_stripper = _strip_executed_fence_skip_code if skip_fenced else _strip_executed_fence
+    cleaned = _TOOL_BLOCK_RE.sub(fence_stripper, text)
     # Forward-only removal mirrors parse_tool_blocks: _strip_delimited pairs each
     # opener with a later closer and stops when none is reachable, so untrusted
     # output can't drive the O(n^2) lazy-rescan (ReDoS); see _iter_delimited.
