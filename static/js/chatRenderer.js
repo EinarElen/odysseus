@@ -941,6 +941,108 @@ export function copyMessageText(msgElement) {
   return content || raw;
 }
 
+function _titleCaseStatus(status) {
+  const s = String(status || '').trim().toLowerCase();
+  if (!s) return 'Done';
+  if (s === 'done' || s === 'completed') return 'Completed';
+  if (s === 'failed' || s === 'error') return 'Failed';
+  if (s === 'waiting') return 'Waiting';
+  if (s === 'running') return 'Running';
+  if (s === 'stopped') return 'Stopped';
+  return s.charAt(0).toUpperCase() + s.slice(1).replace(/_/g, ' ');
+}
+
+function _stringDetail(value, limit = 4000) {
+  if (value == null || value === '') return '';
+  let text = '';
+  if (typeof value === 'string') {
+    text = value;
+  } else {
+    try { text = JSON.stringify(value, null, 2); }
+    catch (_) { text = String(value); }
+  }
+  text = text.trim();
+  return text.length > limit ? text.slice(0, limit) + '\n...' : text;
+}
+
+function _buildHarnessEventDetails(ev) {
+  const esc = uiModule.esc;
+  let html = '';
+  const input = _stringDetail(ev.input, 1600);
+  const detail = _stringDetail(ev.detail, 3000);
+  const progress = _stringDetail(ev.progress, 2000);
+  const output = _stringDetail(ev.output, 12000);
+  if (input) html += `<details class="agent-tool-output"><summary>Input</summary><pre>${esc(input)}</pre></details>`;
+  if (detail) html += `<details class="agent-tool-output"><summary>Details</summary><pre>${esc(detail)}</pre></details>`;
+  if (progress) html += `<details class="agent-tool-output"><summary>Progress</summary><pre>${esc(progress)}</pre></details>`;
+  if (output) html += `<details class="agent-tool-output"><summary>Output</summary><pre>${esc(output)}</pre></details>`;
+  if (ev.diff && ev.diff.text) {
+    const d = ev.diff;
+    const stat = [
+      d.new_file ? '<span class="diff-stat-new">new</span>' : '',
+      d.added ? `<span class="diff-stat-add">+${d.added}</span>` : '',
+      d.removed ? `<span class="diff-stat-del">−${d.removed}</span>` : '',
+    ].filter(Boolean).join(' ');
+    const rows = String(d.text || '').split('\n').map(line => {
+      let cls = 'diff-ctx', text = line;
+      if (line.startsWith('+++') || line.startsWith('---')) cls = 'diff-meta';
+      else if (line.startsWith('@@')) cls = 'diff-hunk';
+      else if (line.startsWith('+')) { cls = 'diff-add'; text = line.slice(1); }
+      else if (line.startsWith('-')) { cls = 'diff-del'; text = line.slice(1); }
+      else if (line.startsWith(' ')) { text = line.slice(1); }
+      return `<span class="${cls}">${esc(text) || '&nbsp;'}</span>`;
+    }).join('');
+    html += `<details class="agent-tool-output agent-tool-diff"><summary><span class="diff-file">${esc(d.file || 'diff')}</span> <span class="diff-summary-stats">${stat}</span></summary><pre class="diff-pre">${rows}</pre></details>`;
+  }
+  return html;
+}
+
+function buildHarnessRunBox(run) {
+  if (!run || typeof run !== 'object') return '';
+  const esc = uiModule.esc;
+  const events = Array.isArray(run.events) ? run.events : [];
+  const toolCount = events.filter(ev => ev && ev.type === 'tool').length;
+  const failedCount = events.filter(ev => ev && ['failed', 'error'].includes(String(ev.status || '').toLowerCase())).length;
+  const status = _titleCaseStatus(run.status);
+  const label = run.label || run.id || 'Harness';
+  const summaryBits = [];
+  summaryBits.push(status);
+  if (toolCount) summaryBits.push(`${toolCount} action${toolCount === 1 ? '' : 's'}`);
+  if (failedCount) summaryBits.push(`${failedCount} failed`);
+  if (run.duration_seconds != null) summaryBits.push(`${Number(run.duration_seconds).toFixed(1)}s`);
+  const meta = summaryBits.join(' · ');
+  const sub = [run.mode, run.workspace].filter(Boolean).join(' · ');
+  const rows = events.map(ev => {
+    if (!ev || typeof ev !== 'object') return '';
+    const evStatus = _titleCaseStatus(ev.status);
+    const isError = ['failed', 'error'].includes(String(ev.status || '').toLowerCase());
+    const isRunning = String(ev.status || '').toLowerCase() === 'running';
+    const type = ev.type === 'tool' ? 'Action' : ev.type === 'control' ? 'Control' : ev.type === 'status' ? 'Status' : 'Event';
+    const title = ev.label || ev.tool || type;
+    const icon = isRunning ? '▶' : isError ? '✗' : '✓';
+    const details = _buildHarnessEventDetails(ev);
+    return `<div class="agent-thread-node harness-run-node${isError ? ' error' : ''}${details ? ' openable' : ''}">
+      <div class="agent-thread-dot"></div>
+      <div class="agent-thread-header">
+        <span class="agent-thread-icon">${icon}</span>
+        <span class="agent-thread-tool">${esc(title)}</span>
+        <span class="agent-thread-status">${esc(evStatus)}</span>
+        ${details ? '<span class="agent-thread-chevron">▶</span>' : ''}
+      </div>
+      <div class="agent-thread-content">${details}</div>
+    </div>`;
+  }).join('');
+  const empty = rows ? '' : '<div class="harness-run-empty">No harness activity was recorded.</div>';
+  return `<details class="harness-run-panel">
+    <summary>
+      <span class="harness-run-title">${esc(label)} run</span>
+      <span class="harness-run-meta">${esc(meta)}</span>
+      ${sub ? `<span class="harness-run-sub">${esc(sub)}</span>` : ''}
+    </summary>
+    <div class="agent-thread harness-run-thread">${rows}${empty}</div>
+  </details>`;
+}
+
 /**
  * Build a collapsible sources box (used by both research and web search).
  */
@@ -2512,15 +2614,18 @@ export function addMessage(role, content, modelName, metadata) {
     if (role === 'assistant' && metadata?.rag_sources?.length) {
       findingsSuffix += buildRagSourcesBox(metadata.rag_sources);
     }
+    const harnessPrefix = role === 'assistant' && metadata?.harness_run
+      ? buildHarnessRunBox(metadata.harness_run)
+      : '';
     // If thinking is stored in metadata (not in text), reconstruct the full display
     if (role === 'assistant' && metadata?.thinking) {
       const thinkTime = metadata.thinking_time || null;
       const thinkHtml = markdownModule.processWithThinking(
         '<think' + (thinkTime ? ` time="${thinkTime}"` : '') + '>' + metadata.thinking + '</think>\n\n' + text
       );
-      b.innerHTML = sourcesPrefix + thinkHtml + findingsSuffix;
+      b.innerHTML = sourcesPrefix + harnessPrefix + thinkHtml + findingsSuffix;
 	    } else {
-	      b.innerHTML = sourcesPrefix + markdownModule.processWithThinking(text) + findingsSuffix;
+	      b.innerHTML = sourcesPrefix + harnessPrefix + markdownModule.processWithThinking(text) + findingsSuffix;
 	    }
 	    b.dataset.raw = text;
 

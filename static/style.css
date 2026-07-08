@@ -9826,6 +9826,71 @@ body.fullwidth-chat .chat-history {
   border-radius: 8px;
   overflow: hidden;
 }
+
+.harness-run-panel {
+  margin: 0 0 12px 0;
+  border: 1px solid color-mix(in srgb, var(--red) 24%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  overflow: hidden;
+}
+.harness-run-panel > summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 12px;
+  align-items: center;
+  padding: 8px 10px;
+  cursor: pointer;
+  list-style: none;
+}
+.harness-run-panel > summary::-webkit-details-marker {
+  display: none;
+}
+.harness-run-panel > summary::after {
+  content: '▶';
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+  font-size: 0.72em;
+  opacity: 0.55;
+  transition: transform 0.16s ease;
+}
+.harness-run-panel[open] > summary::after {
+  transform: rotate(90deg);
+}
+.harness-run-title {
+  font-size: 0.9em;
+  font-weight: 700;
+  color: var(--red);
+}
+.harness-run-meta {
+  justify-self: end;
+  font-size: 0.78em;
+  color: color-mix(in srgb, var(--fg) 64%, transparent);
+}
+.harness-run-sub {
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.76em;
+  color: color-mix(in srgb, var(--fg) 48%, transparent);
+}
+.harness-run-thread.agent-thread {
+  max-width: none;
+  margin: 0 10px 8px 22px;
+  padding-left: 18px;
+}
+.harness-run-node .agent-thread-tool {
+  text-transform: none;
+  letter-spacing: 0;
+}
+.harness-run-empty {
+  padding: 6px 0 8px;
+  font-size: 0.82em;
+  color: color-mix(in srgb, var(--fg) 56%, transparent);
+}
 .agent-tool-output summary {
   color: var(--red);
   background: color-mix(in srgb, var(--red) 10%, transparent);

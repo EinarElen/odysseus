@@ -1,4 +1,5 @@
 import types
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -21,6 +22,9 @@ from src.harness.sdk import (
     SdkHarnessAdapter,
 )
 from src.provider_options import sanitize_provider_options
+
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_harness_provider_options_are_sanitized_and_preserved():
@@ -137,6 +141,22 @@ def test_pi_adapter_uses_generic_sdk_adapter():
     assert isinstance(adapter, SdkHarnessAdapter)
     assert adapter.bridge_command[-1].endswith("pi_sdk_bridge.mjs")
     assert callable(adapter.command)
+
+
+def test_harness_route_uses_nested_harness_run_metadata():
+    source = (ROOT / "routes" / "chat_routes.py").read_text(encoding="utf-8")
+
+    assert '"harness_run": _harness_run' in source
+    assert '"tool_events": _harness_tool_events' not in source
+    assert '_harness_tool_events' not in source
+
+
+def test_chat_renderer_has_harness_run_panel():
+    source = (ROOT / "static" / "js" / "chatRenderer.js").read_text(encoding="utf-8")
+
+    assert "function buildHarnessRunBox(run)" in source
+    assert "metadata?.harness_run" in source
+    assert "harness-run-panel" in source
 
 
 def test_harness_sdk_tool_definition_from_openai_schema():

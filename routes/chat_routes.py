@@ -45,6 +45,17 @@ from routes.chat_helpers import (
 from src.action_intents import ToolIntent, classify_tool_intent as _classify_tool_intent
 from src.tool_policy import build_effective_tool_policy
 from src.harness import get_harness_adapter, harness_config_from_session, is_harness_session
+from src.harness.transcript import (
+    finish_harness_run,
+    record_harness_control,
+    record_harness_event,
+    record_harness_status,
+    record_harness_tool_end,
+    record_harness_tool_start,
+    record_harness_tool_update,
+    start_harness_run,
+    update_harness_ref,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1423,10 +1434,17 @@ def setup_chat_routes(
                     _active_streams.pop(session, None)
                     return
 
-                _harness_tool_events = []
+                _harness_run = start_harness_run(
+                    harness_id=_adapter.id,
+                    label=_adapter.label,
+                    mode=_harness_config.get("mode", "observe"),
+                    workspace=_harness_workspace,
+                )
                 try:
                     if not _harness_quiet:
-                        yield f'data: {json.dumps({"type": "harness_status", "data": {"phase": "session_starting", "label": f"Starting {_adapter.label}", "status": "running", "detail": _harness_workspace or ""}})}\n\n'
+                        _status_data = {"phase": "session_starting", "label": f"Starting {_adapter.label}", "status": "running", "detail": _harness_workspace or ""}
+                        record_harness_status(_harness_run, _status_data)
+                        yield f'data: {json.dumps({"type": "harness_status", "data": _status_data})}\n\n'
                     _startup_events: asyncio.Queue = asyncio.Queue()
 
                     async def _queue_startup_event(event) -> None:
@@ -1464,6 +1482,7 @@ def setup_chat_routes(
                                 _startup_ready_event = _event
                             if _event.type == "harness_status":
                                 _phase = str(_event.data.get("phase") or "")
+                                record_harness_status(_harness_run, _event.data)
                                 if _harness_debug or (not _harness_quiet and _phase == "session_ready"):
                                     yield f'data: {json.dumps({"type": "harness_status", "data": _event.data})}\n\n'
                                 if _event.data.get("phase") == "session_ready":
@@ -1481,6 +1500,7 @@ def setup_chat_routes(
                                         )
                                     break
                             elif _event.type == "harness_event":
+                                record_harness_event(_harness_run, _event.data.get("event", _event.data))
                                 yield f'data: {json.dumps({"type": "harness_event", "data": _event.data.get("event", _event.data)})}\n\n'
                             elif _event.type == "error":
                                 yield f'event: error\ndata: {json.dumps({"status": 502, "text": _event.data.get("message") or "Harness startup failed"})}\n\n'
@@ -1495,8 +1515,11 @@ def setup_chat_routes(
                         yield "data: [DONE]\n\n"
                         return
                     yield f'data: {json.dumps({"type": "harness_start", "harness": _adapter.id, "mode": _harness_config.get("mode", "observe"), "workspace": _ref.workspace})}\n\n'
+                    update_harness_ref(_harness_run, workspace=_ref.workspace, session_id=_ref.harness_session_id)
                     if _harness_debug or (not _harness_quiet and _startup_ready_event is None):
-                        yield f'data: {json.dumps({"type": "harness_status", "data": {"phase": "session_ready", "label": f"{_adapter.label} ready", "status": "done", "detail": _ref.harness_session_id}})}\n\n'
+                        _status_data = {"phase": "session_ready", "label": f"{_adapter.label} ready", "status": "done", "detail": _ref.harness_session_id}
+                        record_harness_status(_harness_run, _status_data)
+                        yield f'data: {json.dumps({"type": "harness_status", "data": _status_data})}\n\n'
                     _ref_config = dict(getattr(_ref, "config", None) or {})
                     _persistable_ref_keys = ("session_file", "session_dir")
                     _persistable_ref = {
@@ -1548,24 +1571,21 @@ def setup_chat_routes(
                                 thinking_response += delta
                                 yield f'data: {json.dumps({"delta": delta, "thinking": True})}\n\n'
                         elif etype == "tool_start":
+                            record_harness_tool_start(_harness_run, data)
                             _event = {
                                 "type": "tool_start",
                                 "tool": data.get("name") or "harness_tool",
                                 "command": json.dumps(data.get("input"), ensure_ascii=False)[:1000],
                                 "harness_tool_id": data.get("id"),
                             }
-                            _harness_tool_events.append({
-                                "phase": "start",
-                                "tool": _event["tool"],
-                                "command": _event["command"],
-                                "harness_tool_id": data.get("id"),
-                            })
                             yield f"data: {json.dumps(_event)}\n\n"
                         elif etype == "tool_update":
+                            record_harness_tool_update(_harness_run, data)
                             _partial = data.get("partial")
                             _tail = _partial if isinstance(_partial, str) else json.dumps(_partial, ensure_ascii=False, default=str)
                             yield f'data: {json.dumps({"type": "tool_progress", "tool": data.get("name") or "harness_tool", "data": _partial, "tail": _tail[-4000:], "harness_tool_id": data.get("id")})}\n\n'
                         elif etype == "tool_end":
+                            record_harness_tool_end(_harness_run, data)
                             _result = data.get("result")
                             _output = _result if isinstance(_result, str) else json.dumps(_result, ensure_ascii=False, default=str)
                             _event = {
@@ -1578,36 +1598,21 @@ def setup_chat_routes(
                             }
                             if data.get("diff"):
                                 _event["diff"] = data["diff"]
-                            _harness_tool_events.append({
-                                "phase": "end",
-                                "tool": _event["tool"],
-                                "output": _event["output"],
-                                "exit_code": _event["exit_code"],
-                                "harness_tool_id": data.get("id"),
-                                **({"diff": data["diff"]} if data.get("diff") else {}),
-                            })
                             yield f"data: {json.dumps(_event)}\n\n"
                         elif etype == "harness_ui_request":
+                            record_harness_event(_harness_run, data)
                             yield f'data: {json.dumps({"type": "harness_ui_request", "data": data})}\n\n'
                         elif etype == "harness_status":
+                            record_harness_status(_harness_run, data)
                             yield f'data: {json.dumps({"type": "harness_status", "data": data})}\n\n'
                         elif etype == "control_request":
-                            _harness_tool_events.append({
-                                "phase": "control_request",
-                                "kind": data.get("kind") or "control",
-                                "blocking": bool(data.get("blocking")),
-                                "harness_request_id": data.get("id"),
-                            })
+                            record_harness_control(_harness_run, data)
                             yield f'data: {json.dumps({"type": "harness_control_request", "data": data})}\n\n'
                         elif etype == "control_result":
-                            _harness_tool_events.append({
-                                "phase": "control_result",
-                                "kind": data.get("kind") or "control",
-                                "status": data.get("status"),
-                                "harness_request_id": data.get("id"),
-                            })
+                            record_harness_control(_harness_run, data, result=True)
                             yield f'data: {json.dumps({"type": "harness_control_result", "data": data})}\n\n'
                         elif etype == "harness_event":
+                            record_harness_event(_harness_run, data.get("event", data))
                             yield f'data: {json.dumps({"type": "harness_event", "data": data.get("event", data)})}\n\n'
                         elif etype == "error":
                             yield f'event: error\ndata: {json.dumps({"status": 502, "text": data.get("message") or "Harness request failed"})}\n\n'
@@ -1617,6 +1622,7 @@ def setup_chat_routes(
                             break
 
                     _elapsed = time.time() - _harness_start
+                    finish_harness_run(_harness_run, status="completed", duration_seconds=_elapsed)
                     last_metrics = {
                         "response_time": round(_elapsed, 2),
                         "input_tokens": estimate_tokens(messages),
@@ -1624,13 +1630,13 @@ def setup_chat_routes(
                         "tokens_per_second": round((len(full_response) // 4) / _elapsed, 2) if _elapsed > 0 else 0,
                         "model": sess.model,
                         "harness": _adapter.id,
-                        "tool_events": _harness_tool_events,
+                        "harness_run": _harness_run,
                         "usage_source": "estimated",
                     }
                     if thinking_response.strip():
                         last_metrics["thinking"] = thinking_response.strip()
                     yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
-                    if full_response or _harness_tool_events:
+                    if full_response or _harness_run.get("events"):
                         _response_to_save = full_response or "Done."
                         _saved_id = save_assistant_response(
                             sess, session_manager, session, _response_to_save, last_metrics,
@@ -1653,11 +1659,12 @@ def setup_chat_routes(
                     _stream_set(session, status="done")
                     yield "data: [DONE]\n\n"
                 except (asyncio.CancelledError, GeneratorExit):
+                    finish_harness_run(_harness_run, status="stopped", duration_seconds=time.time() - _harness_start)
                     if full_response:
                         sess.add_message(ChatMessage(
                             "assistant",
                             full_response,
-                            metadata={"stopped": True, "model": sess.model, "harness": _harness_id},
+                            metadata={"stopped": True, "model": sess.model, "harness": _harness_id, "harness_run": _harness_run},
                         ))
                         if not incognito:
                             session_manager.save_sessions()
