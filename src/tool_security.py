@@ -128,7 +128,7 @@ PLAN_MODE_READONLY_TOOLS = {
 # (PLAN_MODE_READONLY_TOOLS). To apply an allowlist through a denylist, plan mode
 # returns the inverse: every known tool name minus the allowlist.
 #
-# Known tool names come from the canonical tool registry. Some legacy/XML-only
+# Known tool names come from the canonical tool registry. Some text/XML-only
 # mutators still have no native schema, and the dynamic import can fail during
 # early startup. This set is the static fail-closed backstop for both gaps.
 _PLAN_MODE_KNOWN_MUTATORS = {

@@ -38,9 +38,24 @@ from src.agent_tools import (
     ToolBlock,
     MAX_AGENT_ROUNDS,
 )
-from src.tools.registry import native_call_to_tool_block
+from src.tools.model import ToolInvocation
+from src.tools.registry import display_action_for_invocation, native_call_to_invocation
 
 logger = logging.getLogger(__name__)
+_DEFAULT_EXECUTE_TOOL_BLOCK = execute_tool_block
+
+
+class ToolResolution:
+    def __init__(self, tool_blocks, used_native, converted_calls, tool_invocations):
+        self.tool_blocks = tool_blocks
+        self.used_native = used_native
+        self.converted_calls = converted_calls
+        self.tool_invocations = tool_invocations
+
+    def __iter__(self):
+        yield self.tool_blocks
+        yield self.used_native
+        yield self.converted_calls
 
 
 def _function_tool_schemas() -> List[Dict]:
@@ -702,7 +717,7 @@ def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool 
     return "\n\n".join(parts)
 
 
-# Legacy: full prompt with all tools (fallback when RAG unavailable)
+# Full prompt with all tools (fallback when RAG unavailable)
 AGENT_SYSTEM_PROMPT = _assemble_prompt(set(TOOL_SECTIONS.keys()))
 
 
@@ -1555,7 +1570,7 @@ def _recent_context_for_retrieval(messages: List[Dict], max_user: int = 3, max_c
         content = (content or "").strip()
         # Skip injected envelopes — role=user but not human intent. Tool results
         # are now wrapped via untrusted_context_message (metadata.trusted=False);
-        # keep the legacy "[Tool execution results]" prefix for older histories.
+        # keep the previous "[Tool execution results]" prefix for older histories.
         meta = msg.get("metadata") or {}
         if not content or meta.get("trusted") is False or content.startswith("[Tool execution results]"):
             continue
@@ -2223,21 +2238,24 @@ def _resolve_tool_blocks(
     is_api_model: bool = False,
     allow_fenced_for_api: bool = False,
 ):
-    """Choose native function calls or fenced code block parsing. Returns (tool_blocks, used_native)."""
+    """Choose native function calls or fenced code block parsing."""
     used_native = False
     converted_calls = []  # native calls that converted, ALIGNED with tool_blocks
+    tool_invocations: list[ToolInvocation] = []
     if native_tool_calls:
         tool_blocks = []
         for tc in native_tool_calls:
             tc_name = tc.get("name", "")
-            tc_args = tc.get("arguments", "{}")
-            block = native_call_to_tool_block(tc, source="openai")
+            invocation = native_call_to_invocation(tc, source="openai")
+            block = display_action_for_invocation(invocation)
             if block:
                 tool_blocks.append(block)
                 converted_calls.append(tc)
+                tool_invocations.append(invocation)
                 logger.info(f"  -> converted: {tc_name} -> {block.tool_type}")
             else:
-                logger.warning(f"  -> FAILED to convert native call: {tc_name} args={tc_args[:200]}")
+                tc_args = str(tc.get("arguments", "{}"))
+                logger.warning(f"  -> FAILED to normalize native call: {tc_name} args={tc_args[:200]}")
         if tool_blocks:
             used_native = True
     if not used_native:
@@ -2258,13 +2276,17 @@ def _resolve_tool_blocks(
         tool_blocks = parse_tool_blocks(round_response, skip_fenced=(is_api_model and not allow_fenced_for_api))
         if tool_blocks:
             logger.info(f"Agent round {round_num}: {len(tool_blocks)} fenced tool block(s) detected")
+        tool_invocations = [
+            ToolInvocation(name=block.tool_type, arguments=block.content, source="text", raw=block)
+            for block in tool_blocks
+        ]
 
     resp_preview = round_response[:200].replace('\n', '\\n') if round_response else "(empty)"
     logger.info(f"Agent round {round_num} summary: {len(round_response)} chars, "
                 f"{len(native_tool_calls)} native calls, "
                 f"{len(tool_blocks)} tool blocks. Preview: {resp_preview}")
 
-    return tool_blocks, used_native, converted_calls
+    return ToolResolution(tool_blocks, used_native, converted_calls, tool_invocations)
 
 
 def _append_tool_results(
@@ -3654,13 +3676,15 @@ async def stream_agent_loop(
             if _ody_doc_finetune_mode
             else round_response
         )
-        tool_blocks, used_native, converted_calls = _resolve_tool_blocks(
+        _resolution = _resolve_tool_blocks(
             _normalized_doc_round,
             native_tool_calls,
             round_num,
             is_api_model=(_is_api_model and not guide_only),
             allow_fenced_for_api=_ody_doc_finetune_mode,
         )
+        tool_blocks, used_native, converted_calls = _resolution
+        tool_invocations = _resolution.tool_invocations
         if _ody_doc_stream_create_mode and tool_blocks:
             create_idx = next(
                 (idx for idx, block in enumerate(tool_blocks) if block.tool_type == "create_document"),
@@ -3673,6 +3697,7 @@ async def stream_agent_loop(
                 )
                 tool_blocks = []
                 converted_calls = []
+                tool_invocations = []
             else:
                 if len(tool_blocks) > 1 or create_idx != 0:
                     logger.info(
@@ -3680,6 +3705,11 @@ async def stream_agent_loop(
                         [block.tool_type for block in tool_blocks],
                     )
                 tool_blocks = [tool_blocks[create_idx]]
+                tool_invocations = (
+                    [tool_invocations[create_idx]]
+                    if create_idx < len(tool_invocations)
+                    else tool_invocations[:1]
+                )
                 converted_calls = (
                     [converted_calls[create_idx]]
                     if create_idx < len(converted_calls)
@@ -3694,10 +3724,13 @@ async def stream_agent_loop(
             ))
             _filtered_tool_blocks = []
             _filtered_converted_calls = []
+            _filtered_invocations = []
             _dropped_memory_lookup = False
             for _idx, _block in enumerate(tool_blocks):
                 if _block.tool_type != "manage_memory":
                     _filtered_tool_blocks.append(_block)
+                    if _idx < len(tool_invocations):
+                        _filtered_invocations.append(tool_invocations[_idx])
                     if _idx < len(converted_calls):
                         _filtered_converted_calls.append(converted_calls[_idx])
                     continue
@@ -3715,6 +3748,8 @@ async def stream_agent_loop(
                     _last_user.lower(),
                 ):
                     _filtered_tool_blocks.append(_block)
+                    if _idx < len(tool_invocations):
+                        _filtered_invocations.append(tool_invocations[_idx])
                     if _idx < len(converted_calls):
                         _filtered_converted_calls.append(converted_calls[_idx])
                 else:
@@ -3724,6 +3759,7 @@ async def stream_agent_loop(
                     "[agent-intent] odysseus qwen dropped manage_memory lookup; answering from compact memory"
                 )
                 tool_blocks = _filtered_tool_blocks
+                tool_invocations = _filtered_invocations
                 converted_calls = _filtered_converted_calls
                 if used_native:
                     native_tool_calls = _filtered_converted_calls
@@ -3809,6 +3845,12 @@ async def stream_agent_loop(
                 doc_title = f"Code ({doc_lang})"
                 tb = ToolBlock("create_document", f"{doc_title}\n{doc_lang}\n{code_body}")
                 tool_blocks.append(tb)
+                tool_invocations.append(ToolInvocation(
+                    name="create_document",
+                    arguments=tb.content,
+                    source="text",
+                    raw=tb,
+                ))
                 # Stream the document open event
                 yield f'data: {json.dumps({"type": "doc_stream_open", "title": doc_title, "language": doc_lang})}\n\n'
                 yield f'data: {json.dumps({"type": "doc_stream_delta", "content": code_body})}\n\n'
@@ -4022,6 +4064,11 @@ async def stream_agent_loop(
         tool_result_texts = []  # plain text for native tool role messages
         budget_hit = False
         for i, block in enumerate(tool_blocks):
+            invocation = (
+                tool_invocations[i]
+                if i < len(tool_invocations)
+                else ToolInvocation(name=block.tool_type, arguments=block.content, source="text", raw=block)
+            )
             # --- Tool budget check ---
             if max_tool_calls > 0 and total_tool_calls >= max_tool_calls:
                 yield f'data: {json.dumps({"type": "budget_exceeded", "limit": max_tool_calls, "used": total_tool_calls})}\n\n'
@@ -4062,8 +4109,19 @@ async def stream_agent_loop(
 
                 async def _run_tool():
                     try:
-                        return await execute_tool_block(
-                            block,
+                        if execute_tool_block is not _DEFAULT_EXECUTE_TOOL_BLOCK:
+                            return await execute_tool_block(
+                                block,
+                                session_id=session_id,
+                                disabled_tools=disabled_tools,
+                                tool_policy=tool_policy,
+                                owner=owner,
+                                progress_cb=_push_progress,
+                                workspace=workspace,
+                            )
+                        from src.tool_execution import execute_tool_invocation
+                        return await execute_tool_invocation(
+                            invocation,
                             session_id=session_id,
                             disabled_tools=disabled_tools,
                             tool_policy=tool_policy,

@@ -4,8 +4,8 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, Literal, Optional
 
 
-ToolSource = Literal["openai", "subscription", "pi", "harness", "mcp", "legacy"]
-ToolExposure = Literal["direct", "deferred", "hidden", "legacy_only"]
+ToolSource = Literal["openai", "subscription", "pi", "harness", "mcp", "text"]
+ToolExposure = Literal["direct", "deferred", "hidden", "internal"]
 ToolExecutionMode = Literal["parallel", "sequential", "exclusive"]
 
 
@@ -16,13 +16,13 @@ class ToolInvocation:
     name: str
     arguments: Any = field(default_factory=dict)
     call_id: Optional[str] = None
-    source: ToolSource = "legacy"
+    source: ToolSource = "openai"
     raw: Any = None
 
 
 @dataclass(frozen=True)
 class ToolContext:
-    """Execution context shared by provider, harness, and legacy callers."""
+    """Execution context shared by provider, harness, and text adapters."""
 
     session_id: Optional[str] = None
     owner: Optional[str] = None
@@ -34,7 +34,7 @@ class ToolContext:
 
 @dataclass(frozen=True)
 class ToolExecutionRecord:
-    """Normalized result plus the legacy display description."""
+    """Normalized result plus a display description."""
 
     invocation: ToolInvocation
     description: str

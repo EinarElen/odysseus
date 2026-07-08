@@ -328,7 +328,7 @@ def _owner_is_admin(owner: Optional[str]) -> bool:
 # MCP-backed tool helpers
 # ---------------------------------------------------------------------------
 
-# Map legacy tool names -> (MCP server_id, MCP tool_name)
+# Map text tool names -> (MCP server_id, MCP tool_name)
 _MCP_TOOL_MAP = {
     "bash":           ("bash",       "bash"),
     "python":         ("python",     "python"),
@@ -405,7 +405,7 @@ _MCP_ARG_PARSERS: Dict[str, Callable[[str], Dict[str, str]]] = {
 }
 
 
-# Primary argument key(s) for the legacy line-parsed tools. When a fenced
+# Primary argument key(s) for the line-parsed text tools. When a fenced
 # block's content is a JSON object carrying one of these keys, it's structured
 # inline args (the relaxed parser's ```web_search {"query": "..."}``` shape) —
 # use the object directly instead of letting the line-based parsers wrap the
@@ -450,7 +450,7 @@ async def _call_mcp_tool(
     content: str,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
 ) -> Dict:
-    """Route a legacy tool call through the MCP manager, with direct fallbacks."""
+    """Route a text tool call through the MCP manager, with direct fallbacks."""
     mcp = get_mcp_manager()
     if not mcp:
         return await _direct_fallback(tool, content, progress_cb=progress_cb) or {"error": f"MCP manager not available for tool '{tool}'", "exit_code": 1}
@@ -578,8 +578,7 @@ async def execute_tool_block(
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
-    Legacy entry point. It now routes through the canonical typed tool runtime;
-    fenced/tool-block text is just one adapter into ToolInvocation.
+    Text/fenced tool adapter into the canonical typed tool runtime.
     """
     from src.tools.model import ToolInvocation
 
@@ -587,7 +586,7 @@ async def execute_tool_block(
         ToolInvocation(
             name=getattr(block, "tool_type", ""),
             arguments=getattr(block, "content", ""),
-            source="legacy",
+            source="text",
             raw=block,
         ),
         session_id=session_id,
@@ -630,15 +629,16 @@ async def execute_tool_invocation(
         _active_workspace.reset(token)
 
 
-async def _execute_legacy_tool_block_impl(
-    block: Any,
+async def _execute_text_tool_call_impl(
+    tool: str,
+    content: str,
     session_id: Optional[str] = None,
     disabled_tools: Optional[set] = None,
     owner: Optional[str] = None,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     tool_policy: Optional[Any] = None,
 ) -> Tuple[str, Dict]:
-    """Execute a single tool block. Returns (description, result_dict).
+    """Execute a normalized text tool call. Returns (description, result_dict).
 
     `progress_cb` is forwarded to long-running subprocess tools
     (bash, python) so the agent loop can emit `tool_progress` SSE
@@ -674,9 +674,6 @@ async def _execute_legacy_tool_block_impl(
         dynamic_handlers = getattr(agent_tools_mod, "TOOL_HANDLERS", {})
     except ImportError:
         dynamic_handlers = {}
-
-    tool = block.tool_type
-    content = block.content
 
     # The block/disable gates below must match every policy-equivalent
     # spelling of the tool name (bare email names alias their mcp__email__
@@ -804,7 +801,7 @@ async def _execute_legacy_tool_block_impl(
     elif tool in ("chat_with_model", "ask_teacher", "list_models"):
         # Migrated to the agent_tools registry (#3629): dispatched through
         # TOOL_HANDLERS with the owner/session ctx these tools need, instead
-        # of the legacy dispatch_ai_tool elif. The impls live in
+        # of the older dispatch_ai_tool branch. The impls live in
         # src/agent_tools/model_interaction_tools.py.
         first_line = content.split(chr(10))[0].strip()[:60]
         desc = f"{tool}: {first_line}" if first_line else tool
