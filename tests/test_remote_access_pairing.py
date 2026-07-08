@@ -1,6 +1,7 @@
 import json
 from datetime import timedelta
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import MagicMock
 
 import pytest
@@ -50,6 +51,16 @@ def test_pairing_url_keeps_secret_in_fragment():
 
     assert url == "https://odyssey.example/api/remote-access/pair#token=odpair_secret%2Fvalue"
     assert "token=" not in url.split("#", 1)[0]
+
+
+def test_pair_page_exchanges_fragment_token():
+    response = _route("GET", "/api/remote-access/pair")(_req())
+    body = response.body.decode()
+
+    assert response.media_type == "text/html"
+    assert "location.hash" in body
+    assert "/api/remote-access/pair/exchange" in body
+    assert "history.replaceState" in body
 
 
 def test_metadata_json_keeps_scalar_values_only():
@@ -151,9 +162,11 @@ async def test_create_invite_returns_pairing_url_and_stores_hash(monkeypatch):
     assert invite["capabilities"] == ["chat", "models"]
     assert invite["pairing_url"].startswith("https://tail.example/api/remote-access/pair#token=odpair_")
     assert "token=" not in invite["pairing_url"].split("#", 1)[0]
-    assert invite["token"].startswith("odpair_")
-    assert added[0].token_hash != invite["token"]
-    assert added[0].token_prefix == invite["token"][:16]
+    token = parse_qs(urlparse(invite["pairing_url"]).fragment)["token"][0]
+    assert "token" not in invite
+    assert token.startswith("odpair_")
+    assert added[0].token_hash != token
+    assert added[0].token_prefix == added[0].token_hash[:16]
 
 
 @pytest.mark.asyncio

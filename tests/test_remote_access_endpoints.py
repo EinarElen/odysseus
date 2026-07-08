@@ -70,6 +70,16 @@ def test_advertised_endpoints_include_tailscale_candidates(monkeypatch):
     assert by_kind["tailscale_magicdns_https"].requires_serve is True
 
 
+def test_choose_pairing_base_url_avoids_unready_remote_candidates(monkeypatch):
+    monkeypatch.setattr(endpoints, "advertised_endpoints", lambda request: [
+        endpoints.AdvertisedEndpoint("tailscale_magicdns_https", "MagicDNS", "https://host.ts.net", reachable="requires-serve", requires_serve=True),
+        endpoints.AdvertisedEndpoint("lan_http", "LAN", "http://192.168.1.20:7000", reachable="depends-on-bind-host"),
+        endpoints.AdvertisedEndpoint("current", "Current", "http://127.0.0.1:7000", reachable="current-session"),
+    ])
+
+    assert endpoints.choose_pairing_base_url(SimpleNamespace()) == "http://127.0.0.1:7000"
+
+
 def test_enable_tailscale_serve_targets_loopback(monkeypatch):
     calls = []
 

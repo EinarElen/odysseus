@@ -8,6 +8,12 @@ import socket
 import subprocess
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
+
+from src.constants import internal_api_base
+
+TAILSCALE_SERVE_LOCAL_HOST = "127.0.0.1"
+DEFAULT_TAILSCALE_HTTPS_PORT = 443
 
 
 @dataclass
@@ -34,16 +40,17 @@ class AdvertisedEndpoint:
 
 def _default_port() -> int:
     try:
-        return int(os.getenv("APP_PORT", "7000"))
-    except ValueError:
-        return 7000
+        parsed = urlparse(internal_api_base())
+        return int(parsed.port or 80)
+    except (TypeError, ValueError):
+        return 80
 
 
 def request_base_url(request) -> str:
     try:
         return str(request.base_url).rstrip("/")
     except Exception:
-        return f"http://127.0.0.1:{_default_port()}"
+        return internal_api_base()
 
 
 def _lan_ip_candidates() -> list[str]:
@@ -181,12 +188,17 @@ def choose_pairing_base_url(request=None, explicit_url: str | None = None) -> st
     endpoints = advertised_endpoints(request)
     for kind in ("tailscale_magicdns_https", "tailscale_ip_http", "lan_http", "current"):
         for endpoint in endpoints:
-            if endpoint.kind == kind:
+            if endpoint.kind == kind and endpoint.reachable not in {"requires-serve", "depends-on-bind-host"}:
                 return endpoint.url.rstrip("/")
     return request_base_url(request)
 
 
-def enable_tailscale_serve(local_port: int, *, https_port: int = 443, local_host: str = "127.0.0.1") -> dict[str, Any]:
+def enable_tailscale_serve(
+    local_port: int,
+    *,
+    https_port: int = DEFAULT_TAILSCALE_HTTPS_PORT,
+    local_host: str = TAILSCALE_SERVE_LOCAL_HOST,
+) -> dict[str, Any]:
     target = f"http://{local_host}:{int(local_port)}"
     try:
         result = _run_tailscale(["serve", "--bg", f"--https={int(https_port)}", target], timeout=10)
@@ -199,7 +211,7 @@ def enable_tailscale_serve(local_port: int, *, https_port: int = 443, local_host
     return {"ok": True, "https_port": int(https_port), "target": target}
 
 
-def disable_tailscale_serve(*, https_port: int = 443) -> dict[str, Any]:
+def disable_tailscale_serve(*, https_port: int = DEFAULT_TAILSCALE_HTTPS_PORT) -> dict[str, Any]:
     try:
         result = _run_tailscale(["serve", f"--https={int(https_port)}", "off"], timeout=10)
     except FileNotFoundError:

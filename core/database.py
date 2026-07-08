@@ -501,7 +501,7 @@ class RemotePairingInvite(TimestampMixin, Base):
     label = Column(String, nullable=False, default="Remote client")
     client_type = Column(String, nullable=False, default="browser")
     token_hash = Column(String, nullable=False)
-    token_prefix = Column(String, nullable=False, index=True)
+    token_prefix = Column(String, nullable=True, index=True)  # bcrypt-hash prefix for legacy DB compatibility; never raw-token material
     capabilities = Column(Text, nullable=False, default="chat")
     endpoint_url = Column(Text, nullable=True)
     expires_at = Column(DateTime, nullable=False, index=True)

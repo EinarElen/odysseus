@@ -2922,6 +2922,7 @@ async function loadRemoteAccess() {
   const endpointsEl = el('adm-remoteEndpointList');
   const clientsEl = el('adm-remoteClientsList');
   const invitesEl = el('adm-remoteInvitesList');
+  const endpointSelect = el('adm-remoteEndpointSelect');
   if (!statusEl || !endpointsEl || !clientsEl || !invitesEl) return;
 
   try {
@@ -2946,6 +2947,14 @@ async function loadRemoteAccess() {
     endpointsEl.innerHTML = endpoints.length
       ? endpoints.map(_remoteEndpointHtml).join('')
       : '<div class="admin-empty">No endpoints detected</div>';
+    if (endpointSelect) {
+      const selected = endpointSelect.value;
+      endpointSelect.innerHTML = endpoints.map(endpoint => {
+        const suffix = endpoint.requires_serve ? ' (Serve)' : '';
+        return `<option value="${esc(endpoint.url || '')}">${esc(endpoint.label || endpoint.kind)}${suffix}</option>`;
+      }).join('');
+      if (selected && Array.from(endpointSelect.options).some(o => o.value === selected)) endpointSelect.value = selected;
+    }
     endpointsEl.querySelectorAll('[data-remote-copy]').forEach(btn => {
       btn.addEventListener('click', () => _remoteCopy(btn.dataset.remoteCopy, el('adm-tsServeMsg')));
     });
@@ -3063,6 +3072,7 @@ function initRemoteAccess() {
           label: el('adm-remoteInviteLabel').value.trim(),
           client_type: el('adm-remoteClientType').value,
           ttl_minutes: el('adm-remoteTtl').value,
+          endpoint_url: el('adm-remoteEndpointSelect')?.value || '',
           capabilities,
         }),
       });
@@ -3071,7 +3081,6 @@ function initRemoteAccess() {
       const invite = data.invite || {};
       el('adm-remoteInviteUrl').textContent = invite.pairing_url || '';
       el('adm-remoteCopyUrl').dataset.copyValue = invite.pairing_url || '';
-      el('adm-remoteCopyToken').dataset.copyValue = invite.token || '';
       const safeQr = _remoteSafeQr(data.qr);
       qr.style.display = safeQr ? '' : 'none';
       if (safeQr) qr.src = safeQr;
@@ -3084,7 +3093,7 @@ function initRemoteAccess() {
       msg.className = 'admin-error';
     }
   });
-  [el('adm-remoteCopyUrl'), el('adm-remoteCopyToken')].forEach(btn => {
+  [el('adm-remoteCopyUrl')].forEach(btn => {
     btn.addEventListener('click', () => _remoteCopy(btn.dataset.copyValue || '', el('adm-remoteInviteMsg')));
   });
 }

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import secrets
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import HTMLResponse
 
 from core.middleware import require_admin
 from remote_access import endpoints
@@ -51,8 +51,10 @@ def _client_payload(body: dict[str, Any], request: Request) -> dict[str, Any]:
 def _find_invite_for_secret(db, raw_secret: str):
     from core.database import RemotePairingInvite
 
-    prefix = pairing.token_prefix(raw_secret)
-    candidates = db.query(RemotePairingInvite).filter(RemotePairingInvite.token_prefix == prefix).all()
+    candidates = db.query(RemotePairingInvite).filter(
+        RemotePairingInvite.consumed_at == None,  # noqa: E711
+        RemotePairingInvite.revoked_at == None,  # noqa: E711
+    ).order_by(RemotePairingInvite.created_at.desc()).limit(100).all()
     for invite in candidates:
         if pairing.verify_secret(raw_secret, invite.token_hash):
             return invite
@@ -83,6 +85,53 @@ def setup_remote_access_routes() -> APIRouter:
     def authenticated_environment(request: Request):
         return _remote_environment(request)
 
+    @api.get("/pair")
+    def pair_page(request: Request):
+        nonce = getattr(request.state, "csp_nonce", "")
+        page = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pair Odysseus Client</title>
+<style>
+body{{font-family:system-ui,-apple-system,sans-serif;background:#16161a;color:#e8e8e8;max-width:560px;margin:48px auto;padding:0 20px}}
+.card{{background:#1f1f25;border:1px solid #2c2c35;border-radius:8px;padding:24px}}
+input,select,button{{font:inherit;border-radius:6px;border:1px solid #3a3a44;background:#101015;color:#e8e8e8;padding:9px}}
+button{{background:#7c9cff;color:#0e0e12;border:0;font-weight:650;cursor:pointer}}
+code{{word-break:break-all;background:#101015;border-radius:6px;padding:2px 5px}}
+.row{{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}}.muted{{color:#aaa;font-size:13px}}.err{{color:#ff7b7b}}
+</style></head>
+<body><div class="card">
+<h1>Pair Odysseus Client</h1>
+<p class="muted">The invite token stays in this page's URL fragment until you exchange it.</p>
+<div class="row"><input id="label" placeholder="Client label" autocomplete="off"><select id="clientType"><option value="browser">Browser</option><option value="desktop">Desktop</option><option value="cli">CLI</option><option value="agent">Agent</option><option value="support">Support</option><option value="automation">Automation</option><option value="display">Display</option><option value="mobile">Mobile</option></select><button id="pairBtn">Pair</button></div>
+<div id="msg" class="muted"></div>
+<div id="result" style="display:none;margin-top:14px"><div class="muted">Bearer token</div><code id="token"></code></div>
+</div>
+<script nonce="{nonce}">
+(function(){{
+  var token = new URLSearchParams((location.hash || '').replace(/^#/, '')).get('token') || '';
+  var msg = document.getElementById('msg');
+  var btn = document.getElementById('pairBtn');
+  if (!token) {{ msg.textContent = 'No pairing token found in the URL fragment.'; msg.className = 'err'; btn.disabled = true; }}
+  btn.addEventListener('click', async function(){{
+    msg.textContent = 'Pairing...'; msg.className = 'muted';
+    try {{
+      var res = await fetch('/api/remote-access/pair/exchange', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{token: token, label: document.getElementById('label').value, client_type: document.getElementById('clientType').value, platform: navigator.platform || ''}})
+      }});
+      var data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Pairing failed');
+      document.getElementById('token').textContent = data.credential.token;
+      document.getElementById('result').style.display = '';
+      history.replaceState(null, '', location.pathname);
+      msg.textContent = 'Paired. Store this bearer token now; it is shown once.';
+    }} catch (err) {{ msg.textContent = err.message || 'Pairing failed'; msg.className = 'err'; }}
+  }});
+}})();
+</script></body></html>"""
+        return HTMLResponse(page)
+
     @api.get("/status")
     def status(request: Request):
         require_admin(request)
@@ -96,9 +145,9 @@ def setup_remote_access_routes() -> APIRouter:
         require_admin(request)
         body = await _json_body(request)
         local_port = body.get("local_port") or getattr(request.url, "port", None) or 7000
-        https_port = body.get("https_port") or 443
-        local_host = str(body.get("local_host") or "127.0.0.1").strip()
-        if local_host not in {"127.0.0.1", "localhost"}:
+        https_port = body.get("https_port") or endpoints.DEFAULT_TAILSCALE_HTTPS_PORT
+        local_host = str(body.get("local_host") or endpoints.TAILSCALE_SERVE_LOCAL_HOST).strip()
+        if local_host not in {endpoints.TAILSCALE_SERVE_LOCAL_HOST, "localhost"}:
             raise _json_error(400, "Tailscale Serve target must be loopback")
         result = endpoints.enable_tailscale_serve(
             int(local_port),
@@ -113,7 +162,9 @@ def setup_remote_access_routes() -> APIRouter:
     async def stop_tailscale_serve(request: Request):
         require_admin(request)
         body = await _json_body(request)
-        result = endpoints.disable_tailscale_serve(https_port=int(body.get("https_port") or 443))
+        result = endpoints.disable_tailscale_serve(
+            https_port=int(body.get("https_port") or endpoints.DEFAULT_TAILSCALE_HTTPS_PORT)
+        )
         if not result.get("ok"):
             raise _json_error(400, result.get("error") or "Could not disable Tailscale Serve")
         return result
@@ -144,19 +195,20 @@ def setup_remote_access_routes() -> APIRouter:
 
         from core.database import RemotePairingInvite, get_db_session
 
+        secret_hash = pairing.hash_secret(raw_secret)
         invite = RemotePairingInvite(
             id=pairing.new_short_id(),
             owner=current_user,
             created_by=current_user,
             label=label,
             client_type=client_type,
-            token_hash=pairing.hash_secret(raw_secret),
-            token_prefix=pairing.token_prefix(raw_secret),
+            token_hash=secret_hash,
+            token_prefix=pairing.hash_lookup(secret_hash),
             capabilities=capabilities,
             endpoint_url=endpoint_url,
             expires_at=pairing.expiry_from_ttl(body.get("ttl_minutes")),
         )
-        invite_payload = pairing.serialize_invite(invite, include_secret=raw_secret, pairing_url=pairing_url)
+        invite_payload = pairing.serialize_invite(invite, pairing_url=pairing_url)
         with get_db_session() as db:
             db.add(invite)
 
@@ -189,7 +241,7 @@ def setup_remote_access_routes() -> APIRouter:
         if not raw_secret.startswith(pairing.INVITE_SECRET_PREFIX):
             raise _json_error(401, "Invalid pairing token")
 
-        from core.database import ApiToken, RemoteKnownClient, get_db_session
+        from core.database import RemoteKnownClient, get_db_session
 
         with get_db_session() as db:
             invite = _find_invite_for_secret(db, raw_secret)
@@ -200,19 +252,16 @@ def setup_remote_access_routes() -> APIRouter:
 
             client_payload = _client_payload(body, request)
             capabilities = pairing.capabilities_from_storage(invite.capabilities)
-            raw_bearer = "ody_" + secrets.token_urlsafe(32)
-            token_id = pairing.new_short_id()
+            token_id, raw_bearer = pairing.new_bearer_token_values()
             client_id = pairing.new_short_id()
             now = pairing.now_utc()
 
-            db.add(ApiToken(
-                id=token_id,
+            db.add(pairing.build_bearer_token_row(
+                token_id=token_id,
+                raw_token=raw_bearer,
                 owner=invite.owner,
-                name=f"remote:{client_payload['label']}"[:100],
-                token_hash=pairing.hash_secret(raw_bearer),
-                token_prefix=raw_bearer[:8],
-                scopes=pairing.capabilities_to_storage(capabilities),
-                is_active=True,
+                name=f"remote:{client_payload['label']}",
+                capabilities=capabilities,
             ))
             client = RemoteKnownClient(
                 id=client_id,

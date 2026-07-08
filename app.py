@@ -263,6 +263,7 @@ if AUTH_ENABLED:
         "/api/auth/features",
         "/api/auth/settings",
         "/api/auth/integrations/presets",
+        "/api/remote-access/pair",
         "/api/remote-access/pair/exchange",
         "/.well-known/odysseus/environment",
         "/api/health",
@@ -438,6 +439,14 @@ if AUTH_ENABLED:
                                     _db.query(ApiToken).filter(ApiToken.id == tid).update(
                                         {"last_used_at": datetime.utcnow()}
                                     )
+                                    try:
+                                        from core.database import RemoteKnownClient
+                                        _db.query(RemoteKnownClient).filter(
+                                            RemoteKnownClient.api_token_id == tid,
+                                            RemoteKnownClient.is_active == True,  # noqa: E712
+                                        ).update({"last_seen_at": datetime.utcnow()})
+                                    except Exception:
+                                        pass
                                     _db.commit()
                                 finally:
                                     _db.close()

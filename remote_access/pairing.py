@@ -106,6 +106,10 @@ def token_prefix(raw_secret: str) -> str:
     return raw_secret[:16]
 
 
+def hash_lookup(stored_hash: str) -> str:
+    return (stored_hash or "")[:16]
+
+
 def new_short_id() -> str:
     return str(uuid.uuid4())[:8]
 
@@ -132,24 +136,37 @@ def metadata_from_json(value: str | None) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def new_bearer_token_values() -> tuple[str, str]:
+    raw_token = "ody_" + secrets.token_urlsafe(32)
+    return new_short_id(), raw_token
+
+
+def build_bearer_token_row(*, token_id: str, raw_token: str, owner: str | None, name: str, capabilities: Any):
+    from core.database import ApiToken
+
+    return ApiToken(
+        id=token_id,
+        owner=owner,
+        name=name[:100] or "remote client",
+        token_hash=hash_secret(raw_token),
+        token_prefix=raw_token[:8],
+        scopes=capabilities_to_storage(capabilities),
+        is_active=True,
+    )
+
+
 def create_bearer_token(owner: str | None, name: str, capabilities: Any) -> tuple[str, str]:
     """Create the durable bearer credential for a registered remote client."""
-    from core.database import ApiToken, get_db_session
+    from core.database import get_db_session
 
-    raw_token = "ody_" + secrets.token_urlsafe(32)
-    token_hash = hash_secret(raw_token)
-    token_id = new_short_id()
-    scopes = capabilities_to_storage(capabilities)
-
+    token_id, raw_token = new_bearer_token_values()
     with get_db_session() as db:
-        db.add(ApiToken(
-            id=token_id,
+        db.add(build_bearer_token_row(
+            token_id=token_id,
+            raw_token=raw_token,
             owner=owner,
-            name=name[:100] or "remote client",
-            token_hash=token_hash,
-            token_prefix=raw_token[:8],
-            scopes=scopes,
-            is_active=True,
+            name=name,
+            capabilities=capabilities,
         ))
     return token_id, raw_token
 
@@ -186,11 +203,13 @@ def build_pairing_url(base_url: str, invite_secret: str) -> str:
 
     base = (base_url or "").strip().rstrip("/")
     if not base:
-        base = "http://127.0.0.1:7000"
+        from src.constants import internal_api_base
+
+        base = internal_api_base()
     return f"{base}/api/remote-access/pair#token={quote(invite_secret, safe='')}"
 
 
-def serialize_invite(invite, *, include_secret: str | None = None, pairing_url: str | None = None) -> dict[str, Any]:
+def serialize_invite(invite, *, pairing_url: str | None = None) -> dict[str, Any]:
     data = {
         "id": invite.id,
         "owner": getattr(invite, "owner", None),
@@ -203,8 +222,6 @@ def serialize_invite(invite, *, include_secret: str | None = None, pairing_url: 
         "revoked_at": invite.revoked_at.isoformat() if getattr(invite, "revoked_at", None) else None,
         "consumed_by_client_id": getattr(invite, "consumed_by_client_id", None),
     }
-    if include_secret is not None:
-        data["token"] = include_secret
     if pairing_url is not None:
         data["pairing_url"] = pairing_url
     return data
