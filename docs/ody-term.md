@@ -2,6 +2,14 @@
 
 `ody-term` is the non-graphical Odysseus control surface. The v1 surface is live-control first and automation-friendly: use ordinary commands for sessions, runs, harnesses, lifecycle targets, inspection, and the TUI. Replay, experiment, and self-improvement workflows should wrap these primitives instead of depending on a special command family.
 
+Current implementation status: the command surface, renderers, local server
+bootstrap, capability shapes, file/keychain auth storage, lifecycle inventory
+scaffold, a first `/api/terminal/runs` chat-run compatibility seam, and
+`ody.tui.v1` state model exist. Full chat execution through the terminal-client
+API, Event Envelopes over live Odysseus activity streams, and a full-screen
+interactive TUI are still open work tracked in
+`docs/wayfinder/terminal-client/implementation-review.md`.
+
 ## Command Shape
 
 ```bash

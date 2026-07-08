@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -19,14 +20,28 @@ from urllib.request import Request as UrlRequest, urlopen
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TextIO, TypedDict, cast
+from typing import Callable, TextIO, TypedDict, cast
 
 try:
-    from src.constants import COOKBOOK_STATE_FILE, ODY_TERM_RUNS_FILE, ODY_TERM_SECRETS_FILE
+    from src.constants import (
+        COOKBOOK_STATE_FILE,
+        ODY_TERM_CONFIG_FILE,
+        ODY_TERM_DEFAULT_HOST,
+        ODY_TERM_DEFAULT_PORT,
+        ODY_TERM_RUNS_FILE,
+        ODY_TERM_RUNTIME_FILE,
+        ODY_TERM_SECRETS_FILE,
+        ODY_TERM_SERVER_LOG_FILE,
+    )
 except Exception:  # pragma: no cover - keeps standalone ody_term packaging usable.
     COOKBOOK_STATE_FILE = ""
+    ODY_TERM_CONFIG_FILE = ""
+    ODY_TERM_DEFAULT_HOST = "127.0.0.1"
+    ODY_TERM_DEFAULT_PORT = "7860"
     ODY_TERM_RUNS_FILE = ""
+    ODY_TERM_RUNTIME_FILE = ""
     ODY_TERM_SECRETS_FILE = ""
+    ODY_TERM_SERVER_LOG_FILE = ""
 
 
 DOMAINS = ("auth", "config", "server", "session", "run", "harness", "service", "inspect", "tui")
@@ -157,9 +172,8 @@ def _config_path() -> Path:
     override = os.getenv("ODY_TERM_CONFIG", "").strip()
     if override:
         return Path(override).expanduser()
-    base = os.getenv("XDG_CONFIG_HOME", "").strip()
-    if base:
-        return Path(base).expanduser() / "odysseus" / "ody-term.json"
+    if ODY_TERM_CONFIG_FILE:
+        return Path(ODY_TERM_CONFIG_FILE).expanduser()
     return Path.home() / ".config" / "odysseus" / "ody-term.json"
 
 
@@ -167,9 +181,8 @@ def _runtime_state_path() -> Path:
     override = os.getenv("ODY_TERM_RUNTIME", "").strip()
     if override:
         return Path(override).expanduser()
-    base = os.getenv("XDG_STATE_HOME", "").strip()
-    if base:
-        return Path(base).expanduser() / "odysseus" / "ody-term-runtime.json"
+    if ODY_TERM_RUNTIME_FILE:
+        return Path(ODY_TERM_RUNTIME_FILE).expanduser()
     return Path.home() / ".local" / "state" / "odysseus" / "ody-term-runtime.json"
 
 
@@ -189,6 +202,10 @@ def _secrets_path() -> Path:
     if ODY_TERM_SECRETS_FILE:
         return Path(ODY_TERM_SECRETS_FILE).expanduser()
     return _config_path().with_name("ody-term-secrets.json")
+
+
+def _default_local_url() -> str:
+    return f"http://{ODY_TERM_DEFAULT_HOST}:{ODY_TERM_DEFAULT_PORT}"
 
 
 def _empty_config() -> dict[str, object]:
@@ -300,6 +317,78 @@ def _load_secrets() -> dict[str, object]:
     return data
 
 
+def _secret_backend_mode() -> str:
+    return os.getenv("ODY_TERM_SECRET_BACKEND", "auto").strip().lower() or "auto"
+
+
+def _keychain_available() -> bool:
+    return sys.platform == "darwin" and shutil.which("security") is not None and _secret_backend_mode() != "file"
+
+
+def _default_token_ref() -> str:
+    if _secret_backend_mode() == "file":
+        return "file:default"
+    if _keychain_available():
+        return "keychain:ody-term/default"
+    return "file:default"
+
+
+def _keychain_account(ref: str) -> str:
+    return ref.split(":", 1)[1] if ":" in ref else ref
+
+
+def _load_os_secret(ref: str) -> str | None:
+    if not ref.startswith("keychain:") or not _keychain_available():
+        return None
+    result = subprocess.run(  # noqa: S603 - fixed macOS keychain command argv.
+        ["security", "find-generic-password", "-s", "ody-term", "-a", _keychain_account(ref), "-w"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    token = result.stdout.strip()
+    return token or None
+
+
+def _store_os_secret(ref: str, token: str) -> bool:
+    if not ref.startswith("keychain:") or not _keychain_available():
+        return False
+    result = subprocess.run(  # noqa: S603 - fixed macOS keychain command argv.
+        [
+            "security",
+            "add-generic-password",
+            "-U",
+            "-s",
+            "ody-term",
+            "-a",
+            _keychain_account(ref),
+            "-w",
+            token,
+        ],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def _delete_os_secret(ref: str) -> bool:
+    if not ref.startswith("keychain:") or not _keychain_available():
+        return False
+    result = subprocess.run(  # noqa: S603 - fixed macOS keychain command argv.
+        ["security", "delete-generic-password", "-s", "ody-term", "-a", _keychain_account(ref)],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    return result.returncode == 0
+
+
 def _save_secrets(secrets: dict[str, object]) -> None:
     path = _secrets_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -343,10 +432,13 @@ def _selected_token_ref() -> str:
         token_ref = profile.get("token_ref")
         if isinstance(token_ref, str) and token_ref:
             return token_ref
-    return "file:default"
+    return _default_token_ref()
 
 
 def _secret_token_entry(ref: str) -> dict[str, object]:
+    os_secret = _load_os_secret(ref)
+    if os_secret:
+        return {"token": os_secret, "storage_mode": "keychain"}
     secrets = _load_secrets()
     tokens = secrets.get("tokens", {})
     if not isinstance(tokens, dict):
@@ -378,11 +470,12 @@ def _resolved_auth() -> dict[str, object]:
         token_ref = _selected_token_ref()
         entry = _secret_token_entry(token_ref)
         token_present = bool(entry.get("token"))
+        storage_mode = "keychain" if entry.get("storage_mode") == "keychain" else "file-fallback"
         storage = {
-            "mode": "file-fallback",
+            "mode": storage_mode,
             "ref": token_ref,
-            "path": str(_secrets_path()),
-            "visible_weaker_fallback": token_present,
+            "path": str(_secrets_path()) if storage_mode == "file-fallback" else None,
+            "visible_weaker_fallback": bool(token_present and storage_mode == "file-fallback"),
         }
 
     if token_present:
@@ -480,13 +573,17 @@ def _require_capability(capability: str, request: CommandRequest) -> dict[str, o
             )
         return {"capability": capability, "required": "elevated", "satisfied_by": "--yolo"}
     if status["requires_confirmation"]:
-        if not request.globals.yes:
+        if not request.globals.yes and not request.globals.yolo:
             raise CommandError(
                 "confirmation_required",
                 f"{capability} requires --yes",
                 exit_code=2,
             )
-        return {"capability": capability, "required": "ordinary", "satisfied_by": "--yes"}
+        return {
+            "capability": capability,
+            "required": "ordinary",
+            "satisfied_by": "--yolo" if request.globals.yolo else "--yes",
+        }
     return {"capability": capability, "required": None, "satisfied_by": None}
 
 
@@ -548,7 +645,7 @@ def _resolve_target(request: CommandRequest) -> dict[str, object]:
     considered.append("runtime-state")
 
     if request.globals.start or request.globals.ensure_server:
-        started = _start_server(host="127.0.0.1", port=None, dry_run=False)
+        started = _start_server(host=ODY_TERM_DEFAULT_HOST, port=None, dry_run=False)
         server = cast(dict[str, object], started.data["server"])
         state = cast(dict[str, object], server["runtime_state"])
         url = state.get("url") if isinstance(state, dict) else None
@@ -563,7 +660,7 @@ def _resolve_target(request: CommandRequest) -> dict[str, object]:
     if request.output_profile == "human" or request.domain == "tui":
         return {
             "ok": True,
-            "url": "http://127.0.0.1:7860",
+            "url": _default_local_url(),
             "source": "localhost-fallback",
             "considered": considered,
             "reachable": "unchecked",
@@ -638,6 +735,8 @@ def _repo_root() -> Path:
 
 
 def _server_log_path() -> Path:
+    if ODY_TERM_SERVER_LOG_FILE:
+        return Path(ODY_TERM_SERVER_LOG_FILE).expanduser()
     return _runtime_state_path().with_name("ody-term-server.log")
 
 
@@ -1759,7 +1858,7 @@ def _service_control(request: CommandRequest) -> CommandResponse:
             )
         if target.get("status") == "running":
             _stop_main_server_lifecycle_target(target, confirmation)
-        started = _start_server(host="127.0.0.1", port=None, dry_run=False)
+        started = _start_server(host=ODY_TERM_DEFAULT_HOST, port=None, dry_run=False)
         return CommandResponse(
             ok=True,
             command=["service", "restart"],
@@ -1794,7 +1893,7 @@ def _start_server(*, host: str, port: str | None, dry_run: bool) -> CommandRespo
         )
     finally:
         log_file.close()
-    url_port = port or "7860"
+    url_port = port or ODY_TERM_DEFAULT_PORT
     state: dict[str, object] = {
         "kind": "ody-term-local-server",
         "pid": process.pid,
@@ -2195,6 +2294,8 @@ def _parse_global_args(argv: list[str]) -> tuple[GlobalOptions, list[str], bool]
         raise CommandError("invalid_format", f"unknown format: {options.format}")
     if options.color not in COLOR_MODES:
         raise CommandError("invalid_color", f"unknown color mode: {options.color}")
+    if options.yolo:
+        options.yes = True
     return options, positionals, help_requested
 
 
@@ -2248,23 +2349,32 @@ def _globals_payload(options: GlobalOptions) -> dict[str, object]:
     return asdict(options)
 
 
-def execute(request: CommandRequest) -> CommandResponse:
-    command = [request.domain] if request.verb is None else [request.domain, request.verb]
-    if request.domain == "auth" and request.verb == "status":
-        return CommandResponse(
-            ok=True,
-            command=command,
-            message=f"Auth mode: {_resolved_auth()['auth_mode']}",
-            data={"auth": _resolved_auth()},
-        )
-    if request.domain == "auth" and request.verb == "login":
-        options, positionals = _parse_command_options(request.args)
-        if positionals:
-            raise CommandError("unexpected_auth_args", f"unexpected auth login args: {' '.join(positionals)}")
-        token = options.get("token")
-        if not isinstance(token, str) or not token:
-            raise CommandError("missing_token", "auth login requires --token")
-        token_ref = str(options.get("token_ref") or "file:default")
+def _command_path(request: CommandRequest) -> list[str]:
+    return [request.domain] if request.verb is None else [request.domain, request.verb]
+
+
+def _auth_status(request: CommandRequest) -> CommandResponse:
+    command = _command_path(request)
+    return CommandResponse(
+        ok=True,
+        command=command,
+        message=f"Auth mode: {_resolved_auth()['auth_mode']}",
+        data={"auth": _resolved_auth()},
+    )
+
+
+def _auth_login(request: CommandRequest) -> CommandResponse:
+    command = _command_path(request)
+    options, positionals = _parse_command_options(request.args)
+    if positionals:
+        raise CommandError("unexpected_auth_args", f"unexpected auth login args: {' '.join(positionals)}")
+    token = options.get("token")
+    if not isinstance(token, str) or not token:
+        raise CommandError("missing_token", "auth login requires --token")
+    token_ref = str(options.get("token_ref") or _default_token_ref())
+    stored_in_os_secret = _store_os_secret(token_ref, token)
+    if not stored_in_os_secret:
+        token_ref = "file:default" if token_ref.startswith("keychain:") else token_ref
         secrets = _load_secrets()
         tokens = secrets.get("tokens", {})
         if not isinstance(tokens, dict):
@@ -2273,323 +2383,376 @@ def execute(request: CommandRequest) -> CommandResponse:
         tokens[token_ref] = {
             "token": token,
             "updated_at": _utc_now(),
+            "storage_mode": "file-fallback",
         }
         secrets["tokens"] = tokens
         _save_secrets(secrets)
-        auth = _resolved_auth()
-        if auth["token"] and cast(dict[str, object], auth["token"]).get("ref") != token_ref:
-            token_payload = cast(dict[str, object], auth["token"])
-            token_payload["ref"] = token_ref
+    return CommandResponse(
+        ok=True,
+        command=command,
+        message="Terminal Client token stored",
+        data={"auth": _resolved_auth()},
+    )
+
+
+def _auth_logout(request: CommandRequest) -> CommandResponse:
+    command = _command_path(request)
+    options, positionals = _parse_command_options(request.args)
+    if positionals:
+        raise CommandError("unexpected_auth_args", f"unexpected auth logout args: {' '.join(positionals)}")
+    token_ref = str(options.get("token_ref") or _selected_token_ref())
+    secrets = _load_secrets()
+    tokens = secrets.get("tokens", {})
+    removed = _delete_os_secret(token_ref)
+    if isinstance(tokens, dict):
+        removed = tokens.pop(token_ref, None) is not None or removed
+        secrets["tokens"] = tokens
+        _save_secrets(secrets)
+    auth = _resolved_auth()
+    return CommandResponse(
+        ok=True,
+        command=command,
+        message="Terminal Client token removed" if removed else "No stored Terminal Client token found",
+        data={"auth": auth, "removed": removed},
+    )
+
+
+def _auth_capabilities(request: CommandRequest) -> CommandResponse:
+    return CommandResponse(
+        ok=True,
+        command=_command_path(request),
+        message="Terminal Client capabilities",
+        data=_capabilities_payload(),
+    )
+
+
+def _service_list(request: CommandRequest) -> CommandResponse:
+    _require_capability("service:read", request)
+    options, positionals = _parse_command_options(request.args)
+    if positionals:
+        raise CommandError("unexpected_service_args", f"unexpected service list args: {' '.join(positionals)}")
+    targets = _lifecycle_targets()
+    return CommandResponse(
+        ok=True,
+        command=_command_path(request),
+        message=f"{len(targets)} Lifecycle Target(s)",
+        data={"targets": targets},
+    )
+
+
+def _service_status(request: CommandRequest) -> CommandResponse:
+    _require_capability("service:read", request)
+    options, positionals = _parse_command_options(request.args)
+    if len(positionals) != 1:
+        raise CommandError("missing_lifecycle_target", "service status requires exactly one managed target id")
+    target = _lifecycle_target(positionals[0])
+    return CommandResponse(
+        ok=True,
+        command=_command_path(request),
+        message=f"Lifecycle target {target['id']} is {target['status']}",
+        data={"target": target},
+    )
+
+
+def _server_status(request: CommandRequest) -> CommandResponse:
+    status = _server_status_payload()
+    return CommandResponse(
+        ok=True,
+        command=_command_path(request),
+        message=f"Local server runtime state: {status['status']}",
+        data={"server": status},
+    )
+
+
+def _server_start(request: CommandRequest) -> CommandResponse:
+    options, positionals = _parse_command_options(request.args)
+    if positionals:
+        raise CommandError("unexpected_server_args", f"unexpected server start args: {' '.join(positionals)}")
+    status = _server_status_payload()
+    if status["status"] == "running":
         return CommandResponse(
             ok=True,
-            command=command,
-            message="Terminal Client token stored",
-            data={"auth": _resolved_auth()},
-        )
-    if request.domain == "auth" and request.verb == "logout":
-        options, positionals = _parse_command_options(request.args)
-        if positionals:
-            raise CommandError("unexpected_auth_args", f"unexpected auth logout args: {' '.join(positionals)}")
-        token_ref = str(options.get("token_ref") or _selected_token_ref())
-        secrets = _load_secrets()
-        tokens = secrets.get("tokens", {})
-        removed = False
-        if isinstance(tokens, dict):
-            removed = tokens.pop(token_ref, None) is not None
-            secrets["tokens"] = tokens
-            _save_secrets(secrets)
-        auth = _resolved_auth()
-        return CommandResponse(
-            ok=True,
-            command=command,
-            message="Terminal Client token removed" if removed else "No stored Terminal Client token found",
-            data={"auth": auth, "removed": removed},
-        )
-    if request.domain == "auth" and request.verb == "capabilities":
-        return CommandResponse(
-            ok=True,
-            command=command,
-            message="Terminal Client capabilities",
-            data=_capabilities_payload(),
-        )
-    if request.domain == "run" and request.verb == "start":
-        return _run_start(request)
-    if request.domain == "run" and request.verb == "list":
-        return _run_list(request)
-    if request.domain == "run" and request.verb == "status":
-        return _run_status(request)
-    if request.domain == "run" and request.verb == "attach":
-        return _run_attach(request)
-    if request.domain == "run" and request.verb == "stop":
-        return _run_stop(request)
-    if request.domain == "harness" and request.verb == "list":
-        return _harness_list(request)
-    if request.domain == "harness" and request.verb == "status":
-        return _harness_status(request)
-    if request.domain == "harness" and request.verb == "stop":
-        return _harness_stop(request)
-    if request.domain == "harness" and request.verb == "attach":
-        return _run_attach(request)
-    if request.domain == "service" and request.verb == "list":
-        _require_capability("service:read", request)
-        options, positionals = _parse_command_options(request.args)
-        if positionals:
-            raise CommandError("unexpected_service_args", f"unexpected service list args: {' '.join(positionals)}")
-        targets = _lifecycle_targets()
-        return CommandResponse(
-            ok=True,
-            command=command,
-            message=f"{len(targets)} Lifecycle Target(s)",
-            data={"targets": targets},
-        )
-    if request.domain == "service" and request.verb == "status":
-        _require_capability("service:read", request)
-        options, positionals = _parse_command_options(request.args)
-        if len(positionals) != 1:
-            raise CommandError("missing_lifecycle_target", "service status requires exactly one managed target id")
-        target = _lifecycle_target(positionals[0])
-        return CommandResponse(
-            ok=True,
-            command=command,
-            message=f"Lifecycle target {target['id']} is {target['status']}",
-            data={"target": target},
-        )
-    if request.domain == "service" and request.verb == "logs":
-        return _service_logs(request)
-    if request.domain == "service" and request.verb in {"stop", "restart"}:
-        return _service_control(request)
-    if request.domain == "server" and request.verb == "status":
-        status = _server_status_payload()
-        return CommandResponse(
-            ok=True,
-            command=command,
-            message=f"Local server runtime state: {status['status']}",
+            command=_command_path(request),
+            message="Local server already running",
             data={"server": status},
         )
-    if request.domain == "server" and request.verb == "start":
-        options, positionals = _parse_command_options(request.args)
-        if positionals:
-            raise CommandError("unexpected_server_args", f"unexpected server start args: {' '.join(positionals)}")
-        status = _server_status_payload()
-        if status["status"] == "running":
-            return CommandResponse(
-                ok=True,
-                command=command,
-                message="Local server already running",
-                data={"server": status},
-            )
-        host = str(options.get("host") or "127.0.0.1")
-        port = str(options["port"]) if isinstance(options.get("port"), str) else None
-        dry_run = bool(options.get("dry_run"))
-        response = _start_server(host=host, port=port, dry_run=dry_run)
-        response.command = command
-        return response
-    if request.domain == "server" and request.verb == "stop":
-        state = _server_state()
-        if not state:
-            return CommandResponse(
-                ok=True,
-                command=command,
-                message="No ody-term local server runtime state found",
-                data={"server": {"status": "absent"}},
-            )
-        if state.get("repo") != str(_repo_root()) or not isinstance(state.get("command"), list):
-            raise CommandError("ambiguous_runtime_state", "runtime state ownership evidence does not match this checkout")
-        pid = state.get("pid")
-        if not _process_alive(pid):
-            return CommandResponse(
-                ok=False,
-                command=command,
-                message="Local server runtime state is stale",
-                data={"server": {"status": "stale", "runtime_state": state}},
-            )
-        if not _process_group_matches(pid, state.get("pgid")):
-            raise CommandError("ambiguous_runtime_state", "runtime state ownership evidence does not match this checkout")
-        assert isinstance(pid, int)
-        os.killpg(pid, signal.SIGTERM)
-        state["stopped_at"] = _utc_now()
-        _save_server_state(state)
+    host = str(options.get("host") or ODY_TERM_DEFAULT_HOST)
+    port = str(options["port"]) if isinstance(options.get("port"), str) else None
+    dry_run = bool(options.get("dry_run"))
+    response = _start_server(host=host, port=port, dry_run=dry_run)
+    response.command = _command_path(request)
+    return response
+
+
+def _server_stop(request: CommandRequest) -> CommandResponse:
+    command = _command_path(request)
+    state = _server_state()
+    if not state:
         return CommandResponse(
             ok=True,
             command=command,
-            message="Local server stop signal sent",
-            data={"server": {"status": "stopping", "runtime_state": state}},
+            message="No ody-term local server runtime state found",
+            data={"server": {"status": "absent"}},
         )
-    if request.domain == "server" and request.verb == "logs":
-        options, positionals = _parse_command_options(request.args)
-        if positionals:
-            raise CommandError("unexpected_server_args", f"unexpected server logs args: {' '.join(positionals)}")
-        raw_lines = options.get("lines")
-        try:
-            lines = int(raw_lines) if isinstance(raw_lines, str) else 80
-        except ValueError as exc:
-            raise CommandError("invalid_lines", f"--lines must be an integer: {raw_lines}") from exc
-        state = _server_state()
-        log_path = Path(str(state.get("log_path") or _server_log_path()))
+    if state.get("repo") != str(_repo_root()) or not isinstance(state.get("command"), list):
+        raise CommandError("ambiguous_runtime_state", "runtime state ownership evidence does not match this checkout")
+    pid = state.get("pid")
+    if not _process_alive(pid):
+        return CommandResponse(
+            ok=False,
+            command=command,
+            message="Local server runtime state is stale",
+            data={"server": {"status": "stale", "runtime_state": state}},
+        )
+    if not _process_group_matches(pid, state.get("pgid")):
+        raise CommandError("ambiguous_runtime_state", "runtime state ownership evidence does not match this checkout")
+    assert isinstance(pid, int)
+    os.killpg(pid, signal.SIGTERM)
+    state["stopped_at"] = _utc_now()
+    _save_server_state(state)
+    return CommandResponse(
+        ok=True,
+        command=command,
+        message="Local server stop signal sent",
+        data={"server": {"status": "stopping", "runtime_state": state}},
+    )
+
+
+def _server_logs(request: CommandRequest) -> CommandResponse:
+    options, positionals = _parse_command_options(request.args)
+    if positionals:
+        raise CommandError("unexpected_server_args", f"unexpected server logs args: {' '.join(positionals)}")
+    raw_lines = options.get("lines")
+    try:
+        lines = int(raw_lines) if isinstance(raw_lines, str) else 80
+    except ValueError as exc:
+        raise CommandError("invalid_lines", f"--lines must be an integer: {raw_lines}") from exc
+    state = _server_state()
+    log_path = Path(str(state.get("log_path") or _server_log_path()))
+    return CommandResponse(
+        ok=True,
+        command=_command_path(request),
+        message="Local server logs",
+        data={"log_path": str(log_path), "lines": _tail_file(log_path, max(lines, 0))},
+    )
+
+
+def _config_show(request: CommandRequest) -> CommandResponse:
+    config = load_config()
+    return CommandResponse(
+        ok=True,
+        command=_command_path(request),
+        message="Terminal Client config",
+        data={"config": config, "path": str(_config_path())},
+    )
+
+
+def _config_resolve_target(request: CommandRequest) -> CommandResponse:
+    resolved = _resolve_target(request)
+    return CommandResponse(
+        ok=bool(resolved.get("ok")),
+        command=_command_path(request),
+        message="Target resolved" if resolved.get("ok") else "Target resolution failed",
+        data={"target": resolved},
+    )
+
+
+def _config_profile(request: CommandRequest) -> CommandResponse:
+    command = [request.domain] if request.verb is None else [request.domain, request.verb]
+    options, positionals = _parse_command_options(request.args)
+    action = positionals[0] if positionals else "list"
+    config = load_config()
+    profiles = _profiles(config)
+    if action == "list":
         return CommandResponse(
             ok=True,
             command=command,
-            message="Local server logs",
-            data={"log_path": str(log_path), "lines": _tail_file(log_path, max(lines, 0))},
-        )
-    if request.domain == "config" and request.verb == "show":
-        config = load_config()
-        return CommandResponse(
-            ok=True,
-            command=command,
-            message="Terminal Client config",
-            data={"config": config, "path": str(_config_path())},
-        )
-    if request.domain == "config" and request.verb == "resolve-target":
-        resolved = _resolve_target(request)
-        return CommandResponse(
-            ok=bool(resolved.get("ok")),
-            command=command,
-            message="Target resolved" if resolved.get("ok") else "Target resolution failed",
-            data={"target": resolved},
-        )
-    if request.domain == "config" and request.verb == "profile":
-        options, positionals = _parse_command_options(request.args)
-        action = positionals[0] if positionals else "list"
-        config = load_config()
-        profiles = _profiles(config)
-        if action == "list":
-            return CommandResponse(
-                ok=True,
-                command=command,
-                message="Terminal Client profiles",
-                data={
-                    "default_profile": config.get("default_profile"),
-                    "profiles": sorted(profiles),
-                },
-            )
-        if action == "show":
-            if len(positionals) < 2:
-                raise CommandError("missing_profile_name", "config profile show requires a profile name")
-            name = positionals[1]
-            if name not in profiles:
-                raise CommandError("unknown_profile", f"unknown profile: {name}", exit_code=1)
-            return CommandResponse(
-                ok=True,
-                command=command,
-                message=f"Terminal Client profile {name}",
-                data={"profile": name, "settings": _profile_payload(profiles[name])},
-            )
-        if action == "set":
-            if len(positionals) < 2:
-                raise CommandError("missing_profile_name", "config profile set requires a profile name")
-            name = positionals[1]
-            existing = _profile_payload(profiles.get(name, {}))
-            for source_key, target_key in (
-                ("url", "url"),
-                ("repo", "repo"),
-                ("token_ref", "token_ref"),
-                ("profile_output", "output"),
-            ):
-                value = options.get(source_key)
-                if isinstance(value, str) and value:
-                    existing[target_key] = value
-            if existing.get("output") is not None and existing["output"] not in OUTPUT_PROFILES:
-                raise CommandError("invalid_profile_output", f"unknown profile output: {existing['output']}")
-            profiles[name] = existing
-            if options.get("default"):
-                config["default_profile"] = name
-            save_config(config)
-            return CommandResponse(
-                ok=True,
-                command=command,
-                message=f"Terminal Client profile {name} saved",
-                data={"profile": name, "settings": existing, "default_profile": config.get("default_profile")},
-            )
-        if action == "unset":
-            if len(positionals) < 2:
-                raise CommandError("missing_profile_name", "config profile unset requires a profile name")
-            name = positionals[1]
-            removed = profiles.pop(name, None) is not None
-            if config.get("default_profile") == name:
-                config["default_profile"] = None
-            save_config(config)
-            return CommandResponse(
-                ok=True,
-                command=command,
-                message=f"Terminal Client profile {name} removed" if removed else f"Terminal Client profile {name} absent",
-                data={"profile": name, "removed": removed, "default_profile": config.get("default_profile")},
-            )
-        raise CommandError("unknown_profile_action", f"unknown config profile action: {action}")
-    if request.domain == "inspect" and request.verb == "domains":
-        return CommandResponse(
-            ok=True,
-            command=command,
-            message="Terminal Client domains",
-            data={"domains": list(DOMAINS), "commands": {key: list(value) for key, value in COMMANDS.items()}},
-        )
-    if request.domain == "inspect" and request.verb == "aliases":
-        return CommandResponse(
-            ok=True,
-            command=command,
-            message="Terminal Client aliases",
-            data={"aliases": list(ALIASES)},
-        )
-    if request.domain == "inspect" and request.verb == "contracts":
-        return CommandResponse(
-            ok=True,
-            command=command,
-            message="Terminal Client output contracts",
+            message="Terminal Client profiles",
             data={
-                "profiles": list(OUTPUT_PROFILES),
-                "formats": list(FORMATS),
-                "default_profile": request.output_profile,
-                "event_envelope_required_fields": [
-                    "schema",
-                    "id",
-                    "seq",
-                    "time",
-                    "source",
-                    "kind",
-                    "level",
-                    "payload",
-                ],
-                "event_envelope_field_aliases": {"sequence": "seq"},
-                "clanker": {
-                    "bounded_json": "Command responses are JSON objects with ok, command, message, profile, format, and data.",
-                    "event_jsonl": "Event-stream commands emit one ody.event.v1 Event Envelope per line.",
-                    "raw_debug": "raw/debug are diagnostic capture modes; ody.event.v1 remains the replay contract.",
-                },
-                "exit_codes": {
-                    "0": "command succeeded",
-                    "1": "known runtime or target failure",
-                    "2": "usage, auth, capability, confirmation, or policy failure",
-                },
-                "cursor": {
-                    "flag": "--cursor",
-                    "field": "data.cursor.next",
-                    "reconnect": "pass the last cursor.next value to continue after that event sequence",
-                },
+                "default_profile": config.get("default_profile"),
+                "profiles": sorted(profiles),
             },
         )
-    if request.domain == "inspect" and request.verb == "globals":
+    if action == "show":
+        if len(positionals) < 2:
+            raise CommandError("missing_profile_name", "config profile show requires a profile name")
+        name = positionals[1]
+        if name not in profiles:
+            raise CommandError("unknown_profile", f"unknown profile: {name}", exit_code=1)
         return CommandResponse(
             ok=True,
             command=command,
-            message="Terminal Client global options",
-            data={"globals": _globals_payload(request.globals), "output_profile": request.output_profile},
+            message=f"Terminal Client profile {name}",
+            data={"profile": name, "settings": _profile_payload(profiles[name])},
         )
-    if request.domain == "inspect" and request.verb == "events":
-        return _inspect_events(request)
-    if request.domain == "tui":
-        model = _build_tui_model(request)
+    if action == "set":
+        if len(positionals) < 2:
+            raise CommandError("missing_profile_name", "config profile set requires a profile name")
+        name = positionals[1]
+        existing = _profile_payload(profiles.get(name, {}))
+        for source_key, target_key in (
+            ("url", "url"),
+            ("repo", "repo"),
+            ("token_ref", "token_ref"),
+            ("profile_output", "output"),
+        ):
+            value = options.get(source_key)
+            if isinstance(value, str) and value:
+                existing[target_key] = value
+        if existing.get("output") is not None and existing["output"] not in OUTPUT_PROFILES:
+            raise CommandError("invalid_profile_output", f"unknown profile output: {existing['output']}")
+        profiles[name] = existing
+        if options.get("default"):
+            config["default_profile"] = name
+        save_config(config)
         return CommandResponse(
             ok=True,
             command=command,
-            message=_render_tui_screen(model),
-            data={"tui": model},
+            message=f"Terminal Client profile {name} saved",
+            data={"profile": name, "settings": existing, "default_profile": config.get("default_profile")},
         )
+    if action == "unset":
+        if len(positionals) < 2:
+            raise CommandError("missing_profile_name", "config profile unset requires a profile name")
+        name = positionals[1]
+        removed = profiles.pop(name, None) is not None
+        if config.get("default_profile") == name:
+            config["default_profile"] = None
+        save_config(config)
+        return CommandResponse(
+            ok=True,
+            command=command,
+            message=f"Terminal Client profile {name} removed" if removed else f"Terminal Client profile {name} absent",
+            data={"profile": name, "removed": removed, "default_profile": config.get("default_profile")},
+        )
+    raise CommandError("unknown_profile_action", f"unknown config profile action: {action}")
+
+
+def _inspect_domains(request: CommandRequest) -> CommandResponse:
     return CommandResponse(
-        ok=False,
-        command=command,
-        message=f"{' '.join(command)} is registered but not implemented yet",
-        data={"implemented": False, "args": request.args},
+        ok=True,
+        command=_command_path(request),
+        message="Terminal Client domains",
+        data={"domains": list(DOMAINS), "commands": {key: list(value) for key, value in COMMANDS.items()}},
     )
+
+
+def _inspect_aliases(request: CommandRequest) -> CommandResponse:
+    return CommandResponse(
+        ok=True,
+        command=_command_path(request),
+        message="Terminal Client aliases",
+        data={"aliases": list(ALIASES)},
+    )
+
+
+def _inspect_contracts(request: CommandRequest) -> CommandResponse:
+    return CommandResponse(
+        ok=True,
+        command=_command_path(request),
+        message="Terminal Client output contracts",
+        data={
+            "profiles": list(OUTPUT_PROFILES),
+            "formats": list(FORMATS),
+            "default_profile": request.output_profile,
+            "event_envelope_required_fields": [
+                "schema",
+                "id",
+                "seq",
+                "time",
+                "source",
+                "kind",
+                "level",
+                "payload",
+            ],
+            "event_envelope_field_aliases": {"sequence": "seq"},
+            "clanker": {
+                "bounded_json": "Command responses are JSON objects with ok, command, message, profile, format, and data.",
+                "event_jsonl": "Event-stream commands emit one ody.event.v1 Event Envelope per line.",
+                "raw_debug": "raw/debug are diagnostic capture modes; ody.event.v1 remains the replay contract.",
+            },
+            "exit_codes": {
+                "0": "command succeeded",
+                "1": "known runtime or target failure",
+                "2": "usage, auth, capability, confirmation, or policy failure",
+            },
+            "cursor": {
+                "flag": "--cursor",
+                "field": "data.cursor.next",
+                "reconnect": "pass the last cursor.next value to continue after that event sequence",
+            },
+        },
+    )
+
+
+def _inspect_globals(request: CommandRequest) -> CommandResponse:
+    return CommandResponse(
+        ok=True,
+        command=_command_path(request),
+        message="Terminal Client global options",
+        data={"globals": _globals_payload(request.globals), "output_profile": request.output_profile},
+    )
+
+
+def _tui_command(request: CommandRequest) -> CommandResponse:
+    model = _build_tui_model(request)
+    return CommandResponse(
+        ok=True,
+        command=_command_path(request),
+        message=_render_tui_screen(model),
+        data={"tui": model},
+    )
+
+
+CommandHandler = Callable[[CommandRequest], CommandResponse]
+
+
+HANDLERS: dict[tuple[str, str | None], CommandHandler] = {
+    ("auth", "status"): _auth_status,
+    ("auth", "login"): _auth_login,
+    ("auth", "logout"): _auth_logout,
+    ("auth", "capabilities"): _auth_capabilities,
+    ("run", "start"): _run_start,
+    ("run", "list"): _run_list,
+    ("run", "status"): _run_status,
+    ("run", "attach"): _run_attach,
+    ("run", "stop"): _run_stop,
+    ("harness", "list"): _harness_list,
+    ("harness", "status"): _harness_status,
+    ("harness", "stop"): _harness_stop,
+    ("harness", "attach"): _run_attach,
+    ("service", "list"): _service_list,
+    ("service", "status"): _service_status,
+    ("service", "logs"): _service_logs,
+    ("service", "stop"): _service_control,
+    ("service", "restart"): _service_control,
+    ("server", "status"): _server_status,
+    ("server", "start"): _server_start,
+    ("server", "stop"): _server_stop,
+    ("server", "logs"): _server_logs,
+    ("config", "show"): _config_show,
+    ("config", "resolve-target"): _config_resolve_target,
+    ("config", "profile"): _config_profile,
+    ("inspect", "domains"): _inspect_domains,
+    ("inspect", "aliases"): _inspect_aliases,
+    ("inspect", "contracts"): _inspect_contracts,
+    ("inspect", "globals"): _inspect_globals,
+    ("inspect", "events"): _inspect_events,
+    ("tui", None): _tui_command,
+}
+
+
+def execute(request: CommandRequest) -> CommandResponse:
+    handler = HANDLERS.get((request.domain, request.verb))
+    if handler is None:
+        command = _command_path(request)
+        return CommandResponse(
+            ok=False,
+            command=command,
+            message=f"{' '.join(command)} is registered but not implemented yet",
+            data={"implemented": False, "args": request.args},
+        )
+    return handler(request)
 
 
 def _response_payload(response: CommandResponse, request: CommandRequest) -> dict[str, object]:

@@ -4,6 +4,22 @@ These tickets build the `ody-term` Terminal Client from the [Terminal Client V1 
 
 Work the **frontier**: any ticket whose blockers are all done. The two survey tickets can start immediately; after that, work the command spine first and then follow the dependency edges.
 
+## Implementation Evidence Gates
+
+Before marking an implementation ticket complete, state the evidence that proves
+the user-facing behavior works. Do not count scaffold, local fixture state,
+static renderer output, or command-shape tests as production behavior unless the
+ticket is explicitly labelled scaffold-only.
+
+- [ ] Real backend/API behavior is verified when the ticket promises live
+      Odysseus Sessions, Runs, events, lifecycle state, auth, or capabilities.
+- [ ] Interactive behavior is verified against an interactive terminal harness
+      when the ticket promises TUI keyboard, mouse, or full-screen behavior.
+- [ ] CLI contract tests are paired with integration-style checks whenever the
+      command claims to control or observe real Odysseus state.
+- [ ] Any remaining prototype/scaffold behavior is labelled open in this file
+      and in user-facing docs.
+
 ## Survey Odysseus Terminal-Relevant Technology
 
 **What to build:** A concise, decision-oriented inventory of technologies already present in Odysseus that should shape `ody-term`, including CLI patterns, config and secret storage, HTTP/API clients, streaming/event code, auth/token helpers, launch machinery, harness integration, packaging, and test prior art. The survey should avoid excessive dependency depth and end with concrete recommendations for the first implementation tickets. Neither backwards compatibility with awkward existing shapes nor rigid avoidance of new dependencies is a goal; recommendations should fit Odysseus' pragmatic engineering posture.
@@ -85,7 +101,12 @@ Work the **frontier**: any ticket whose blockers are all done. The two survey ti
 - [x] Source-native details are preserved in payload or raw fields where available.
 - [x] JSONL emits one Event Envelope per line for streaming and automation.
 - [x] Raw and debug modes expose source details without becoming the default automation contract.
-- [x] Event filtering and cursor metadata have a stable initial behavior.
+- [ ] Event filtering and cursor metadata have a stable initial behavior over real Odysseus activity streams, not only local server logs.
+
+Correction note: the current implementation normalizes local server logs and
+client-local run fixtures. It does not yet inspect existing Odysseus chat,
+agent, harness, service, process, and system streams. See
+[Terminal Client Implementation Review](implementation-review.md).
 
 ## Create Run Identity Compatibility Layer For Chat Runs
 
@@ -93,12 +114,16 @@ Work the **frontier**: any ticket whose blockers are all done. The two survey ti
 
 **Blocked by:** Introduce Event Envelope Inspection Over Existing Streams.
 
-- [x] A chat Run has distinct Run identity linked to durable Session identity.
+- [ ] A chat Run has distinct Run identity linked to durable Session identity in the backend/API layer.
 - [x] Starting a Run can create a new Session or target an existing Session.
 - [x] Listing and status show active/recent Runs with status, timestamps, heartbeat/activity summary, and event availability.
 - [x] Attach follows the Run Event Envelope stream.
 - [x] Attach-by-Session fails with a structured ambiguity response when more than one active Run can match.
 - [x] Stop targets Run lifecycle rather than hiding cancellation under Session commands.
+
+Correction note: the CLI currently models this with local JSON run state. The
+remaining work is to bind these commands to real Odysseus chat execution through
+a terminal-client API layer.
 
 ## Extend Run Surface To Agent And Harness Workflows
 
@@ -106,10 +131,10 @@ Work the **frontier**: any ticket whose blockers are all done. The two survey ti
 
 **Blocked by:** Create Run Identity Compatibility Layer For Chat Runs.
 
-- [x] Agent Runs use the same Run list, status, attach, and stop model as chat Runs.
-- [x] Harness-linked Runs include Odysseus Session, Run, harness adapter, and Harness Session identity where known.
+- [ ] Agent Runs use the same real API-backed Run list, status, attach, and stop model as chat Runs.
+- [ ] Harness-linked Runs include Odysseus Session, Run, harness adapter, and Harness Session identity where known from backend state.
 - [x] Harness operations are capability-gated by adapter support and report unsupported actions clearly.
-- [x] Heartbeats and activity updates are visible as Event Envelopes.
+- [ ] Heartbeats and activity updates are visible as Event Envelopes from real execution.
 - [x] Session history and Run events remain separate user-facing concepts.
 
 ## Expose Managed Lifecycle Targets
@@ -131,14 +156,16 @@ Work the **frontier**: any ticket whose blockers are all done. The two survey ti
 
 **Blocked by:** Create Run Identity Compatibility Layer For Chat Runs; Expose Managed Lifecycle Targets.
 
-- [x] The TUI has focused Live, REPL, Browse/tree, and Inspect views.
+- [ ] The TUI has focused Live, REPL, Browse/tree, and Inspect views in a full-screen interactive renderer.
 - [x] TUI panes consume the same Event Envelope, Session, Run, Lifecycle Target, and capability state as CLI commands.
 - [x] Live view shows merged runtime events with selected-event detail and a local control log.
 - [x] REPL view can perform status, tail, filter, stop, harness, and lifecycle control attempts within capability limits.
 - [x] Browse/tree and Inspect views expose structure and current model state without depending on private internals.
-- [x] Keyboard and mouse interaction paths are both covered by tests or harnessed verification.
+- [ ] Keyboard and mouse interaction paths are both covered against an interactive terminal renderer.
 
-Implementation note: completed as a dependency-free, harnessable `ody.tui.v1` state model plus human terminal fallback renderer in `ody-term tui`. The model is structured so a future full-screen Textual/curses renderer can consume the same Live, REPL, Browse, Inspect, keyboard, and mouse contracts without changing CLI state seams.
+Implementation note: the dependency-free, harnessable `ody.tui.v1` state model
+and human terminal fallback renderer exist. That is useful substrate, but it is
+not the full-screen interactive TUI promised by the v1 spec.
 
 ## Harden Automation, Replay Primitives, And Final Docs
 
@@ -154,3 +181,184 @@ Implementation note: completed as a dependency-free, harnessable `ody.tui.v1` st
 - [x] Final documentation makes clear that replay, experiment, and self-improvement workflows are external orchestration patterns in v1.
 
 Implementation note: finalized in `docs/ody-term.md`, with compatibility metadata exposed by `ody-term inspect contracts` and focused regression coverage for clanker contracts, cursor continuation, raw/debug capture gating, and Event Envelope replay posture.
+
+# Tickets: Terminal Client Production Recovery
+
+These tickets repair the gap between the implemented `ody-term` command
+scaffold and the production behavior required by the
+[Terminal Client V1 Spec](tickets/011-terminal-client-v1-spec.md). Source
+review: [Terminal Client Implementation Review](implementation-review.md).
+
+Work the **frontier**: any ticket whose blockers are all done. A ticket is not
+done until its acceptance criteria are proven against the implementation
+evidence gates above.
+
+## Add Wayfinder Implementation Evidence Gates
+
+**What to build:** The wayfinder tracker makes it hard to mistake scaffolded
+command shape for production behavior. Future implementation tickets must say
+what evidence closes them and must label scaffold/prototype behavior explicitly
+when it is not the final user-facing behavior.
+
+**Blocked by:** None — can start immediately.
+
+- [x] The tracker distinguishes scaffold, prototype, contract shape, and
+      production behavior.
+- [x] Tickets that promise real Odysseus state require backend/API evidence
+      before they can be marked complete.
+- [x] Tickets that promise TUI interaction require interactive terminal
+      evidence before they can be marked complete.
+- [x] User-facing docs identify any remaining scaffold/prototype surfaces as
+      open work.
+
+## Build API-Backed Chat Run Vertical Slice
+
+**What to build:** `ody-term run start/list/status/attach/stop --kind chat`
+controls and observes real Odysseus chat execution instead of client-local run
+fixtures. A user can start a chat Run, see its distinct Run identity linked to
+the durable Session, attach to normalized Event Envelopes, reconnect with a
+cursor, and stop the Run through the same Run model.
+
+**Blocked by:** Add Wayfinder Implementation Evidence Gates.
+
+- [ ] Starting a chat Run creates or targets a real Odysseus Session and starts
+      real chat execution through a terminal-client API path.
+- [ ] The terminal-client API exposes distinct Run identity linked to Session
+      identity, even if existing internals remain session-keyed during the
+      compatibility phase.
+- [ ] `run list` and `run status` report real active/recent chat Runs with
+      status, timestamps, heartbeat/activity summary, and event availability.
+- [ ] `run attach` emits one normalized `ody.event.v1` Event Envelope per real
+      stream event in JSONL mode and returns cursor metadata in JSON mode.
+- [ ] `run stop` stops real execution through bounded server-side behavior and
+      does not mutate only client-local JSON state.
+- [ ] Tests fail if the command reports successful chat Run behavior without
+      using the real terminal-client API path.
+
+Implementation note: a first terminal-client API seam now exists at
+`/api/terminal/runs`, and default/explicit chat starts plus API-created chat Run
+status/attach/stop calls go through that seam instead of client-local JSON run
+state. This is not enough to close the ticket: the backend route currently
+provides a minimal compatibility stream over the existing session-keyed
+detached-run substrate and still must be wired into full Odysseus chat
+execution with real session/model validation, chat processing, and durable
+history updates.
+
+## Promote Event Inspection To Real Odysseus Activity
+
+**What to build:** `ody-term inspect events` reads normalized Event Envelopes
+from real Odysseus activity, starting with chat Runs and local server logs, so
+automation can inspect live/recent behavior without depending on raw backend
+transport shapes.
+
+**Blocked by:** Build API-Backed Chat Run Vertical Slice.
+
+- [ ] `inspect events` can read real chat Run events by Run, Session, source,
+      kind, level, and cursor.
+- [ ] Local server logs remain available as Event Envelopes, but are no longer
+      the only implemented source.
+- [ ] Raw/debug modes preserve source-native event details without replacing
+      the normalized Event Envelope contract.
+- [ ] Cursor behavior is verified across bounded JSON responses, JSONL streams,
+      and reconnect after a previous cursor.
+- [ ] Tests include at least one real backend/API-backed event source and fail
+      if only local fixture/log state is queried.
+
+## Extend Real Runs To Agent And Harness Workflows
+
+**What to build:** Agent and harness-backed execution use the same real Run
+model as chat. A user can observe and control agent Runs and Harness
+Session-linked Runs with Odysseus Session, Run, harness adapter, and Harness
+Session identity visible in command output and Event Envelopes.
+
+**Blocked by:** Build API-Backed Chat Run Vertical Slice; Promote Event
+Inspection To Real Odysseus Activity.
+
+- [ ] Agent Runs use the same real API-backed list, status, attach, and stop
+      commands as chat Runs.
+- [ ] Harness-linked Runs include Odysseus Session identity, Run identity,
+      harness adapter identity, and Harness Session identity where known.
+- [ ] Harness operations are capability-gated by adapter support and report
+      unsupported actions clearly in structured output.
+- [ ] Heartbeats and activity updates from real execution are visible as Event
+      Envelopes.
+- [ ] Session history and Run events remain separate user-facing concepts.
+
+## Make Lifecycle Logs And Controls Consume Real Run/Event State
+
+**What to build:** `ody-term service list/status/logs/stop/restart` consumes
+real managed target evidence for Runs, harness bridge state, server runtime
+state, cookbook/model-serving, and health targets. Unknown or placeholder
+targets remain visible only as explicitly unavailable/unknown, not as completed
+control surfaces.
+
+**Blocked by:** Extend Real Runs To Agent And Harness Workflows.
+
+- [ ] Run lifecycle targets are populated from real terminal-client Run state,
+      not client-local fixtures.
+- [ ] Harness bridge lifecycle targets reflect adapter/runtime capability and
+      linked real Runs where available.
+- [ ] Service logs expose real Event Envelopes for supported targets and return
+      structured unsupported/unavailable responses for targets without logs.
+- [ ] Stop and restart controls operate only on known managed targets with
+      server-side ownership/capability checks.
+- [ ] Forceful or broad actions require elevated friction and still cannot
+      bypass auth, scopes, ownership, or admin-only policy.
+
+## Replace The Static TUI With An Interactive Renderer
+
+**What to build:** `ody-term tui` opens a real full-screen interactive terminal
+UI over the existing `ody.tui.v1` state model. The text fallback may remain for
+limited terminals, but it no longer counts as completion evidence for the TUI
+ticket.
+
+**Blocked by:** Promote Event Inspection To Real Odysseus Activity; Make
+Lifecycle Logs And Controls Consume Real Run/Event State.
+
+- [ ] The TUI renders focused Live, REPL, Browse/tree, and Inspect views in a
+      full-screen terminal renderer.
+- [ ] Live view consumes the same real Event Envelope, Session, Run, Lifecycle
+      Target, and capability state as CLI commands.
+- [ ] Keyboard navigation and control paths are verified in an interactive
+      terminal harness.
+- [ ] Mouse selection/control paths are verified where the terminal backend
+      supports mouse input.
+- [ ] The existing text renderer is documented and tested only as fallback, not
+      as the primary interactive TUI.
+
+## Retire Local Run-State Fixtures From Production Commands
+
+**What to build:** Production `ody-term` commands no longer report successful
+Run behavior from client-local JSON fixtures. Any local run state that remains
+is explicitly test-only, diagnostic-only, or runtime metadata that does not
+claim to be the source of truth for Odysseus execution.
+
+**Blocked by:** Extend Real Runs To Agent And Harness Workflows; Replace The
+Static TUI With An Interactive Renderer.
+
+- [ ] Production Run commands use the terminal-client API source of truth for
+      start, list, status, attach, and stop.
+- [ ] Local JSON run fixtures are removed from production success paths or
+      renamed/documented as diagnostic/test-only state.
+- [ ] Tests cover the absence of fake-success behavior when the backend/API path
+      is unavailable.
+- [ ] Docs and examples no longer demonstrate local-fixture-backed Run behavior
+      as if it were production behavior.
+
+## Final Contract Audit And Docs Refresh
+
+**What to build:** The wayfinder map, `docs/ody-term.md`, and implementation
+tickets are reconciled with actual behavior. Every completed checkbox has
+corresponding integration evidence, and remaining scaffold/prototype behavior is
+explicitly labelled open.
+
+**Blocked by:** Retire Local Run-State Fixtures From Production Commands; Make
+Lifecycle Logs And Controls Consume Real Run/Event State.
+
+- [ ] All Terminal Client tickets are reviewed against the implementation
+      evidence gates.
+- [ ] `docs/ody-term.md` describes only behavior that works, with unfinished
+      behavior clearly labelled as open work.
+- [ ] The wayfinder map points to the production recovery tickets and no longer
+      implies the real API/TUI requirements are complete.
+- [ ] Focused and full verification commands are recorded with the final status.

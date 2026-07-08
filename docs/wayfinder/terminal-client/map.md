@@ -36,6 +36,7 @@ A concrete architecture/spec for a non-graphical Odysseus Terminal Client that s
 - [Decide Odysseus-Driven Self-Improvement Path](tickets/010-decide-odysseus-driven-self-improvement-path.md) — treat self-improvement as future orchestration over ordinary `ody-term` run/event/service/profile/auth primitives rather than a special v1 command family or bypass path.
 - [Terminal Client V1 Spec](tickets/011-terminal-client-v1-spec.md) — ready-for-agent consolidated product/API contract for implementing `ody-term` from the resolved wayfinder decisions.
 - [Terminal Client V1 Implementation Tickets](tickets.md) — ready-for-agent tracer-bullet implementation sequence, starting with internal and external technology surveys.
+- [Terminal Client Implementation Review](implementation-review.md) — post-implementation review of scaffold-vs-production gaps; use the Production Recovery tickets and Implementation Evidence Gates in `tickets.md` before marking further implementation work complete.
 
 ## Not yet specified
 

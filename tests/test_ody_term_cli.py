@@ -36,6 +36,7 @@ def isolated_term_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("ODY_TERM_RUNTIME", str(tmp_path / "runtime.json"))
     monkeypatch.setenv("ODY_TERM_RUNS", str(tmp_path / "runs.json"))
     monkeypatch.setenv("ODY_TERM_SECRETS", str(tmp_path / "secrets.json"))
+    monkeypatch.setenv("ODY_TERM_SECRET_BACKEND", "file")
     monkeypatch.setattr(ody_term, "COOKBOOK_STATE_FILE", str(tmp_path / "cookbook_state.json"))
     monkeypatch.delenv("ODY_TERM_URL", raising=False)
     monkeypatch.delenv("ODYSSEUS_URL", raising=False)
@@ -602,6 +603,26 @@ def test_auth_login_stores_token_in_visible_file_fallback_without_printing_secre
     assert "ody_test_secret" not in stdout
 
 
+def test_auth_login_uses_keychain_when_available(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stored: dict[str, str] = {}
+    monkeypatch.setenv("ODY_TERM_SECRET_BACKEND", "auto")
+    monkeypatch.setattr(ody_term, "_keychain_available", lambda: True)
+    monkeypatch.setattr(ody_term, "_store_os_secret", lambda ref, token: stored.setdefault(ref, token) == token)
+    monkeypatch.setattr(ody_term, "_load_os_secret", lambda ref: stored.get(ref))
+
+    exit_code, stdout, stderr = run_cli(["auth", "login", "--token", "ody_keychain_secret", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    auth = json.loads(stdout)["data"]["auth"]
+    assert auth["token"]["ref"] == "keychain:ody-term/default"
+    assert auth["token"]["storage"]["mode"] == "keychain"
+    assert auth["token"]["storage"]["visible_weaker_fallback"] is False
+    assert "ody_keychain_secret" not in stdout
+
+
 def test_auth_capabilities_reports_token_facts_without_trusting_local_policy(
     isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -647,6 +668,22 @@ def test_confirmation_gates_do_not_bypass_missing_capability(isolated_term_state
     error = json.loads(stderr)["error"]
     assert error["code"] == "capability_denied"
     assert "run:stop" in error["message"]
+
+
+def test_yolo_satisfies_ordinary_confirmation(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    _, stdout, _ = run_cli(["run", "start", "--kind", "agent", "--format=json"])
+    run_id = json.loads(stdout)["data"]["run"]["run_id"]
+
+    exit_code, stdout, stderr = run_cli(["run", "stop", run_id, "--yolo", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    data = json.loads(stdout)["data"]
+    assert data["confirmation"]["satisfied_by"] == "--yolo"
+    assert data["run"]["status"] == "stopped"
 
 
 def test_run_start_creates_distinct_chat_run_for_new_session(
