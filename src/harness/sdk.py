@@ -7,7 +7,6 @@ import os
 import shlex
 import time
 import uuid
-from collections import namedtuple
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterable, List, Optional, Protocol
 
@@ -174,10 +173,10 @@ class OdysseusToolBroker:
         self._tool_names = {str(name) for name in tool_names or [] if str(name).strip()}
 
     def list_tools(self) -> List[HarnessToolDefinition]:
-        from src.agent_tools import FUNCTION_TOOL_SCHEMAS
+        from src.tools.registry import get_tool_registry
 
         tools: List[HarnessToolDefinition] = []
-        for schema in FUNCTION_TOOL_SCHEMAS:
+        for schema in get_tool_registry().openai_function_schemas():
             try:
                 definition = HarnessToolDefinition.from_openai_function_schema(schema)
             except ValueError:
@@ -197,12 +196,17 @@ class OdysseusToolBroker:
         disabled_tools: Optional[set[str]] = None,
         progress_cb: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> HarnessToolResult:
-        from src.tool_execution import execute_tool_block
+        from src.tool_execution import execute_tool_invocation
+        from src.tools.model import ToolInvocation
 
-        ToolBlock = namedtuple("ToolBlock", ["tool_type", "content"])
-        content = json.dumps(call.arguments or {}, ensure_ascii=False)
-        desc, result = await execute_tool_block(
-            ToolBlock(call.name, content),
+        desc, result = await execute_tool_invocation(
+            ToolInvocation(
+                name=call.name,
+                arguments=call.arguments or {},
+                call_id=call.id,
+                source="pi",
+                raw=call.raw,
+            ),
             session_id=session_id,
             owner=owner,
             workspace=workspace,

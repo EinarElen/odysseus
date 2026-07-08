@@ -33,12 +33,12 @@ from src.agent_tools import (
     format_tool_result,
     set_active_document,
     set_active_model,
-    function_call_to_tool_block,
     FUNCTION_TOOL_SCHEMAS,
     TOOL_TAGS,
     ToolBlock,
     MAX_AGENT_ROUNDS,
 )
+from src.tools.registry import native_call_to_tool_block
 
 logger = logging.getLogger(__name__)
 
@@ -2222,7 +2222,7 @@ def _resolve_tool_blocks(
         for tc in native_tool_calls:
             tc_name = tc.get("name", "")
             tc_args = tc.get("arguments", "{}")
-            block = function_call_to_tool_block(tc_name, tc_args)
+            block = native_call_to_tool_block(tc, source="openai")
             if block:
                 tool_blocks.append(block)
                 converted_calls.append(tc)

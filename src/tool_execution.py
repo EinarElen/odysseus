@@ -578,26 +578,59 @@ async def execute_tool_block(
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
-    Thin wrapper: bind the per-turn workspace (so the path resolvers + subprocess
-    cwd confine to it) for the duration of this call, then delegate. Reset on the
-    way out so the binding never leaks to the next tool call.
+    Legacy entry point. It now routes through the canonical typed tool runtime;
+    fenced/tool-block text is just one adapter into ToolInvocation.
     """
+    from src.tools.model import ToolInvocation
+
+    return await execute_tool_invocation(
+        ToolInvocation(
+            name=getattr(block, "tool_type", ""),
+            arguments=getattr(block, "content", ""),
+            source="legacy",
+            raw=block,
+        ),
+        session_id=session_id,
+        disabled_tools=disabled_tools,
+        owner=owner,
+        progress_cb=progress_cb,
+        workspace=workspace,
+        tool_policy=tool_policy,
+    )
+
+
+async def execute_tool_invocation(
+    invocation: Any,
+    session_id: Optional[str] = None,
+    disabled_tools: Optional[set] = None,
+    owner: Optional[str] = None,
+    progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
+    workspace: Optional[str] = None,
+    tool_policy: Optional[Any] = None,
+) -> Tuple[str, Dict]:
+    """Execute a canonical typed tool invocation."""
     token = _active_workspace.set(workspace or None)
     try:
-        output = await _execute_tool_block_impl(
-            block,
-            session_id=session_id,
-            disabled_tools=disabled_tools,
-            owner=owner,
-            progress_cb=progress_cb,
-            tool_policy=tool_policy,
+        from src.tools.model import ToolContext
+        from src.tools.registry import get_tool_registry
+
+        record = await get_tool_registry().invoke(
+            invocation,
+            ToolContext(
+                session_id=session_id,
+                owner=owner,
+                workspace=workspace,
+                disabled_tools=disabled_tools,
+                tool_policy=tool_policy,
+                progress_cb=progress_cb,
+            ),
         )
-        return output
+        return record.description, record.result
     finally:
         _active_workspace.reset(token)
 
 
-async def _execute_tool_block_impl(
+async def _execute_legacy_tool_block_impl(
     block: Any,
     session_id: Optional[str] = None,
     disabled_tools: Optional[set] = None,
