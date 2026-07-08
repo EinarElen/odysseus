@@ -19,8 +19,9 @@ from pathlib import Path
 from typing import TextIO, TypedDict, cast
 
 try:
-    from src.constants import ODY_TERM_RUNS_FILE, ODY_TERM_SECRETS_FILE
+    from src.constants import COOKBOOK_STATE_FILE, ODY_TERM_RUNS_FILE, ODY_TERM_SECRETS_FILE
 except Exception:  # pragma: no cover - keeps standalone ody_term packaging usable.
+    COOKBOOK_STATE_FILE = ""
     ODY_TERM_RUNS_FILE = ""
     ODY_TERM_SECRETS_FILE = ""
 
@@ -1187,6 +1188,387 @@ def _inspect_events(request: CommandRequest) -> CommandResponse:
     )
 
 
+def _static_lifecycle_targets() -> list[dict[str, object]]:
+    return [
+        {
+            "id": "model-serving",
+            "kind": "model-serving",
+            "label": "Model serving",
+            "status": "unknown",
+            "ownership": {"managed_by": "odysseus", "source": "configured-endpoints"},
+            "source": {"type": "configured-endpoints"},
+            "last_activity": None,
+            "capabilities": {"logs": False, "stop": False, "restart": False, "force": False},
+            "raw": {"note": "HTTP/API-first visibility placeholder for configured model-serving endpoints"},
+        },
+        {
+            "id": "mcp",
+            "kind": "mcp",
+            "label": "MCP servers",
+            "status": "unknown",
+            "ownership": {"managed_by": "odysseus", "source": "builtin-mcp"},
+            "source": {"type": "builtin-mcp"},
+            "last_activity": None,
+            "capabilities": {"logs": False, "stop": False, "restart": False, "force": False},
+            "raw": {"note": "MCP lifecycle is visible as a managed target group, not a raw host process group"},
+        },
+        {
+            "id": "cookbook-serving",
+            "kind": "cookbook",
+            "label": "Cookbook serving",
+            "status": "unknown",
+            "ownership": {"managed_by": "odysseus", "source": "cookbook-lifecycle"},
+            "source": {"type": "cookbook-lifecycle"},
+            "last_activity": None,
+            "capabilities": {"logs": False, "stop": False, "restart": False, "force": False},
+            "raw": {"note": "Cookbook task lifecycle is visible as a managed target group"},
+        },
+        {
+            "id": "service-health",
+            "kind": "service-health",
+            "label": "Service health",
+            "status": "unknown",
+            "ownership": {"managed_by": "odysseus", "source": "service-health"},
+            "source": {"type": "service-health"},
+            "last_activity": None,
+            "capabilities": {"logs": False, "stop": False, "restart": False, "force": False},
+            "raw": {"note": "Supporting service health checks are inspectable but not mutable lifecycle targets"},
+        },
+    ]
+
+
+def _cookbook_task_lifecycle_targets() -> list[dict[str, object]]:
+    if not COOKBOOK_STATE_FILE:
+        return []
+    path = Path(COOKBOOK_STATE_FILE).expanduser()
+    if not path.exists():
+        return []
+    state = _load_json_object(path)
+    tasks = state.get("tasks")
+    if not isinstance(tasks, list):
+        return []
+    targets: list[dict[str, object]] = []
+    for task in tasks:
+        if not isinstance(task, dict) or task.get("type") != "serve":
+            continue
+        session_id = str(task.get("sessionId") or task.get("id") or "").strip()
+        if not session_id:
+            continue
+        status = str(task.get("status") or "unknown")
+        output = task.get("output")
+        targets.append(
+            {
+                "id": f"cookbook:{session_id}",
+                "kind": "cookbook",
+                "label": str(task.get("name") or task.get("modelId") or session_id),
+                "status": status,
+                "ownership": {
+                    "managed_by": "odysseus",
+                    "session_id": session_id,
+                    "owner": task.get("_scheduledByOwner"),
+                    "task": task.get("_scheduledByTask"),
+                    "remote_host": task.get("remoteHost"),
+                },
+                "source": {"type": "cookbook-state", "path": str(path), "session_id": session_id},
+                "last_activity": task.get("_lastStatusFlipAt") or task.get("ts"),
+                "capabilities": {
+                    "logs": isinstance(output, str) and bool(output),
+                    "stop": False,
+                    "restart": False,
+                    "force": False,
+                },
+                "raw": {"task": dict(task)},
+            }
+        )
+    return targets
+
+
+def _server_lifecycle_target() -> dict[str, object]:
+    server = _server_status_payload()
+    raw_runtime_state = server.get("runtime_state")
+    runtime_state = cast(dict[str, object], raw_runtime_state) if isinstance(raw_runtime_state, dict) else None
+    raw = {"runtime_state": runtime_state, "server": server}
+    ownership = server.get("ownership") if isinstance(server.get("ownership"), dict) else {}
+    return {
+        "id": "main-server",
+        "kind": "server",
+        "label": "Main Odysseus server",
+        "status": server.get("status"),
+        "ownership": ownership,
+        "source": {"type": "local-server-runtime", "url": runtime_state.get("url") if runtime_state else None},
+        "last_activity": runtime_state.get("started_at") if runtime_state else None,
+        "capabilities": {
+            "logs": True,
+            "stop": server.get("status") == "running",
+            "restart": server.get("status") == "running",
+            "force": False,
+        },
+        "raw": raw,
+    }
+
+
+def _run_lifecycle_targets() -> list[dict[str, object]]:
+    state = _load_run_state()
+    targets: list[dict[str, object]] = []
+    for run in _runs_payload(state).values():
+        run_id = str(run.get("run_id") or "")
+        if not run_id:
+            continue
+        status = str(run.get("status") or "unknown")
+        targets.append(
+            {
+                "id": f"run:{run_id}",
+                "kind": "run",
+                "label": f"{run.get('kind', 'run')} Run {run_id}",
+                "status": status,
+                "ownership": {
+                    "managed_by": "odysseus",
+                    "session_id": run.get("session_id"),
+                    "run_id": run_id,
+                    "harness_session_id": run.get("harness_session_id"),
+                },
+                "source": {
+                    "type": "run-state",
+                    "run_kind": run.get("kind"),
+                    "event_source": run.get("event_source"),
+                    "harness_adapter_id": run.get("harness_adapter_id"),
+                },
+                "last_activity": _last_activity(state, run_id),
+                "capabilities": {
+                    "logs": bool(_run_events(state, run_id)),
+                    "stop": status in RUN_ACTIVE_STATUSES,
+                    "restart": False,
+                    "force": False,
+                },
+                "raw": {"run": _run_summary(state, run)},
+            }
+        )
+    return targets
+
+
+def _harness_bridge_lifecycle_targets() -> list[dict[str, object]]:
+    state = _load_run_state()
+    active_runs_by_adapter: dict[str, list[dict[str, object]]] = {}
+    for run in _runs_payload(state).values():
+        adapter_id = run.get("harness_adapter_id")
+        if isinstance(adapter_id, str) and adapter_id:
+            active_runs_by_adapter.setdefault(adapter_id, []).append(_run_summary(state, run))
+    targets: list[dict[str, object]] = []
+    for harness in _harness_capabilities():
+        adapter_id = str(harness.get("id") or "")
+        if not adapter_id:
+            continue
+        linked_runs = active_runs_by_adapter.get(adapter_id, [])
+        running = any(str(run.get("status")) in RUN_ACTIVE_STATUSES for run in linked_runs)
+        targets.append(
+            {
+                "id": f"harness-bridge:{adapter_id}",
+                "kind": "harness-bridge",
+                "label": f"{harness.get('label') or adapter_id} harness bridge",
+                "status": "running" if running else "available",
+                "ownership": {"managed_by": "odysseus", "adapter_id": adapter_id},
+                "source": {"type": "harness-registry", "adapter_id": adapter_id},
+                "last_activity": linked_runs[0].get("last_activity") if linked_runs else None,
+                "capabilities": {"logs": bool(linked_runs), "stop": False, "restart": False, "force": False},
+                "raw": {"harness": harness, "runs": linked_runs},
+            }
+        )
+    return targets
+
+
+def _lifecycle_targets() -> list[dict[str, object]]:
+    targets = [_server_lifecycle_target()]
+    targets.extend(_run_lifecycle_targets())
+    targets.extend(_harness_bridge_lifecycle_targets())
+    targets.extend(_cookbook_task_lifecycle_targets())
+    targets.extend(_static_lifecycle_targets())
+    return targets
+
+
+def _lifecycle_target(target_id: str) -> dict[str, object]:
+    for target in _lifecycle_targets():
+        if target.get("id") == target_id:
+            return target
+    raise CommandError("unknown_lifecycle_target", f"unknown managed lifecycle target: {target_id}", exit_code=1)
+
+
+def _unsupported_lifecycle_action(target: dict[str, object], action: str) -> CommandError:
+    return CommandError(
+        "unsupported_lifecycle_action",
+        f"{target.get('id')} does not support service {action}",
+        exit_code=1,
+        details={"target": target.get("id"), "action": action, "supported": False},
+    )
+
+
+def _service_logs(request: CommandRequest) -> CommandResponse:
+    _require_capability("service:read", request)
+    options, positionals = _parse_command_options(request.args)
+    if len(positionals) != 1:
+        raise CommandError("missing_lifecycle_target", "service logs requires exactly one managed target id")
+    target = _lifecycle_target(positionals[0])
+    raw_lines = options.get("lines")
+    try:
+        lines = int(raw_lines) if isinstance(raw_lines, str) else 80
+    except ValueError as exc:
+        raise CommandError("invalid_lines", f"--lines must be an integer: {raw_lines}") from exc
+    if target["id"] == "main-server":
+        payload = _server_log_events(lines=max(lines, 0), cursor=None)
+        events = cast(list[dict[str, object]], payload["events"])
+        return CommandResponse(
+            ok=True,
+            command=["service", "logs"],
+            message=f"{len(events)} Lifecycle Target log Event Envelope(s)",
+            data={"target": target, "events": events, "cursor": payload["cursor"], "source": payload["source"]},
+            raw=[event.get("raw") for event in events],
+        )
+    if str(target.get("id", "")).startswith("run:"):
+        run_id = str(target["id"]).split(":", 1)[1]
+        state = _load_run_state()
+        events = _run_events(state, run_id)[-max(lines, 0) :]
+        return CommandResponse(
+            ok=True,
+            command=["service", "logs"],
+            message=f"{len(events)} Run lifecycle Event Envelope(s)",
+            data={"target": target, "events": events, "cursor": {"after": None, "next": str(len(events)) if events else None, "count": len(events)}},
+            raw=[event.get("raw") for event in events],
+        )
+    if str(target.get("id", "")).startswith("cookbook:"):
+        raw_task = target.get("raw") if isinstance(target.get("raw"), dict) else {}
+        task = cast(dict[str, object], raw_task).get("task")
+        task_payload = cast(dict[str, object], task) if isinstance(task, dict) else {}
+        output = task_payload.get("output")
+        lines_payload = str(output).splitlines()[-max(lines, 0) :] if isinstance(output, str) else []
+        events = [
+            {
+                "schema": "ody.event.v1",
+                "id": f"evt_{target['id']}_log_{index + 1}",
+                "seq": index + 1,
+                "time": _utc_now(),
+                "source": "cookbook",
+                "kind": "log",
+                "level": _event_level_from_text(line),
+                "summary": _bounded_summary(line),
+                "payload": {"message": line},
+                "raw": {"transport": "cookbook-state", "type": "cookbook.output", "body": {"line": line}},
+            }
+            for index, line in enumerate(lines_payload)
+        ]
+        return CommandResponse(
+            ok=True,
+            command=["service", "logs"],
+            message=f"{len(events)} Cookbook lifecycle Event Envelope(s)",
+            data={
+                "target": target,
+                "events": events,
+                "cursor": {"after": None, "next": str(len(events)) if events else None, "count": len(events)},
+            },
+            raw=[event.get("raw") for event in events],
+        )
+    capabilities = target.get("capabilities") if isinstance(target.get("capabilities"), dict) else {}
+    if not bool(cast(dict[str, object], capabilities).get("logs")):
+        raise _unsupported_lifecycle_action(target, "logs")
+    return CommandResponse(
+        ok=True,
+        command=["service", "logs"],
+        message="No lifecycle logs available",
+        data={"target": target, "events": [], "cursor": {"after": None, "next": None, "count": 0}},
+        raw=[],
+    )
+
+
+def _stop_run_lifecycle_target(target: dict[str, object], confirmation: dict[str, object]) -> CommandResponse:
+    run_id = str(target["id"]).split(":", 1)[1]
+    state = _load_run_state()
+    run = _resolve_run_reference(state, run_id=run_id, session_id=None)
+    now = _utc_now()
+    run["status"] = "stopped"
+    run["updated_at"] = now
+    run["finished_at"] = now
+    _append_run_event(
+        state,
+        run,
+        kind="run.status",
+        level="warn",
+        summary=f"{run.get('kind', 'Run')} Run stopped by service lifecycle",
+        payload={"status": "stopped", "lifecycle_target": target["id"]},
+    )
+    _save_run_state(state)
+    stopped = _lifecycle_target(str(target["id"]))
+    return CommandResponse(
+        ok=True,
+        command=["service", "stop"],
+        message=f"Stopped lifecycle target {target['id']}",
+        data={"target": stopped, "confirmation": confirmation},
+    )
+
+
+def _stop_main_server_lifecycle_target(target: dict[str, object], confirmation: dict[str, object]) -> CommandResponse:
+    if target.get("status") != "running":
+        raise _unsupported_lifecycle_action(target, "stop")
+    state = _server_state()
+    pid = state.get("pid")
+    if state.get("repo") != str(_repo_root()) or not isinstance(state.get("command"), list):
+        raise CommandError("ambiguous_runtime_state", "runtime state ownership evidence does not match this checkout")
+    if not _process_alive(pid) or not _process_group_matches(pid, state.get("pgid")):
+        raise CommandError("ambiguous_runtime_state", "runtime state ownership evidence does not match this checkout")
+    assert isinstance(pid, int)
+    os.killpg(pid, signal.SIGTERM)
+    state["stopped_at"] = _utc_now()
+    _save_server_state(state)
+    stopped = _lifecycle_target("main-server")
+    return CommandResponse(
+        ok=True,
+        command=["service", "stop"],
+        message="Main server stop signal sent",
+        data={"target": stopped, "confirmation": confirmation},
+    )
+
+
+def _service_control(request: CommandRequest) -> CommandResponse:
+    options, positionals = _parse_command_options(request.args)
+    if len(positionals) != 1:
+        raise CommandError("missing_lifecycle_target", f"service {request.verb} requires exactly one managed target id")
+    target_id = positionals[0]
+    if target_id.startswith("pid:"):
+        raise CommandError(
+            "arbitrary_process_unsupported",
+            "service commands require managed lifecycle target ids, not raw host PIDs",
+        )
+    capability = "service:kill" if options.get("force") else "service:restart"
+    confirmation = _require_capability(capability, request)
+    target = _lifecycle_target(target_id)
+    capabilities = target.get("capabilities") if isinstance(target.get("capabilities"), dict) else {}
+    target_capabilities = cast(dict[str, object], capabilities)
+    if options.get("force") and not bool(target_capabilities.get("force")):
+        raise _unsupported_lifecycle_action(target, "force")
+    verb = str(request.verb)
+    if not bool(target_capabilities.get("stop" if verb == "stop" else "restart")):
+        raise _unsupported_lifecycle_action(target, verb)
+    if verb == "stop" and target_id == "main-server":
+        return _stop_main_server_lifecycle_target(target, confirmation)
+    if verb == "stop" and target_id.startswith("run:"):
+        return _stop_run_lifecycle_target(target, confirmation)
+    if verb == "restart" and target_id == "main-server":
+        if options.get("dry_run"):
+            return CommandResponse(
+                ok=True,
+                command=["service", "restart"],
+                message="Main server restart plan",
+                data={"target": target, "confirmation": confirmation, "delegates_to": "uv run ody launch select"},
+            )
+        if target.get("status") == "running":
+            _stop_main_server_lifecycle_target(target, confirmation)
+        started = _start_server(host="127.0.0.1", port=None, dry_run=False)
+        return CommandResponse(
+            ok=True,
+            command=["service", "restart"],
+            message="Main server restart delegated",
+            data={"target": _lifecycle_target("main-server"), "confirmation": confirmation, "server": started.data["server"]},
+        )
+    raise _unsupported_lifecycle_action(target, verb)
+
+
 def _start_server(*, host: str, port: str | None, dry_run: bool) -> CommandResponse:
     launcher = _launcher_command(host=host, port=port, dry_run=True)
     command = ["server", "start"]
@@ -1444,23 +1826,34 @@ def execute(request: CommandRequest) -> CommandResponse:
         return _harness_stop(request)
     if request.domain == "harness" and request.verb == "attach":
         return _run_attach(request)
-    if request.domain == "service" and request.verb in {"stop", "restart"}:
+    if request.domain == "service" and request.verb == "list":
+        _require_capability("service:read", request)
         options, positionals = _parse_command_options(request.args)
-        if not positionals:
-            raise CommandError("missing_lifecycle_target", f"service {request.verb} requires a managed target id")
-        if any(target.startswith("pid:") for target in positionals):
-            raise CommandError(
-                "arbitrary_process_unsupported",
-                "service commands require managed lifecycle target ids, not raw host PIDs",
-            )
-        capability = "service:kill" if options.get("force") else "service:restart"
-        confirmation = _require_capability(capability, request)
+        if positionals:
+            raise CommandError("unexpected_service_args", f"unexpected service list args: {' '.join(positionals)}")
+        targets = _lifecycle_targets()
         return CommandResponse(
-            ok=False,
+            ok=True,
             command=command,
-            message=f"service {request.verb} is capability-gated but lifecycle execution is implemented by a later ticket",
-            data={"implemented": False, "args": positionals, "confirmation": confirmation},
+            message=f"{len(targets)} Lifecycle Target(s)",
+            data={"targets": targets},
         )
+    if request.domain == "service" and request.verb == "status":
+        _require_capability("service:read", request)
+        options, positionals = _parse_command_options(request.args)
+        if len(positionals) != 1:
+            raise CommandError("missing_lifecycle_target", "service status requires exactly one managed target id")
+        target = _lifecycle_target(positionals[0])
+        return CommandResponse(
+            ok=True,
+            command=command,
+            message=f"Lifecycle target {target['id']} is {target['status']}",
+            data={"target": target},
+        )
+    if request.domain == "service" and request.verb == "logs":
+        return _service_logs(request)
+    if request.domain == "service" and request.verb in {"stop", "restart"}:
+        return _service_control(request)
     if request.domain == "server" and request.verb == "status":
         status = _server_status_payload()
         return CommandResponse(

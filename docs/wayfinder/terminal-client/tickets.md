@@ -118,12 +118,12 @@ Work the **frontier**: any ticket whose blockers are all done. The two survey ti
 
 **Blocked by:** Add Terminal Client Auth And Capability Reporting; Introduce Event Envelope Inspection Over Existing Streams.
 
-- [ ] Lifecycle target inventory includes managed server, Run, harness bridge, model-serving, MCP, and supporting service-health targets where available.
-- [ ] Each target reports status, ownership/source metadata, last activity where available, and action capability flags.
-- [ ] Logs are exposed through Event Envelopes with raw/debug access where useful.
-- [ ] Stop and restart are available only for known managed targets with bounded semantics.
-- [ ] Forceful or broad operations require elevated friction and never bypass auth, scope, ownership, or admin-only policy.
-- [ ] Arbitrary host process mutation is not exposed as an ordinary service command.
+- [x] Lifecycle target inventory includes managed server, Run, harness bridge, model-serving, MCP, and supporting service-health targets where available.
+- [x] Each target reports status, ownership/source metadata, last activity where available, and action capability flags.
+- [x] Logs are exposed through Event Envelopes with raw/debug access where useful.
+- [x] Stop and restart are available only for known managed targets with bounded semantics.
+- [x] Forceful or broad operations require elevated friction and never bypass auth, scope, ownership, or admin-only policy.
+- [x] Arbitrary host process mutation is not exposed as an ordinary service command.
 
 ## Build Shared Live TUI MVP
 

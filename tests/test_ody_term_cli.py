@@ -36,6 +36,7 @@ def isolated_term_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("ODY_TERM_RUNTIME", str(tmp_path / "runtime.json"))
     monkeypatch.setenv("ODY_TERM_RUNS", str(tmp_path / "runs.json"))
     monkeypatch.setenv("ODY_TERM_SECRETS", str(tmp_path / "secrets.json"))
+    monkeypatch.setattr(ody_term, "COOKBOOK_STATE_FILE", str(tmp_path / "cookbook_state.json"))
     monkeypatch.delenv("ODY_TERM_URL", raising=False)
     monkeypatch.delenv("ODYSSEUS_URL", raising=False)
     monkeypatch.delenv("ODY_TERM_TOKEN", raising=False)
@@ -148,13 +149,13 @@ def test_jsonl_format_emits_one_object_per_line() -> None:
 
 
 def test_registered_but_unimplemented_commands_have_structured_baseline() -> None:
-    exit_code, stdout, stderr = run_cli(["service", "list"])
+    exit_code, stdout, stderr = run_cli(["session", "list"])
 
     assert exit_code == 1
     assert stderr == ""
     payload = json.loads(stdout)
     assert payload["ok"] is False
-    assert payload["command"] == ["service", "list"]
+    assert payload["command"] == ["session", "list"]
     assert payload["data"]["implemented"] is False
 
 
@@ -808,6 +809,241 @@ def test_service_control_does_not_treat_pid_as_an_elevated_target(
     assert exit_code == 2
     assert stdout == ""
     assert json.loads(stderr)["error"]["code"] == "arbitrary_process_unsupported"
+
+
+def test_service_list_includes_managed_lifecycle_targets_with_capability_flags(
+    isolated_term_state: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    log_path = tmp_path / "server.log"
+    log_path.write_text("booted\n", encoding="utf-8")
+    (tmp_path / "runtime.json").write_text(
+        json.dumps(
+            {
+                "kind": "ody-term-local-server",
+                "pid": 4242,
+                "pgid": 4242,
+                "repo": str(Path(__file__).resolve().parents[1]),
+                "command": ["uv", "run", "ody"],
+                "url": "http://127.0.0.1:7860",
+                "log_path": str(log_path),
+                "started_at": "2026-07-08T12:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ody_term, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(ody_term, "_process_group_matches", lambda pid, pgid: True)
+    (tmp_path / "cookbook_state.json").write_text(
+        json.dumps(
+            {
+                "tasks": [
+                    {
+                        "id": "cookbook-session-1",
+                        "sessionId": "cookbook-session-1",
+                        "name": "scheduled llama",
+                        "type": "serve",
+                        "status": "running",
+                        "ts": 1770000000000,
+                        "output": "cookbook booted\nWARNING warming up\n",
+                        "_scheduledByOwner": "alice",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    run_cli(["run", "start", "--kind", "harness", "--harness-adapter", "pi", "--format=json"])
+
+    exit_code, stdout, stderr = run_cli(["service", "list", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    targets = json.loads(stdout)["data"]["targets"]
+    by_id = {target["id"]: target for target in targets}
+    assert by_id["main-server"]["kind"] == "server"
+    assert by_id["main-server"]["status"] == "running"
+    assert by_id["main-server"]["capabilities"] == {
+        "logs": True,
+        "stop": True,
+        "restart": True,
+        "force": False,
+    }
+    assert by_id["harness-bridge:pi"]["kind"] == "harness-bridge"
+    assert by_id["model-serving"]["status"] == "unknown"
+    assert by_id["mcp"]["kind"] == "mcp"
+    assert by_id["cookbook-serving"]["kind"] == "cookbook"
+    assert by_id["cookbook:cookbook-session-1"]["status"] == "running"
+    assert by_id["cookbook:cookbook-session-1"]["last_activity"] == 1770000000000
+    assert by_id["cookbook:cookbook-session-1"]["capabilities"]["logs"] is True
+    assert any(target["kind"] == "run" and target["source"]["run_kind"] == "harness" for target in targets)
+
+
+def test_service_status_preserves_raw_managed_target_details(
+    isolated_term_state: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    (tmp_path / "runtime.json").write_text(
+        json.dumps(
+            {
+                "kind": "ody-term-local-server",
+                "pid": 4242,
+                "pgid": 4242,
+                "repo": str(Path(__file__).resolve().parents[1]),
+                "command": ["uv", "run", "ody"],
+                "url": "http://127.0.0.1:7860",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ody_term, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(ody_term, "_process_group_matches", lambda pid, pgid: True)
+
+    exit_code, stdout, stderr = run_cli(["service", "status", "main-server", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    target = json.loads(stdout)["data"]["target"]
+    assert target["id"] == "main-server"
+    assert target["status"] == "running"
+    assert target["source"]["type"] == "local-server-runtime"
+    assert target["raw"]["runtime_state"]["pid"] == 4242
+
+
+def test_service_logs_are_event_envelopes_for_managed_targets(
+    isolated_term_state: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    log_path = tmp_path / "server.log"
+    log_path.write_text("one\nERROR failed\n", encoding="utf-8")
+    (tmp_path / "runtime.json").write_text(
+        json.dumps(
+            {
+                "kind": "ody-term-local-server",
+                "pid": 99999999,
+                "repo": str(Path(__file__).resolve().parents[1]),
+                "command": ["uv", "run", "ody"],
+                "url": "http://127.0.0.1:7860",
+                "log_path": str(log_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code, stdout, stderr = run_cli(["service", "logs", "main-server", "--format=jsonl"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    events = [json.loads(line) for line in stdout.splitlines()]
+    assert [event["source"] for event in events] == ["server", "server"]
+    assert events[1]["kind"] == "log"
+    assert events[1]["level"] == "error"
+    assert events[1]["payload"] == {"message": "ERROR failed"}
+
+
+def test_service_logs_exposes_cookbook_task_output_as_event_envelopes(
+    isolated_term_state: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    (tmp_path / "cookbook_state.json").write_text(
+        json.dumps(
+            {
+                "tasks": [
+                    {
+                        "id": "cookbook-session-1",
+                        "sessionId": "cookbook-session-1",
+                        "name": "scheduled llama",
+                        "type": "serve",
+                        "status": "running",
+                        "output": "started\nERROR failed warmup\n",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code, stdout, stderr = run_cli(["service", "logs", "cookbook:cookbook-session-1", "--format=jsonl"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    events = [json.loads(line) for line in stdout.splitlines()]
+    assert [event["source"] for event in events] == ["cookbook", "cookbook"]
+    assert events[1]["kind"] == "log"
+    assert events[1]["level"] == "error"
+    assert events[1]["payload"] == {"message": "ERROR failed warmup"}
+
+
+def test_service_stop_targets_run_lifecycle_without_host_process_mutation(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    _, stdout, _ = run_cli(["run", "start", "--kind", "agent", "--format=json"])
+    run_id = json.loads(stdout)["data"]["run"]["run_id"]
+
+    exit_code, stdout, stderr = run_cli(["service", "stop", f"run:{run_id}", "--yes", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    data = json.loads(stdout)["data"]
+    assert data["target"]["id"] == f"run:{run_id}"
+    assert data["target"]["status"] == "stopped"
+    assert data["confirmation"]["satisfied_by"] == "--yes"
+
+
+def test_service_force_requires_target_force_capability_after_admin_gate(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    monkeypatch.setattr(
+        ody_term,
+        "_capability_status",
+        lambda capability, auth: {
+            "resource": capability.split(":", 1)[0],
+            "action": capability.split(":", 1)[1],
+            "allowed": True,
+            "requires_confirmation": True,
+            "requires_yolo": capability == "service:kill",
+            "admin_only": capability == "service:kill",
+            "reason": None,
+        },
+    )
+
+    exit_code, stdout, stderr = run_cli(["service", "stop", "main-server", "--force", "--yolo", "--format=json"])
+
+    assert exit_code == 1
+    assert stdout == ""
+    error = json.loads(stderr)["error"]
+    assert error["code"] == "unsupported_lifecycle_action"
+    assert error["details"] == {"target": "main-server", "action": "force", "supported": False}
+
+
+def test_service_restart_is_bounded_to_known_restartable_targets(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+
+    exit_code, stdout, stderr = run_cli(["service", "restart", "mcp", "--yes", "--format=json"])
+
+    assert exit_code == 1
+    assert stdout == ""
+    error = json.loads(stderr)["error"]
+    assert error["code"] == "unsupported_lifecycle_action"
+    assert error["details"] == {"target": "mcp", "action": "restart", "supported": False}
+
+
+def test_service_restart_does_not_bootstrap_absent_main_server(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+
+    exit_code, stdout, stderr = run_cli(["service", "restart", "main-server", "--yes", "--format=json"])
+
+    assert exit_code == 1
+    assert stdout == ""
+    error = json.loads(stderr)["error"]
+    assert error["code"] == "unsupported_lifecycle_action"
+    assert error["details"] == {"target": "main-server", "action": "restart", "supported": False}
 
 
 def test_inspect_events_json_normalizes_server_logs_as_event_envelopes(
