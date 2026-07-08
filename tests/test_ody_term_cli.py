@@ -34,6 +34,7 @@ def run_cli(argv: list[str], *, is_tty: bool = False) -> tuple[int, str, str]:
 def isolated_term_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ODY_TERM_CONFIG", str(tmp_path / "config.json"))
     monkeypatch.setenv("ODY_TERM_RUNTIME", str(tmp_path / "runtime.json"))
+    monkeypatch.setenv("ODY_TERM_RUNS", str(tmp_path / "runs.json"))
     monkeypatch.setenv("ODY_TERM_SECRETS", str(tmp_path / "secrets.json"))
     monkeypatch.delenv("ODY_TERM_URL", raising=False)
     monkeypatch.delenv("ODYSSEUS_URL", raising=False)
@@ -147,13 +148,13 @@ def test_jsonl_format_emits_one_object_per_line() -> None:
 
 
 def test_registered_but_unimplemented_commands_have_structured_baseline() -> None:
-    exit_code, stdout, stderr = run_cli(["run", "list"])
+    exit_code, stdout, stderr = run_cli(["harness", "list"])
 
     assert exit_code == 1
     assert stderr == ""
     payload = json.loads(stdout)
     assert payload["ok"] is False
-    assert payload["command"] == ["run", "list"]
+    assert payload["command"] == ["harness", "list"]
     assert payload["data"]["implemented"] is False
 
 
@@ -534,6 +535,118 @@ def test_confirmation_gates_do_not_bypass_missing_capability(isolated_term_state
     assert "run:stop" in error["message"]
 
 
+def test_run_start_creates_distinct_chat_run_for_new_session(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+
+    exit_code, stdout, stderr = run_cli(["run", "start", "--kind", "chat", "--message", "hello", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    data = json.loads(stdout)["data"]
+    run = data["run"]
+    assert run["kind"] == "chat"
+    assert run["status"] == "running"
+    assert run["run_id"].startswith("run_")
+    assert run["session_id"].startswith("ses_")
+    assert run["run_id"] != run["session_id"]
+    assert run["events_available"] is True
+    assert data["cursor"] == {"after": None, "next": "1", "count": 1}
+
+
+def test_run_start_can_target_existing_session_and_status_lists_recent_runs(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+
+    run_cli(["run", "start", "--kind", "chat", "--session-id", "ses_existing", "--message", "first", "--format=json"])
+    exit_code, stdout, stderr = run_cli(["run", "list", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    runs = json.loads(stdout)["data"]["runs"]
+    assert len(runs) == 1
+    assert runs[0]["session_id"] == "ses_existing"
+    assert runs[0]["kind"] == "chat"
+    assert runs[0]["last_activity"]["kind"] == "run.status"
+    assert runs[0]["replay_available"] is True
+    assert runs[0]["cursor_available"] is True
+
+    run_id = runs[0]["run_id"]
+    exit_code, stdout, stderr = run_cli(["run", "status", run_id, "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    status = json.loads(stdout)["data"]["run"]
+    assert status["run_id"] == run_id
+    assert status["session_id"] == "ses_existing"
+    assert status["heartbeat"]["summary"] == "chat Run started"
+
+
+def test_run_attach_emits_chat_run_event_envelopes_as_jsonl(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    _, stdout, _ = run_cli(["run", "start", "--kind", "chat", "--session-id", "ses_chat", "--message", "hi"])
+    run_id = json.loads(stdout)["data"]["run"]["run_id"]
+
+    exit_code, stdout, stderr = run_cli(["run", "attach", run_id, "--format=jsonl"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    events = [json.loads(line) for line in stdout.splitlines()]
+    assert len(events) == 1
+    assert events[0]["schema"] == "ody.event.v1"
+    assert events[0]["source"] == "chat"
+    assert events[0]["kind"] == "run.status"
+    assert events[0]["session_id"] == "ses_chat"
+    assert events[0]["run_id"] == run_id
+    assert events[0]["payload"]["message"] == "hi"
+
+
+def test_run_attach_by_session_fails_when_multiple_active_runs_match(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    run_cli(["run", "start", "--session-id", "ses_ambiguous", "--message", "one", "--format=json"])
+    run_cli(["run", "start", "--session-id", "ses_ambiguous", "--message", "two", "--format=json"])
+
+    exit_code, stdout, stderr = run_cli(["run", "attach", "--session-id", "ses_ambiguous", "--format=json"])
+
+    assert exit_code == 2
+    assert stdout == ""
+    error = json.loads(stderr)["error"]
+    assert error["code"] == "ambiguous_run"
+    assert "ses_ambiguous" in error["message"]
+    assert error["details"]["session_id"] == "ses_ambiguous"
+    assert len(error["details"]["choices"]) == 2
+    assert {choice["status"] for choice in error["details"]["choices"]} == {"running"}
+
+
+def test_run_stop_targets_run_lifecycle_and_updates_status(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    _, stdout, _ = run_cli(["run", "start", "--session-id", "ses_stop", "--message", "stop me", "--format=json"])
+    run_id = json.loads(stdout)["data"]["run"]["run_id"]
+
+    exit_code, stdout, stderr = run_cli(["run", "stop", run_id, "--yes", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    stopped = json.loads(stdout)["data"]["run"]
+    assert stopped["status"] == "stopped"
+    assert stopped["run_id"] == run_id
+    assert stopped["session_id"] == "ses_stop"
+
+    exit_code, stdout, stderr = run_cli(["run", "status", run_id, "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert json.loads(stdout)["data"]["run"]["status"] == "stopped"
+
+
 def test_ordinary_confirmation_requires_yes_when_capability_allows(
     isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -550,10 +663,12 @@ def test_ordinary_confirmation_accepts_yes_when_capability_allows(
     isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
+    _, stdout, _ = run_cli(["run", "start", "--message", "confirm stop", "--format=json"])
+    run_id = json.loads(stdout)["data"]["run"]["run_id"]
 
-    exit_code, stdout, stderr = run_cli(["run", "stop", "run-1", "--yes", "--format=json"])
+    exit_code, stdout, stderr = run_cli(["run", "stop", run_id, "--yes", "--format=json"])
 
-    assert exit_code == 1
+    assert exit_code == 0
     assert stderr == ""
     assert json.loads(stdout)["data"]["confirmation"]["satisfied_by"] == "--yes"
 

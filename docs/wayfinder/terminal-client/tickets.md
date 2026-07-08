@@ -93,12 +93,12 @@ Work the **frontier**: any ticket whose blockers are all done. The two survey ti
 
 **Blocked by:** Introduce Event Envelope Inspection Over Existing Streams.
 
-- [ ] A chat Run has distinct Run identity linked to durable Session identity.
-- [ ] Starting a Run can create a new Session or target an existing Session.
-- [ ] Listing and status show active/recent Runs with status, timestamps, heartbeat/activity summary, and event availability.
-- [ ] Attach follows the Run Event Envelope stream.
-- [ ] Attach-by-Session fails with a structured ambiguity response when more than one active Run can match.
-- [ ] Stop targets Run lifecycle rather than hiding cancellation under Session commands.
+- [x] A chat Run has distinct Run identity linked to durable Session identity.
+- [x] Starting a Run can create a new Session or target an existing Session.
+- [x] Listing and status show active/recent Runs with status, timestamps, heartbeat/activity summary, and event availability.
+- [x] Attach follows the Run Event Envelope stream.
+- [x] Attach-by-Session fails with a structured ambiguity response when more than one active Run can match.
+- [x] Stop targets Run lifecycle rather than hiding cancellation under Session commands.
 
 ## Extend Run Surface To Agent And Harness Workflows
 

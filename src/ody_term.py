@@ -12,14 +12,16 @@ import os
 import signal
 import subprocess
 import sys
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO, TypedDict, cast
 
 try:
-    from src.constants import ODY_TERM_SECRETS_FILE
+    from src.constants import ODY_TERM_RUNS_FILE, ODY_TERM_SECRETS_FILE
 except Exception:  # pragma: no cover - keeps standalone ody_term packaging usable.
+    ODY_TERM_RUNS_FILE = ""
     ODY_TERM_SECRETS_FILE = ""
 
 
@@ -75,11 +77,19 @@ COMMANDS: dict[str, tuple[str, ...]] = {
 
 
 class CommandError(Exception):
-    def __init__(self, code: str, message: str, *, exit_code: int = 2) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        exit_code: int = 2,
+        details: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.exit_code = exit_code
+        self.details = details
 
 
 @dataclass
@@ -159,6 +169,15 @@ def _runtime_state_path() -> Path:
     return Path.home() / ".local" / "state" / "odysseus" / "ody-term-runtime.json"
 
 
+def _run_state_path() -> Path:
+    override = os.getenv("ODY_TERM_RUNS", "").strip()
+    if override:
+        return Path(override).expanduser()
+    if ODY_TERM_RUNS_FILE:
+        return Path(ODY_TERM_RUNS_FILE).expanduser()
+    return _runtime_state_path().with_name("ody-term-runs.json")
+
+
 def _secrets_path() -> Path:
     override = os.getenv("ODY_TERM_SECRETS", "").strip()
     if override:
@@ -224,6 +243,8 @@ def _parse_command_options(args: list[str]) -> tuple[dict[str, str | bool], list
         "--span-id",
         "--parent-id",
         "--tag",
+        "--message",
+        "--status",
     }
     bool_flags = {"--default", "--dry-run", "--force"}
     while index < len(args):
@@ -714,6 +735,286 @@ def _filter_events(
     return filtered
 
 
+RUN_ACTIVE_STATUSES = {"queued", "starting", "running", "waiting", "stopping"}
+
+
+def _empty_run_state() -> dict[str, object]:
+    return {"version": 1, "runs": {}, "events": {}}
+
+
+def _load_run_state() -> dict[str, object]:
+    state = _empty_run_state()
+    state.update(_load_json_object(_run_state_path()))
+    if not isinstance(state.get("runs"), dict):
+        raise CommandError("corrupt_run_state", "Terminal Client run state runs must be an object")
+    if not isinstance(state.get("events"), dict):
+        raise CommandError("corrupt_run_state", "Terminal Client run state events must be an object")
+    return state
+
+
+def _save_run_state(state: dict[str, object]) -> None:
+    path = _run_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _new_identity(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:16]}"
+
+
+def _runs_payload(state: dict[str, object]) -> dict[str, dict[str, object]]:
+    return cast(dict[str, dict[str, object]], state["runs"])
+
+
+def _events_payload(state: dict[str, object]) -> dict[str, list[dict[str, object]]]:
+    return cast(dict[str, list[dict[str, object]]], state["events"])
+
+
+def _run_events(state: dict[str, object], run_id: str) -> list[dict[str, object]]:
+    events = _events_payload(state).get(run_id, [])
+    return [event for event in events if isinstance(event, dict)]
+
+
+def _last_activity(state: dict[str, object], run_id: str) -> dict[str, object] | None:
+    events = _run_events(state, run_id)
+    if not events:
+        return None
+    event = events[-1]
+    return {
+        "time": event.get("time"),
+        "kind": event.get("kind"),
+        "level": event.get("level"),
+        "summary": event.get("summary"),
+    }
+
+
+def _run_summary(state: dict[str, object], run: dict[str, object]) -> dict[str, object]:
+    run_id = str(run["run_id"])
+    events = _run_events(state, run_id)
+    summary = dict(run)
+    summary["events_available"] = bool(events)
+    summary["replay_available"] = bool(events)
+    summary["cursor_available"] = bool(events)
+    summary["event_count"] = len(events)
+    summary["last_activity"] = _last_activity(state, run_id)
+    heartbeat = _last_activity(state, run_id)
+    summary["heartbeat"] = heartbeat
+    return summary
+
+
+def _append_run_event(
+    state: dict[str, object],
+    run: dict[str, object],
+    *,
+    kind: str,
+    level: str,
+    summary: str,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    run_id = str(run["run_id"])
+    session_id = str(run["session_id"])
+    events_by_run = _events_payload(state)
+    events = events_by_run.setdefault(run_id, [])
+    seq = len(events) + 1
+    event: dict[str, object] = {
+        "schema": "ody.event.v1",
+        "id": f"evt_{run_id}_{seq}",
+        "seq": seq,
+        "time": _utc_now(),
+        "session_id": session_id,
+        "run_id": run_id,
+        "source": "chat",
+        "kind": kind,
+        "level": level,
+        "summary": summary,
+        "payload": payload,
+        "raw": {
+            "transport": "compat",
+            "type": kind,
+            "body": payload,
+        },
+    }
+    events.append(event)
+    return event
+
+
+def _resolve_run_reference(state: dict[str, object], *, run_id: str | None, session_id: str | None) -> dict[str, object]:
+    runs = _runs_payload(state)
+    if run_id:
+        run = runs.get(run_id)
+        if not isinstance(run, dict):
+            raise CommandError("unknown_run", f"Run {run_id} was not found", exit_code=1)
+        return run
+    if not session_id:
+        raise CommandError("missing_run_target", "run command requires a run id or --session-id")
+    matches = [
+        run
+        for run in runs.values()
+        if run.get("session_id") == session_id and str(run.get("status")) in RUN_ACTIVE_STATUSES
+    ]
+    if len(matches) != 1:
+        if len(matches) > 1:
+            choices = ", ".join(str(run.get("run_id")) for run in matches)
+            raise CommandError(
+                "ambiguous_run",
+                f"Session {session_id} has multiple active Runs: {choices}",
+                details={
+                    "session_id": session_id,
+                    "choices": [
+                        {
+                            "run_id": run.get("run_id"),
+                            "kind": run.get("kind"),
+                            "status": run.get("status"),
+                            "started_at": run.get("started_at"),
+                            "updated_at": run.get("updated_at"),
+                        }
+                        for run in matches
+                    ],
+                },
+            )
+        raise CommandError("unknown_run", f"Session {session_id} has no active Run", exit_code=1)
+    return matches[0]
+
+
+def _run_start(request: CommandRequest) -> CommandResponse:
+    _require_capability("run:start", request)
+    options, positionals = _parse_command_options(request.args)
+    if positionals:
+        raise CommandError("unexpected_run_args", f"unexpected run start args: {' '.join(positionals)}")
+    kind = str(options.get("kind") or "chat")
+    if kind != "chat":
+        raise CommandError("unsupported_run_kind", f"run start currently supports chat Runs, not {kind}")
+    state = _load_run_state()
+    runs = _runs_payload(state)
+    run_id = _new_identity("run")
+    session_id = str(options.get("session_id") or _new_identity("ses"))
+    now = _utc_now()
+    run: dict[str, object] = {
+        "run_id": run_id,
+        "session_id": session_id,
+        "kind": kind,
+        "status": "running",
+        "started_at": now,
+        "updated_at": now,
+        "finished_at": None,
+    }
+    runs[run_id] = run
+    message = str(options.get("message") or "")
+    _append_run_event(
+        state,
+        run,
+        kind="run.status",
+        level="info",
+        summary="chat Run started",
+        payload={"status": "running", "message": message},
+    )
+    _save_run_state(state)
+    return CommandResponse(
+        ok=True,
+        command=["run", "start"],
+        message=f"Started chat Run {run_id}",
+        data={"run": _run_summary(state, run), "cursor": {"after": None, "next": "1", "count": 1}},
+    )
+
+
+def _run_list(request: CommandRequest) -> CommandResponse:
+    _require_capability("run:read", request)
+    options, positionals = _parse_command_options(request.args)
+    if positionals:
+        raise CommandError("unexpected_run_args", f"unexpected run list args: {' '.join(positionals)}")
+    state = _load_run_state()
+    runs = [_run_summary(state, run) for run in _runs_payload(state).values()]
+    runs.sort(key=lambda run: str(run.get("updated_at") or ""), reverse=True)
+    status_filter = str(options.get("status")) if isinstance(options.get("status"), str) else None
+    if status_filter:
+        runs = [run for run in runs if run.get("status") == status_filter]
+    return CommandResponse(ok=True, command=["run", "list"], message=f"{len(runs)} Run(s)", data={"runs": runs})
+
+
+def _run_status(request: CommandRequest) -> CommandResponse:
+    _require_capability("run:read", request)
+    options, positionals = _parse_command_options(request.args)
+    if len(positionals) > 1:
+        raise CommandError("unexpected_run_args", f"unexpected run status args: {' '.join(positionals[1:])}")
+    run_id = positionals[0] if positionals else (str(options["run_id"]) if isinstance(options.get("run_id"), str) else None)
+    session_id = str(options["session_id"]) if isinstance(options.get("session_id"), str) else None
+    state = _load_run_state()
+    run = _resolve_run_reference(state, run_id=run_id, session_id=session_id)
+    return CommandResponse(
+        ok=True,
+        command=["run", "status"],
+        message=f"Run {run['run_id']} is {run['status']}",
+        data={"run": _run_summary(state, run)},
+    )
+
+
+def _run_attach(request: CommandRequest) -> CommandResponse:
+    _require_capability("event:read", request)
+    options, positionals = _parse_command_options(request.args)
+    if len(positionals) > 1:
+        raise CommandError("unexpected_run_args", f"unexpected run attach args: {' '.join(positionals[1:])}")
+    run_id = positionals[0] if positionals else (str(options["run_id"]) if isinstance(options.get("run_id"), str) else None)
+    session_id = str(options["session_id"]) if isinstance(options.get("session_id"), str) else None
+    raw_cursor = options.get("cursor")
+    try:
+        cursor = int(raw_cursor) if isinstance(raw_cursor, str) and raw_cursor else None
+    except ValueError as exc:
+        raise CommandError("invalid_cursor", f"--cursor must be an integer: {raw_cursor}") from exc
+    state = _load_run_state()
+    run = _resolve_run_reference(state, run_id=run_id, session_id=session_id)
+    events = []
+    for event in _run_events(state, str(run["run_id"])):
+        seq = event.get("seq")
+        if not isinstance(seq, int):
+            continue
+        if cursor is None or seq > cursor:
+            events.append(event)
+    next_cursor = str(events[-1]["seq"]) if events else (str(cursor) if cursor is not None else None)
+    return CommandResponse(
+        ok=True,
+        command=["run", "attach"],
+        message=f"{len(events)} Run Event Envelope(s)",
+        data={
+            "run": _run_summary(state, run),
+            "events": events,
+            "cursor": {"after": str(cursor) if cursor is not None else None, "next": next_cursor, "count": len(events)},
+        },
+        raw=[event.get("raw") for event in events],
+    )
+
+
+def _run_stop(request: CommandRequest) -> CommandResponse:
+    confirmation = _require_capability("run:stop", request)
+    options, positionals = _parse_command_options(request.args)
+    if len(positionals) > 1:
+        raise CommandError("unexpected_run_args", f"unexpected run stop args: {' '.join(positionals[1:])}")
+    run_id = positionals[0] if positionals else (str(options["run_id"]) if isinstance(options.get("run_id"), str) else None)
+    session_id = str(options["session_id"]) if isinstance(options.get("session_id"), str) else None
+    state = _load_run_state()
+    run = _resolve_run_reference(state, run_id=run_id, session_id=session_id)
+    now = _utc_now()
+    run["status"] = "stopped"
+    run["updated_at"] = now
+    run["finished_at"] = now
+    _append_run_event(
+        state,
+        run,
+        kind="run.status",
+        level="warn",
+        summary="chat Run stopped",
+        payload={"status": "stopped"},
+    )
+    _save_run_state(state)
+    return CommandResponse(
+        ok=True,
+        command=["run", "stop"],
+        message=f"Stopped Run {run['run_id']}",
+        data={"run": _run_summary(state, run), "confirmation": confirmation},
+    )
+
+
 def _inspect_events(request: CommandRequest) -> CommandResponse:
     capability = "event:raw" if request.globals.format in {"raw", "debug"} else "event:read"
     _require_capability(capability, request)
@@ -1009,14 +1310,16 @@ def execute(request: CommandRequest) -> CommandResponse:
             message="Terminal Client capabilities",
             data=_capabilities_payload(),
         )
+    if request.domain == "run" and request.verb == "start":
+        return _run_start(request)
+    if request.domain == "run" and request.verb == "list":
+        return _run_list(request)
+    if request.domain == "run" and request.verb == "status":
+        return _run_status(request)
+    if request.domain == "run" and request.verb == "attach":
+        return _run_attach(request)
     if request.domain == "run" and request.verb == "stop":
-        confirmation = _require_capability("run:stop", request)
-        return CommandResponse(
-            ok=False,
-            command=command,
-            message="run stop is capability-gated but lifecycle execution is implemented by a later ticket",
-            data={"implemented": False, "args": request.args, "confirmation": confirmation},
-        )
+        return _run_stop(request)
     if request.domain == "service" and request.verb in {"stop", "restart"}:
         options, positionals = _parse_command_options(request.args)
         if not positionals:
@@ -1323,7 +1626,10 @@ def render(response: CommandResponse, request: CommandRequest, stdout: TextIO) -
 def render_error(error: CommandError, *, options: GlobalOptions | None, stdout_is_tty: bool, stderr: TextIO) -> None:
     output_profile = (options.output if options and options.output else None) or ("human" if stdout_is_tty else "clanker")
     output_format = options.format if options else "text"
-    payload = {"ok": False, "error": {"code": error.code, "message": error.message}}
+    payload: dict[str, object] = {"ok": False, "error": {"code": error.code, "message": error.message}}
+    if error.details:
+        error_payload = cast(dict[str, object], payload["error"])
+        error_payload["details"] = error.details
 
     if output_format in {"json", "jsonl"} or output_profile == "clanker":
         stderr.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
