@@ -169,6 +169,7 @@ function initRailHoverLabels() {
     'rail-gallery': 'Gallery',
     'rail-archive': 'Library',
     'rail-memory': 'Brain',
+    'rail-skills-lab': 'Skills Lab',
     'rail-notes': 'Notes',
     'rail-tasks': 'Tasks',
     'rail-theme': 'Theme',
@@ -224,7 +225,7 @@ async function _createDirectChatFromPreferredModel() {
 
   const pending = sessionModule.getPendingChat && sessionModule.getPendingChat();
   if (pending && pending.url && pending.modelId && pending.endpointId) {
-    sessionModule.createDirectChat(pending.url, pending.modelId, pending.endpointId);
+    sessionModule.createDirectChat(pending.url, pending.modelId, pending.endpointId, pending.providerOptions || {});
     return true;
   }
 
@@ -232,20 +233,20 @@ async function _createDirectChatFromPreferredModel() {
   const currentId = sessionModule.getCurrentSessionId();
   const current = sessions.find(s => s.id === currentId);
   if (current && current.endpoint_url && current.model && current.endpoint_id) {
-    sessionModule.createDirectChat(current.endpoint_url, current.model, current.endpoint_id);
+    sessionModule.createDirectChat(current.endpoint_url, current.model, current.endpoint_id, current.provider_options || {});
     return true;
   }
 
   const dc = await _refreshDefaultChat();
   if (dc) {
-    sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
+    sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, dc.provider_options || {});
     return true;
   }
 
   const withModel = sessions.filter(s => s.endpoint_url && s.model);
   if (withModel.length > 0) {
     const last = withModel[0]; // sessions are sorted by recent
-    sessionModule.createDirectChat(last.endpoint_url, last.model, last.endpoint_id);
+    sessionModule.createDirectChat(last.endpoint_url, last.model, last.endpoint_id, last.provider_options || {});
     return true;
   }
 
@@ -1220,6 +1221,11 @@ function initializeEventListeners() {
       setTimeout(_goFullscreen, 200);
     },
     '/memory':   () => document.getElementById('tool-memory-btn')?.click(),
+    '/skills':   () => {
+      document.getElementById('tool-memory-btn')?.click();
+      setTimeout(() => document.querySelector('.memory-tab[data-memory-tab="skills"]')?.click(), 120);
+    },
+    '/skills-lab': () => document.getElementById('tool-skills-lab-btn')?.click(),
     '/gallery':  () => document.getElementById('tool-gallery-btn')?.click(),
     '/tasks':    () => document.getElementById('tool-tasks-btn')?.click(),
     '/library':  () => sessionModule && sessionModule.openLibrary && sessionModule.openLibrary(),
@@ -1681,6 +1687,20 @@ function initializeEventListeners() {
     });
   }
 
+  const toolSkillsLabBtn = el('tool-skills-lab-btn');
+  if (toolSkillsLabBtn) {
+    toolSkillsLabBtn.addEventListener('click', async () => {
+      if (_closeCompareIfActive()) return;
+      const [skillsLabModule, Modals] = await Promise.all([
+        import('./js/skillsLab.js'),
+        import('./js/modalManager.js'),
+      ]);
+      if (!Modals.toggle('skills-lab-modal')) {
+        skillsLabModule.openSkillsLab();
+      }
+    });
+  }
+
   const addMemBtn = el('add-memory-btn');
   if (addMemBtn) {
     addMemBtn.addEventListener('click', memoryModule.addNewMemory);
@@ -2093,7 +2113,10 @@ function initializeEventListeners() {
     // box — keeps the mobile keyboard up.
     menu.querySelectorAll('.overflow-menu-item').forEach(item => {
       item.addEventListener('pointerdown', (e) => { e.preventDefault(); });
-      item.addEventListener('click', () => closeOverflowMenu());
+      item.addEventListener('click', () => {
+        if (item.classList.contains('overflow-menu-stay-open')) return;
+        closeOverflowMenu();
+      });
     });
     document.addEventListener('click', (e) => {
       if (!menu.contains(e.target) && e.target !== plusBtn) closeOverflowMenu();
@@ -2618,6 +2641,7 @@ function initializeEventListeners() {
     'tool-gallery':        '#tool-gallery-btn',
     'tool-library':        '#tool-library-btn',
     'tool-memory':         '#tool-memory-btn',
+    'tool-skills-lab':     '#tool-skills-lab-btn',
     'tool-notes':          '#tool-notes-btn',
     'tool-tasks':          '#tool-tasks-btn',
     'tool-theme':          '#tool-theme-btn',
@@ -3661,6 +3685,7 @@ function startOdysseusApp() {
     'rail-calendar':  'tool-calendar-btn',
     'rail-notes':     'tool-notes-btn',
     'rail-memory':    'tool-memory-btn',
+    'rail-skills-lab':'tool-skills-lab-btn',
     'rail-theme':     'tool-theme-btn',
     'rail-email':     'email-section-title',
   };
@@ -3946,7 +3971,7 @@ function startOdysseusApp() {
           const currentId = sessionModule.getCurrentSessionId();
           const current = sessions.find(s => s.id === currentId);
           if (current && current.endpoint_url && current.model) {
-            sessionModule.createDirectChat(current.endpoint_url, current.model, current.endpoint_id);
+            sessionModule.createDirectChat(current.endpoint_url, current.model, current.endpoint_id, current.provider_options || {});
           } else {
             // Fallback to rail button
             const railNew = el('rail-new-session');

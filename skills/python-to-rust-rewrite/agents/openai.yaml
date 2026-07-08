@@ -1,0 +1,7 @@
+interface:
+  display_name: "Python to Rust Rewrite"
+  short_description: "Rewrite Python modules into idiomatic Rust."
+  default_prompt: "Use $python-to-rust-rewrite to port this Python code into idiomatic Rust while preserving behavior."
+
+policy:
+  allow_implicit_invocation: true

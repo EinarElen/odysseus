@@ -565,7 +565,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             "markdown": ".md", "json": ".json", "yaml": ".yml", "bash": ".sh",
             "sql": ".sql", "rust": ".rs", "go": ".go", "java": ".java", "c": ".c",
             "cpp": ".cpp", "typescript": ".ts", "ruby": ".rb", "php": ".php",
-            "text": ".txt", "xml": ".xml", "toml": ".toml", "ini": ".ini",
+            "typst": ".typ", "text": ".txt", "xml": ".xml", "toml": ".toml", "ini": ".ini",
         }
         db = SessionLocal()
         try:

@@ -13,6 +13,7 @@ import { topPortalZ } from './toolWindowZOrder.js';
 const API = window.location.origin;
 let skills = [];
 let builtinSkills = [];   // read-only agent tool capabilities (TOOL_SECTIONS)
+let skillIndex = [];
 let loaded = false;
 let _loadPromise = null;
 
@@ -91,8 +92,17 @@ export async function loadSkills(cascade = false) {
   if (_loadPromise) return _loadPromise;
   _loadPromise = (async () => {
   try {
-    const res = await fetch(`${API}/api/skills`);
+    const [res, indexRes] = await Promise.all([
+      fetch(`${API}/api/skills`),
+      fetch(`${API}/api/skills/index`).catch(() => null),
+    ]);
     const data = await res.json();
+    if (indexRes && indexRes.ok) {
+      const indexData = await indexRes.json();
+      skillIndex = Array.isArray(indexData.index) ? indexData.index : [];
+    } else {
+      skillIndex = [];
+    }
     // Dedupe by name (case-insensitive) — the API has occasionally
     // returned the same skill twice (built-in shadow + user copy, or
     // a write-then-read race), and rendering both made the duplicate
@@ -109,6 +119,7 @@ export async function loadSkills(cascade = false) {
     // Built-in capabilities are no longer surfaced in the Skills menu.
     loaded = true;
     renderSkillsList();
+    renderSkillsVisualization();
     updateCount();
     if (_pendingFocusSkill) {
       _focusSkillRow(_pendingFocusSkill);
@@ -122,6 +133,8 @@ export async function loadSkills(cascade = false) {
     }
   } catch (e) {
     console.error('Failed to load skills:', e);
+    skillIndex = [];
+    renderSkillsVisualization();
   } finally {
     _loadPromise = null;
   }
@@ -169,6 +182,128 @@ function updateCount() {
   if (el) el.textContent = skills.length || '0';
   const elH = document.getElementById('skills-count-h2');
   if (elH) elH.textContent = skills.length + ' skill' + (skills.length === 1 ? '' : 's');
+}
+
+function _setText(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = value;
+}
+
+function _skillDiskPath(sk) {
+  if (sk && sk.path) return String(sk.path);
+  const cat = String((sk && sk.category) || 'general').replace(/^\/+|\/+$/g, '') || 'general';
+  const name = String((sk && (sk.name || sk.id)) || 'skill').replace(/^\/+|\/+$/g, '') || 'skill';
+  return `data/skills/${cat}/${name}/SKILL.md`;
+}
+
+function _formatSkillTime(value) {
+  if (!value) return 'never';
+  if (typeof value === 'number') return relativeSkillTime(value);
+  const t = Date.parse(value);
+  if (!Number.isFinite(t)) return String(value);
+  return relativeSkillTime(Math.floor(t / 1000));
+}
+
+function relativeSkillTime(timestamp) {
+  const now = Math.floor(Date.now() / 1000);
+  const diff = Math.max(0, now - Number(timestamp || 0));
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
+  if (diff < 2592000) return `${Math.floor(diff / 604800)}w ago`;
+  if (diff < 31536000) return `${Math.floor(diff / 2592000)}mo ago`;
+  return `${Math.floor(diff / 31536000)}y ago`;
+}
+
+function _indexedNames() {
+  return new Set(skillIndex.map(s => s && s.name).filter(Boolean));
+}
+
+function _isSkillIndexed(sk, names = _indexedNames()) {
+  const name = sk && (sk.name || sk.id);
+  if (!name) return false;
+  if (names.size) return names.has(name);
+  return (sk.status || 'draft') === 'published';
+}
+
+function renderSkillsVisualization() {
+  const panel = document.getElementById('skills-visualization');
+  if (!panel) return;
+  const total = skills.length;
+  const indexed = _indexedNames();
+  const indexedCount = indexed.size || skills.filter(sk => _isSkillIndexed(sk, indexed)).length;
+  const publishedCount = skills.filter(sk => (sk.status || 'draft') === 'published').length;
+  const draftCount = Math.max(0, total - publishedCount);
+  const auditedCount = skills.filter(sk => sk.audit_verdict).length;
+  const learnedCount = skills.filter(sk => !['imported', 'user'].includes(String(sk.source || 'learned'))).length;
+  const fileCount = skills.filter(sk => !sk._legacy).length;
+  const uses = skills.reduce((sum, sk) => sum + Number(sk.uses || 0), 0);
+  const avgConf = total
+    ? Math.round(skills.reduce((sum, sk) => sum + Number(sk.confidence || 0), 0) / total * 100)
+    : 0;
+  const threshold = Math.round((_skillApprovalThreshold || 0) * 100);
+
+  _setText('skills-pipeline-summary', `${publishedCount} published / ${draftCount} draft`);
+  _setText('skills-flow-learned', String(learnedCount));
+  _setText('skills-flow-files', String(fileCount));
+  _setText('skills-flow-indexed', String(indexedCount));
+  _setText('skills-flow-confidence', total ? `${avgConf}%` : `${threshold}%`);
+  _setText('skills-flow-uses', `${uses}u`);
+  _setText('skills-flow-audited', String(auditedCount));
+
+  panel.querySelectorAll('.skills-flow-step').forEach(step => {
+    const stage = step.dataset.stage;
+    const active = {
+      capture: learnedCount > 0,
+      file: fileCount > 0,
+      index: indexedCount > 0,
+      inject: avgConf >= threshold && total > 0,
+      run: uses > 0,
+      audit: auditedCount > 0,
+    }[stage];
+    step.classList.toggle('active', !!active);
+  });
+}
+
+function _skillIndexPreview(sk) {
+  return {
+    name: sk.name || sk.id || '',
+    description: sk.description || '',
+    category: sk.category || 'general',
+    status: sk.status || 'draft',
+  };
+}
+
+function _buildSkillSetupPanel(sk, name) {
+  const path = _skillDiskPath(sk);
+  const indexed = _isSkillIndexed(sk);
+  const panel = document.createElement('div');
+  panel.className = 'skill-setup-panel';
+  panel.innerHTML = `
+    <div class="skill-setup-head">
+      <span>Setup</span>
+      <code>${esc(path)}</code>
+    </div>
+    <div class="skill-setup-grid">
+      <div class="skill-setup-row"><span>Stored</span><code>${esc(path)}</code></div>
+      <div class="skill-setup-row"><span>Sidecar</span><code>data/skills/_usage.json</code></div>
+      <div class="skill-setup-row"><span>Slash</span><code>/${esc(name)} &lt;request&gt;</code></div>
+      <div class="skill-setup-row"><span>Index</span><code>${indexed ? 'eligible' : 'not indexed'}</code></div>
+      <div class="skill-setup-row"><span>Source</span><code>${esc(sk.source || 'learned')}</code></div>
+      <div class="skill-setup-row"><span>Last used</span><code>${esc(_formatSkillTime(sk.last_used))}</code></div>
+    </div>
+  `;
+  const code = document.createElement('pre');
+  code.className = 'skill-setup-snippet';
+  code.textContent = [
+    `file: ${path}`,
+    `index: ${JSON.stringify(_skillIndexPreview(sk))}`,
+    `invoke: /${name} <request>`,
+    `context: ${indexed ? 'available for retrieval and injection' : 'draft or below gate'}`,
+  ].join('\n');
+  panel.appendChild(code);
+  return panel;
 }
 
 function _sortSkills(list) {
@@ -724,6 +859,7 @@ function renderSkillsList() {
     // Preview (hidden until expanded) — SKILL.md goes here + footer.
     const preview = document.createElement('div');
     preview.className = 'doclib-card-preview skill-card-preview';
+    preview.appendChild(_buildSkillSetupPanel(sk, name));
     const pre = document.createElement('pre');
     pre.className = 'skill-md-pre';
     pre.textContent = '';  // filled on expand
@@ -1708,7 +1844,10 @@ async function _loadSkillApprovalThreshold() {
     const prefs = await res.json();
     const raw = prefs.skill_min_confidence ?? prefs.skill_autosave_min_confidence;
     const val = Number(raw);
-    if (Number.isFinite(val)) _skillApprovalThreshold = Math.max(0, Math.min(1, val));
+    if (Number.isFinite(val)) {
+      _skillApprovalThreshold = Math.max(0, Math.min(1, val));
+      renderSkillsVisualization();
+    }
   } catch {}
 }
 

@@ -4844,6 +4844,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
           <option value="html">html</option>
           <option value="css">css</option>
           <option value="markdown">markdown</option>
+          <option value="typst">typst</option>
           <option value="json">json</option>
           <option value="yaml">yaml</option>
           <option value="bash">bash</option>
