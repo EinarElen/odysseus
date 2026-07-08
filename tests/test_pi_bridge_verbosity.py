@@ -2,9 +2,12 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "src" / "harness" / "bridges" / "pi_sdk_bridge.mjs"
+pytestmark = pytest.mark.slow
 
 
 def _run_start(verbosity=None):

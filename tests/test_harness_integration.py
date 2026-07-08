@@ -342,7 +342,7 @@ class _SilentProcess(_FakeProcess):
     async def next_message(self):
         import asyncio
 
-        await asyncio.sleep(60)
+        raise asyncio.TimeoutError
 
 
 @pytest.mark.asyncio

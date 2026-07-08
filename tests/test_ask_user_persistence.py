@@ -40,7 +40,12 @@ def test_ask_user_is_emitted_last_and_persisted(monkeypatch):
         "multi": False,
     }
 
-    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default, raising=False)
+    def fake_get_setting(key, default=None):
+        if key == "agent_input_token_budget":
+            return 0
+        return default
+
+    monkeypatch.setattr(agent_loop, "get_setting", fake_get_setting, raising=False)
     monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None, raising=False)
     monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10, raising=False)
 

@@ -1,11 +1,17 @@
 """Tests for endpoint_resolver — URL normalization and URL construction."""
 import pytest
 
+import src.endpoint_resolver as endpoint_resolver
 from src.endpoint_resolver import (
     normalize_base,
     build_chat_url,
     build_models_url,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_live_hostname_resolution(monkeypatch):
+    monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url)
 
 
 class TestNormalizeBase:

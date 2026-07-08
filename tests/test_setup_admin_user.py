@@ -12,8 +12,16 @@ def _load_setup_module():
     return module
 
 
+def _use_cheap_bcrypt(monkeypatch):
+    import bcrypt
+
+    real_gensalt = bcrypt.gensalt
+    monkeypatch.setattr(bcrypt, "gensalt", lambda: real_gensalt(rounds=4))
+
+
 def test_create_default_admin_normalizes_env_username(tmp_path, monkeypatch):
     setup_module = _load_setup_module()
+    _use_cheap_bcrypt(monkeypatch)
     monkeypatch.setattr(setup_module, "AUTH_FILE", str(tmp_path / "auth.json"))
     monkeypatch.setenv("ODYSSEUS_ADMIN_USER", " AdminUser ")
     monkeypatch.setenv("ODYSSEUS_ADMIN_PASSWORD", "temporary-password")
@@ -35,6 +43,7 @@ def test_main_loads_admin_password_from_env_file(tmp_path, monkeypatch):
     import bcrypt
 
     setup_module = _load_setup_module()
+    _use_cheap_bcrypt(monkeypatch)
 
     # Credentials live ONLY in a .env beside setup.py (written with a UTF-8 BOM,
     # the Notepad-on-Windows case that utf-8-sig must tolerate) — not exported.

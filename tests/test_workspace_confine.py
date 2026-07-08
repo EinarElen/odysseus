@@ -235,7 +235,12 @@ def _sent_tool_names(monkeypatch, *, workspace):
     import asyncio
     import src.agent_loop as al
 
-    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
+    def fake_get_setting(key, default=None):
+        if key == "agent_input_token_budget":
+            return 0
+        return default
+
+    monkeypatch.setattr(al, "get_setting", fake_get_setting, raising=False)
     monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
     monkeypatch.setattr(al, "estimate_tokens", lambda *a, **k: 10, raising=False)
     # Isolate the selection logic from owner gating (tested separately).

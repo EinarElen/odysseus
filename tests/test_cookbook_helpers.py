@@ -418,19 +418,19 @@ def test_pip_install_attempt_no_bare_pipe_tail():
 def test_pip_install_attempt_failure_propagates_real_exit_code():
     """Run the generated snippet against a deliberately broken pip install
     to confirm the subshell exits with pip's non-zero status."""
-    snippet = _pip_install_attempt("python3 -m pip install __nonexistent_package_12345__")
+    snippet = _pip_install_attempt('sh -c "echo nonexistent package >&2; exit 23"')
     result = subprocess.run(
         ["bash", "-c", snippet],
         capture_output=True,
         text=True,
         timeout=60,
     )
-    assert result.returncode != 0, "pip install of a nonexistent package should fail"
+    assert result.returncode == 23
 
 
 def test_pip_install_attempt_success_exits_zero():
     """When pip succeeds, the subshell should exit 0."""
-    snippet = _pip_install_attempt("python3 -c 'pass'")
+    snippet = _pip_install_attempt("true")
     result = subprocess.run(
         ["bash", "-c", snippet],
         capture_output=True,
@@ -442,7 +442,7 @@ def test_pip_install_attempt_success_exits_zero():
 
 def test_pip_install_attempt_surfaces_stderr_on_failure():
     """On failure, the last 5 lines of pip output should appear in stdout."""
-    snippet = _pip_install_attempt("python3 -m pip install __nonexistent_package_12345__")
+    snippet = _pip_install_attempt('sh -c "echo nonexistent package >&2; exit 23"')
     result = subprocess.run(
         ["bash", "-c", snippet],
         capture_output=True,
@@ -451,7 +451,8 @@ def test_pip_install_attempt_surfaces_stderr_on_failure():
     )
     # pip's error message should be visible in the output (not swallowed)
     combined = result.stdout + result.stderr
-    assert "nonexistent" in combined.lower() or result.returncode != 0
+    assert result.returncode == 23
+    assert "nonexistent package" in combined.lower()
 
 
 def test_local_tooling_path_export_converts_windows_paths_for_bash():

@@ -11,12 +11,17 @@ who actually keeps it.
 from types import SimpleNamespace
 from pathlib import Path
 
+import src.endpoint_resolver as endpoint_resolver
 from src.task_scheduler import (
     TASK_DEFAULT_SHELL_TOOLS,
     TaskScheduler,
     compose_task_relevant_tools,
 )
 from src.tool_index import ASSISTANT_ALWAYS_AVAILABLE
+
+
+def _skip_live_hostname_resolution(monkeypatch):
+    monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url)
 
 
 def test_assistant_always_available_lacks_shell():
@@ -102,6 +107,7 @@ async def test_scheduled_task_honors_global_disabled_tools(monkeypatch):
     #
     # Drive the real _execute_llm_task and assert the global list reaches BOTH
     # sides: it is stripped from relevant_tools AND passed into the agent loop.
+    _skip_live_hostname_resolution(monkeypatch)
     global_off = ["bash", "python", "read_file"]
 
     monkeypatch.setattr(

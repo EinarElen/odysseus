@@ -55,6 +55,8 @@ _db.ApiToken = _ApiToken
 
 @pytest.fixture(autouse=True)
 def _companion_pairing_stubs(monkeypatch):
+    real_gensalt = P.bcrypt.gensalt
+    monkeypatch.setattr(P.bcrypt, "gensalt", lambda: real_gensalt(rounds=4))
     monkeypatch.setitem(sys.modules, "core.database", _db)
     for _name, _attrs in {
         "core.auth": {"AuthManager": MagicMock()},

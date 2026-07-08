@@ -642,7 +642,8 @@ def test_ollama_endpoint_error_message_includes_troubleshooting():
     assert "ollama list" in msg
 
 
-def test_generic_endpoint_error_message_preserves_probe_error():
+def test_generic_endpoint_error_message_preserves_probe_error(monkeypatch):
+    monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
     msg = model_routes._model_endpoint_error_message(
         "https://api.example.com/v1",
         {"error": "HTTP 401"},

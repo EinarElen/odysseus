@@ -1,4 +1,5 @@
 """Regression tests for task-result delivery into chat sessions (issue #326)."""
+# ruff: noqa: E402
 import asyncio
 import sys
 import types as _types
@@ -17,6 +18,7 @@ from tests.helpers.import_state import clear_fake_database_modules
 clear_fake_database_modules()
 
 import core.database as cdb
+import src.endpoint_resolver as endpoint_resolver
 from core.database import Base, Session as DbSession
 from core.models import ChatMessage as MemChatMessage
 from src.task_scheduler import TaskScheduler
@@ -31,6 +33,11 @@ from src.task_scheduler import TaskScheduler
 # before the stubbing files.
 if type(Base).__name__ == "MagicMock":
     pytest.skip("core.database is stubbed — run this file in isolation", allow_module_level=True)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_hostname_resolution(monkeypatch):
+    monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url)
 
 
 def _make_db():

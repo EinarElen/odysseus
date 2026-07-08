@@ -25,6 +25,7 @@ def _make_task(prompt="run the digest"):
 
 
 def _patch_scheduler_deps(monkeypatch):
+    monkeypatch.setattr("src.endpoint_resolver.resolve_url", lambda url: url)
     monkeypatch.setattr(
         "src.settings.get_setting",
         lambda key, default=None: [] if key == "disabled_tools" else default,

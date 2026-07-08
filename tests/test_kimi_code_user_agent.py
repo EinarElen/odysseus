@@ -3,7 +3,6 @@ from src.llm_core import (
     KIMI_CODE_USER_AGENTS,
     KIMI_CODE_USER_AGENT,
     _is_kimi_code_access_denied,
-    _is_kimi_code_url,
     _kimi_code_base_key,
     _kimi_code_ua_cache,
     _kimi_code_ua_candidates,
@@ -60,6 +59,10 @@ class TestKimiCodeUserAgents:
                 return _Resp(403, '{"error":{"type":"access_terminated_error"}}')
             return _Resp(200, "{}")
 
+        def fake_get(*args, **kwargs):
+            raise RuntimeError("no live Kimi preflight in unit tests")
+
+        monkeypatch.setattr("src.llm_core.httpx.get", fake_get)
         monkeypatch.setattr("src.llm_core.httpx.post", fake_post)
         url = "https://api.kimi.com/coding/v1/chat/completions"
         r = httpx_post_kimi_aware(url, {"Authorization": "Bearer x"}, json={})

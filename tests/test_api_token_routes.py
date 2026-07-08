@@ -62,6 +62,8 @@ def token_routes_mod(monkeypatch):
     monkeypatch.delitem(sys.modules, "routes.api_token_routes", raising=False)
 
     import routes.api_token_routes as mod  # noqa: PLC0415
+    real_gensalt = mod.bcrypt.gensalt
+    monkeypatch.setattr(mod.bcrypt, "gensalt", lambda: real_gensalt(rounds=4))
     return mod
 
 
@@ -549,7 +551,7 @@ def test_update_token_with_null_body_does_not_500(monkeypatch, token_routes_mod)
     invalidator = MagicMock()
     req = _patch_request(invalidator, None)
     update_token = _get_handler(mod, "PATCH", "/tokens/{token_id}")
-    resp = asyncio.run(update_token(request=req, token_id="tok123"))
+    asyncio.run(update_token(request=req, token_id="tok123"))
 
     assert token.name == "original"
     assert token.scopes == "chat"

@@ -19,6 +19,14 @@ from fastapi import HTTPException
 from tests.helpers.import_state import clear_module
 
 
+@pytest.fixture(autouse=True)
+def _cheap_bcrypt(monkeypatch):
+    import bcrypt
+
+    real_gensalt = bcrypt.gensalt
+    monkeypatch.setattr(bcrypt, "gensalt", lambda: real_gensalt(rounds=4))
+
+
 def _fresh_auth_manager(tmp_path):
     # Same import dance as test_security_regressions: drop any cached stub so
     # we exercise the real module from disk rather than a conftest mock.

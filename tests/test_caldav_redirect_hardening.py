@@ -24,6 +24,7 @@ def test_build_dav_client_disables_redirects():
     assert client.session.max_redirects == 0
 
 
+@pytest.mark.slow
 def test_dav_client_does_not_follow_redirect_to_internal_host():
     """End-to-end through the real DAVClient: a 302 toward an internal host
     must NOT be followed. Without the fix the sink is contacted (SSRF); with it

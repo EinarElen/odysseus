@@ -10,6 +10,12 @@ from remote_access import pairing
 from remote_access.routes import setup_remote_access_routes
 
 
+@pytest.fixture(autouse=True)
+def _cheap_bcrypt(monkeypatch):
+    real_gensalt = pairing.bcrypt.gensalt
+    monkeypatch.setattr(pairing.bcrypt, "gensalt", lambda: real_gensalt(rounds=4))
+
+
 def test_normalize_capabilities_drops_unknown_values():
     assert pairing.normalize_capabilities(["chat", "bogus", "models", "chat"]) == ["chat", "models"]
     assert pairing.normalize_capabilities("") == ["chat"]

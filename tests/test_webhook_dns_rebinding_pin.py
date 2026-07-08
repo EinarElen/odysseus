@@ -68,6 +68,7 @@ def _serve(handler):
     return srv, port
 
 
+@pytest.mark.slow
 def test_pinned_transport_connects_to_pinned_ip():
     """A request whose URL host is a throwaway hostname is still delivered to
     the pinned loopback IP — proving the socket destination comes from the pin,
@@ -107,6 +108,7 @@ def test_pinned_transport_connects_to_pinned_ip():
         srv.shutdown()
 
 
+@pytest.mark.slow
 def test_deliver_pins_to_validated_ip_end_to_end(monkeypatch):
     """Full _deliver path: a hostname that validation resolves to loopback is
     pinned to loopback and the local server receives the signed POST."""

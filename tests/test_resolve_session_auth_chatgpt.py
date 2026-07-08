@@ -21,6 +21,7 @@ _CODEX_BASE = "https://chatgpt.com/backend-api/codex"
 
 
 def _mem_db(monkeypatch):
+    monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url)
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(bind=engine)
     # Match production SessionLocal (core.database) which is autoflush=False.
