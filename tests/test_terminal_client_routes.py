@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from routes.terminal_client_routes import setup_terminal_client_routes
 from src import agent_runs, terminal_client_runs
+from src.constants import TERMINAL_CLIENT_RUNS_FILE
 from core.models import Session
 from core.models import ChatMessage
 
@@ -12,6 +16,21 @@ from core.models import ChatMessage
 MODEL_ENDPOINT_URL = "http://model.local/v1/chat/completions"
 TEST_MODEL = "test-model"
 CREATED_MODEL = "created-model"
+
+
+@pytest.fixture(autouse=True)
+def isolate_terminal_client_run_store(tmp_path, monkeypatch):
+    monkeypatch.setattr(terminal_client_runs, "_TERMINAL_RUN_STORE", tmp_path / Path(TERMINAL_CLIENT_RUNS_FILE).name)
+    terminal_client_runs.reset_for_tests(clear_persisted=True)
+    yield
+    terminal_client_runs.reset_for_tests(clear_persisted=True)
+
+
+def reset_terminal_run_process_memory() -> None:
+    terminal_client_runs._RUNS.clear()
+    terminal_client_runs._SESSION_ACTIVE.clear()
+    terminal_client_runs._LOADED = False
+    agent_runs.reset_for_tests()
 
 
 class FakeSessionManager:
@@ -343,3 +362,82 @@ def test_terminal_client_chat_run_by_session_uses_latest_completed_run(monkeypat
 
     assert status.status_code == 200
     assert status.json()["run"]["run_id"] == second
+
+    reset_terminal_run_process_memory()
+
+    restored_status = client.get("/api/terminal/runs/by-session/ses-real")
+
+    assert restored_status.status_code == 200
+    assert restored_status.json()["run"]["run_id"] == second
+
+
+def test_terminal_client_chat_run_registry_survives_process_memory_reset(monkeypatch):
+    terminal_client_runs.reset_for_tests()
+    agent_runs.reset_for_tests()
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    manager = FakeSessionManager()
+
+    async def fake_stream_llm_with_fallback(candidates, messages, **kwargs):
+        yield 'data: {"delta": "persisted"}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr("routes.terminal_client_routes.stream_llm_with_fallback", fake_stream_llm_with_fallback)
+    install_terminal_route_fakes(monkeypatch)
+
+    app = FastAPI()
+    app.include_router(setup_terminal_client_routes(session_manager=manager, chat_handler=FakeChatHandler()))
+    client = TestClient(app)
+
+    run = client.post(
+        "/api/terminal/runs",
+        json={"kind": "chat", "session_id": "ses-real", "message": "hello"},
+    ).json()["run"]
+    assert client.get(f"/api/terminal/runs/{run['run_id']}/events").status_code == 200
+    assert terminal_client_runs._TERMINAL_RUN_STORE.exists()
+
+    reset_terminal_run_process_memory()
+
+    status = client.get(f"/api/terminal/runs/{run['run_id']}")
+    listed = client.get("/api/terminal/runs", params={"kind": "chat"})
+    by_session = client.get("/api/terminal/runs/by-session/ses-real")
+    events = client.get(f"/api/terminal/runs/{run['run_id']}/events", params={"cursor": 1})
+
+    assert status.status_code == 200
+    assert status.json()["run"]["run_id"] == run["run_id"]
+    assert status.json()["run"]["session_id"] == "ses-real"
+    assert status.json()["run"]["events_available"] is True
+    assert status.json()["run"]["last_activity"]
+    assert listed.status_code == 200
+    assert listed.json()["runs"][0]["run_id"] == run["run_id"]
+    assert by_session.status_code == 200
+    assert by_session.json()["run"]["run_id"] == run["run_id"]
+    assert events.status_code == 200
+    assert [event["schema"] for event in events.json()["events"]] == ["ody.event.v1"] * 3
+    assert events.json()["cursor"]["after"] == "1"
+
+
+def test_terminal_client_reloaded_running_run_without_execution_is_interrupted(monkeypatch):
+    terminal_client_runs.reset_for_tests()
+    agent_runs.reset_for_tests()
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    run = terminal_client_runs.TerminalRun(
+        run_id="run_stale_active",
+        session_id="ses-real",
+        status="running",
+    )
+    terminal_client_runs._RUNS[run.run_id] = run
+    terminal_client_runs._SESSION_ACTIVE.setdefault(run.session_id, []).append(run.run_id)
+    terminal_client_runs._save_persisted_runs()
+
+    reset_terminal_run_process_memory()
+    monkeypatch.setattr("src.terminal_client_runs.agent_runs.get_persisted_status", lambda session_id: None)
+
+    app = FastAPI()
+    app.include_router(setup_terminal_client_routes(session_manager=FakeSessionManager(), chat_handler=FakeChatHandler()))
+    client = TestClient(app)
+
+    status = client.get("/api/terminal/runs/run_stale_active")
+
+    assert status.status_code == 200
+    assert status.json()["run"]["status"] == "interrupted"
+    assert status.json()["run"]["finished_at"]

@@ -261,8 +261,18 @@ resolution reports ambiguity when multiple active Runs match, but still permits
 reconnect/attach to a single recent completed Run. `ody-term run
 status/attach/stop --kind chat --session-id ...` uses these API paths, and a
 stale client-local JSON chat Run no longer satisfies chat status, attach, or
-stop. The ticket remains open because live configured-backend verification and
-durable/recent Run evidence across process restart are still not proven.
+stop. The ticket remains open because live configured-backend verification is
+still not proven.
+
+2026-07-09 durability follow-up: terminal-client Run identity is now persisted
+server-side and reloaded after process memory is cleared. Route tests prove
+`run list`, run-id status, Session-id status, event availability, and replay of
+previously observed normalized events can recover recent completed chat Runs,
+including latest-completed selection, after the in-memory terminal Run registry
+is reset. Reloaded active Run metadata is marked interrupted when no detached
+execution or persisted detached-run status exists. The ticket remains open only
+for live configured-backend verification against a real model/backend outside
+the patched test stream.
 
 ## Promote Event Inspection To Real Odysseus Activity
 

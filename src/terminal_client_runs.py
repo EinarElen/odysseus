@@ -8,15 +8,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, AsyncGenerator
 
+from core.atomic_io import atomic_write_json
 from src import agent_runs
+from src.constants import TERMINAL_CLIENT_RUNS_FILE
 
 
 RUN_ACTIVE_STATUSES = {"queued", "starting", "running", "waiting", "stopping"}
+_TERMINAL_RUN_STORE = Path(TERMINAL_CLIENT_RUNS_FILE)
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -29,15 +35,24 @@ class TerminalRun:
     updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     finished_at: str | None = None
     message: str = ""
+    events: list[dict[str, Any]] = field(default_factory=list)
 
 
 _RUNS: dict[str, TerminalRun] = {}
 _SESSION_ACTIVE: dict[str, list[str]] = {}
+_LOADED = False
 
 
-def reset_for_tests() -> None:
+def reset_for_tests(*, clear_persisted: bool = False) -> None:
+    global _LOADED
     _RUNS.clear()
     _SESSION_ACTIVE.clear()
+    _LOADED = True
+    if clear_persisted:
+        try:
+            _TERMINAL_RUN_STORE.unlink(missing_ok=True)
+        except Exception:
+            logger.debug("[terminal-client-run] test store cleanup failed", exc_info=True)
 
 
 def _new_identity(prefix: str) -> str:
@@ -52,15 +67,77 @@ def _session_run_ids(session_id: str) -> list[str]:
     return [rid for rid in _SESSION_ACTIVE.get(session_id, []) if rid in _RUNS]
 
 
+def _run_from_record(record: Any) -> TerminalRun | None:
+    if not isinstance(record, dict):
+        return None
+    run_id = record.get("run_id")
+    session_id = record.get("session_id")
+    if not isinstance(run_id, str) or not run_id:
+        return None
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    return TerminalRun(
+        run_id=run_id,
+        session_id=session_id,
+        kind=str(record.get("kind") or "chat"),
+        status=str(record.get("status") or "running"),
+        started_at=str(record.get("started_at") or _utc_now()),
+        updated_at=str(record.get("updated_at") or _utc_now()),
+        finished_at=str(record["finished_at"]) if isinstance(record.get("finished_at"), str) else None,
+        message=str(record.get("message") or ""),
+        events=[event for event in record.get("events", []) if isinstance(event, dict)]
+        if isinstance(record.get("events"), list)
+        else [],
+    )
+
+
+def _load_persisted_runs() -> None:
+    global _LOADED
+    if _LOADED:
+        return
+    _LOADED = True
+    try:
+        data = json.loads(_TERMINAL_RUN_STORE.read_text(encoding="utf-8")) if _TERMINAL_RUN_STORE.exists() else {}
+    except Exception:
+        logger.debug("[terminal-client-run] state load failed", exc_info=True)
+        return
+    raw_runs = data.get("runs") if isinstance(data, dict) else None
+    if not isinstance(raw_runs, list):
+        return
+    for raw in raw_runs:
+        run = _run_from_record(raw)
+        if run is None:
+            continue
+        _RUNS.setdefault(run.run_id, run)
+        _SESSION_ACTIVE.setdefault(run.session_id, [])
+        if run.run_id not in _SESSION_ACTIVE[run.session_id]:
+            _SESSION_ACTIVE[run.session_id].append(run.run_id)
+
+
+def _save_persisted_runs() -> None:
+    try:
+        _TERMINAL_RUN_STORE.parent.mkdir(parents=True, exist_ok=True)
+        runs = sorted(_RUNS.values(), key=lambda run: run.updated_at, reverse=True)
+        atomic_write_json(str(_TERMINAL_RUN_STORE), {"version": 1, "runs": [asdict(run) for run in runs]}, indent=2)
+    except Exception:
+        logger.debug("[terminal-client-run] state save failed", exc_info=True)
+
+
 def _sync_run_status(run: TerminalRun) -> None:
     live = agent_runs.get_status(run.session_id)
+    persisted = agent_runs.get_persisted_status(run.session_id)
+    original = (run.status, run.finished_at)
     if live in {"running", "done", "error", "stopped"}:
         run.status = live
-    elif run.status == "running" and agent_runs.get_persisted_status(run.session_id):
-        run.status = str(agent_runs.get_persisted_status(run.session_id))
+    elif run.status in RUN_ACTIVE_STATUSES and persisted:
+        run.status = str(persisted)
+    elif run.status in RUN_ACTIVE_STATUSES:
+        run.status = "interrupted"
     if run.status not in RUN_ACTIVE_STATUSES and run.finished_at is None:
         run.finished_at = _utc_now()
-    run.updated_at = _utc_now()
+    if (run.status, run.finished_at) != original:
+        run.updated_at = _utc_now()
+        _save_persisted_runs()
 
 
 def _parse_sse_event(raw: str) -> tuple[str, Any]:
@@ -144,18 +221,40 @@ async def _collect_events(run: TerminalRun, *, cursor: int | None = None) -> lis
     return events
 
 
+def _stored_events_after(run: TerminalRun, *, cursor: int | None = None) -> list[dict[str, Any]]:
+    return [event for event in run.events if cursor is None or int(event.get("seq", 0)) > cursor]
+
+
+def _remember_events(run: TerminalRun, events: list[dict[str, Any]]) -> None:
+    if not events:
+        return
+    seen = {int(event.get("seq", 0)) for event in run.events}
+    added = False
+    for event in events:
+        seq = int(event.get("seq", 0))
+        if seq in seen:
+            continue
+        run.events.append(event)
+        seen.add(seq)
+        added = True
+    if added:
+        run.events.sort(key=lambda event: int(event.get("seq", 0)))
+        _save_persisted_runs()
+
+
 def run_summary(run: TerminalRun, *, event_count: int | None = None) -> dict[str, Any]:
     _sync_run_status(run)
     count = event_count
     if count is None:
-        count = agent_runs.buffered_event_count(run.session_id)
+        count = max(agent_runs.buffered_event_count(run.session_id), len(run.events))
     last_activity = None
     if count:
+        last_event = run.events[-1] if run.events else None
         last_activity = {
-            "time": run.updated_at,
-            "kind": "run.status" if run.status != "running" else "message.delta",
-            "level": "info",
-            "summary": run.status,
+            "time": str(last_event.get("time") if last_event else run.updated_at),
+            "kind": str(last_event.get("kind") if last_event else "run.status"),
+            "level": str(last_event.get("level") if last_event else "info"),
+            "summary": str(last_event.get("summary") if last_event else run.status),
         }
     return {
         "run_id": run.run_id,
@@ -180,15 +279,18 @@ def create_chat_run(
     message: str,
     stream: AsyncGenerator[str, None],
 ) -> dict[str, Any]:
+    _load_persisted_runs()
     resolved_session_id = session_id or _new_identity("ses")
     run = TerminalRun(run_id=_new_identity("run"), session_id=resolved_session_id, message=message)
     _RUNS[run.run_id] = run
     _SESSION_ACTIVE.setdefault(resolved_session_id, []).append(run.run_id)
+    _save_persisted_runs()
     agent_runs.start(resolved_session_id, stream)
     return {"run": run_summary(run), "cursor": {"after": None, "next": "0", "count": 0}}
 
 
 def list_runs(*, kind: str | None = None, status: str | None = None) -> list[dict[str, Any]]:
+    _load_persisted_runs()
     summaries = []
     for run in _RUNS.values():
         if kind and run.kind != kind:
@@ -202,6 +304,7 @@ def list_runs(*, kind: str | None = None, status: str | None = None) -> list[dic
 
 
 def resolve_run(*, run_id: str | None = None, session_id: str | None = None) -> TerminalRun:
+    _load_persisted_runs()
     if run_id:
         run = _RUNS.get(run_id)
         if run is None:
@@ -226,10 +329,14 @@ def resolve_run(*, run_id: str | None = None, session_id: str | None = None) -> 
 async def attach_run(*, run_id: str | None = None, session_id: str | None = None, cursor: int | None = None) -> dict[str, Any]:
     run = resolve_run(run_id=run_id, session_id=session_id)
     events = await _collect_events(run, cursor=cursor)
+    if events:
+        _remember_events(run, events)
+    else:
+        events = _stored_events_after(run, cursor=cursor)
     _sync_run_status(run)
     next_cursor = str(events[-1]["seq"]) if events else (str(cursor) if cursor is not None else None)
     return {
-        "run": run_summary(run, event_count=(cursor or 0) + len(events)),
+        "run": run_summary(run),
         "events": events,
         "cursor": {"after": str(cursor) if cursor is not None else None, "next": next_cursor, "count": len(events)},
     }
