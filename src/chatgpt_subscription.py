@@ -331,7 +331,7 @@ def build_responses_input(messages: list[dict]) -> list[dict]:
             continue
         if role == "assistant" and isinstance(msg.get("tool_calls"), list):
             if text:
-                input_items.append({"role": "assistant", "content": [{"type": "output_text", "text": text}]})
+                input_items.append({"role": "assistant", "content": text})
             for call in msg.get("tool_calls") or []:
                 call_id, name, arguments = _tool_call_parts(call)
                 if not call_id or not name:
@@ -346,8 +346,7 @@ def build_responses_input(messages: list[dict]) -> list[dict]:
                     item["id"] = str(call.get("id"))
                 input_items.append(item)
             continue
-        input_type = "output_text" if role == "assistant" else "input_text"
-        input_items.append({"role": role, "content": [{"type": input_type, "text": text}]})
+        input_items.append({"role": role, "content": text})
     return input_items
 
 

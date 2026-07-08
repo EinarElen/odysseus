@@ -81,6 +81,30 @@ def test_responses_input_preserves_function_call_round_trip():
     }
 
 
+def test_chatgpt_subscription_payload_replays_plain_chat_history():
+    messages = [
+        {"role": "system", "content": "You answer from the visible conversation."},
+        {"role": "user", "content": "The magic word is banana."},
+        {"role": "assistant", "content": "Got it. I will remember banana."},
+        {"role": "user", "content": "What is the magic word?"},
+    ]
+
+    payload = llm_core._build_chatgpt_responses_payload(
+        "gpt-5.5",
+        messages,
+        0.7,
+        1000,
+        stream=True,
+    )
+
+    assert payload["instructions"] == "You answer from the visible conversation."
+    assert payload["input"] == [
+        {"role": "user", "content": "The magic word is banana."},
+        {"role": "assistant", "content": "Got it. I will remember banana."},
+        {"role": "user", "content": "What is the magic word?"},
+    ]
+
+
 def test_responses_tools_convert_chat_completions_schema_to_strict_function():
     tools = [{
         "type": "function",
