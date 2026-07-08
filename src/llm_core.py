@@ -2375,6 +2375,8 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                             yield f'data: {json.dumps({"type": "tool_call_delta", "name": call.get("name"), "arg_delta": delta})}\n\n'
                     elif evt == "response.function_call_arguments.done":
                         key = _tool_key_from_event(data)
+                        if key is not None and key not in tool_calls_by_key and active_tool_key in tool_calls_by_key:
+                            key = active_tool_key
                         if key is not None and key in tool_calls_by_key and data.get("arguments") is not None:
                             args = data.get("arguments")
                             tool_calls_by_key[key]["arguments"] = args if isinstance(args, str) else json.dumps(args or {}, ensure_ascii=False)

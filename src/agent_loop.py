@@ -43,6 +43,15 @@ from src.tools.registry import native_call_to_tool_block
 logger = logging.getLogger(__name__)
 
 
+def _function_tool_schemas() -> List[Dict]:
+    try:
+        from src.tools.registry import get_tool_registry
+
+        return get_tool_registry().openai_function_schemas()
+    except Exception:
+        return FUNCTION_TOOL_SCHEMAS
+
+
 def _looks_like_notes_list_request(text: str) -> bool:
     """Whether the user is asking to see existing notes, not create one."""
     t = (text or "").lower()
@@ -3349,6 +3358,7 @@ async def stream_agent_loop(
             # write the answer instead of flailing further.
             all_tool_schemas = []
         elif _is_api_model:
+            function_tool_schemas = _function_tool_schemas()
             # Filter schemas by RAG-selected tools (if available)
             if _relevant_tools:
                 # _build_base_prompt unions _ADMIN_TOOLS into the prompt
@@ -3360,7 +3370,7 @@ async def stream_agent_loop(
                 if _needs_admin:
                     _schema_names |= _ADMIN_TOOLS
                 base_schemas = [
-                    s for s in FUNCTION_TOOL_SCHEMAS
+                    s for s in function_tool_schemas
                     if s.get("function", {}).get("name") in _schema_names
                 ]
                 _mcp_filtered = [
@@ -3369,8 +3379,8 @@ async def stream_agent_loop(
                 ]
                 all_tool_schemas = base_schemas + _mcp_filtered
             else:
-                base_schemas = FUNCTION_TOOL_SCHEMAS if _needs_admin else [
-                    s for s in FUNCTION_TOOL_SCHEMAS
+                base_schemas = function_tool_schemas if _needs_admin else [
+                    s for s in function_tool_schemas
                     if s.get("function", {}).get("name") not in _ADMIN_SCHEMA_NAMES
                 ]
                 all_tool_schemas = base_schemas + mcp_schemas

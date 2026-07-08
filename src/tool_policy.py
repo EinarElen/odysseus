@@ -147,12 +147,9 @@ def known_tool_names() -> Set[str]:
 
     names = set(_COMMON_TOOL_NAMES)
     try:
-        from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
+        from src.tools.registry import get_tool_registry
 
-        for schema in FUNCTION_TOOL_SCHEMAS:
-            name = (schema.get("function") or {}).get("name") or schema.get("name")
-            if name:
-                names.add(name)
+        names.update(get_tool_registry().names())
     except Exception:
         pass
     try:

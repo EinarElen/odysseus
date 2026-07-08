@@ -127,14 +127,9 @@ PLAN_MODE_READONLY_TOOLS = {
 # (PLAN_MODE_READONLY_TOOLS). To apply an allowlist through a denylist, plan mode
 # returns the inverse: every known tool name minus the allowlist.
 #
-# Known tool names come from FUNCTION_TOOL_SCHEMAS, but that source is imperfect:
-# some tools are only XML-invocable (e.g. manage_notes, generate_image) and never
-# appear there, and the import can fail outright. Either gap would drop a mutating
-# tool from the subtraction and silently leave it enabled. This set is the static
-# backstop for both: union it in so known mutators are always subtracted, and so a
-# failed import still blocks them (fail closed, never open). Only mutators belong
-# here — read-only tools are covered by the allowlist. Keep in sync when adding
-# new mutating tools.
+# Known tool names come from the canonical tool registry. Some legacy/XML-only
+# mutators still have no native schema, and the dynamic import can fail during
+# early startup. This set is the static fail-closed backstop for both gaps.
 _PLAN_MODE_KNOWN_MUTATORS = {
     "write_file", "create_document", "edit_document", "update_document",
     "suggest_document", "manage_documents", "create_session", "manage_session",
@@ -171,20 +166,11 @@ def plan_mode_disabled_tools() -> Set[str]:
     enabled. MCP tools are handled separately — the loop drops the MCP manager
     entirely in plan mode."""
     try:
-        # agent_tools / tool_parsing / tool_schemas form a mutually-circular
-        # cluster that only resolves cleanly when entered via agent_tools.
-        # Import it first so the lazy schema import works even from a cold
-        # import (e.g. tests) — not just after the app has wired everything up.
-        import src.agent_tools  # noqa: F401
-        from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
+        from src.tools.registry import get_tool_registry
 
-        all_names = {
-            (t.get("function") or {}).get("name")
-            for t in FUNCTION_TOOL_SCHEMAS
-        }
-        all_names.discard(None)
+        all_names = set(get_tool_registry().names())
     except Exception as exc:
-        logger.warning("Unable to load tool schemas for plan-mode gating: %s", exc)
+        logger.warning("Unable to load tool registry for plan-mode gating: %s", exc)
         all_names = set()
     # Subtract the allowlist from all known tool names (schema-derived plus the
     # static mutator backstop). Fail closed: if the schema import failed above,
