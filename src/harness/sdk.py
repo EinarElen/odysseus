@@ -390,12 +390,12 @@ class SdkHarnessAdapter:
             or start_data.get("harness_session_id")
             or start_data.get("sessionId")
             or start_data.get("session_id")
-            or start_data.get("sessionFile")
+            or start_data.get("session_file")
             or session_id
         )
         ref_config = dict(config)
-        session_file = start_data.get("session_file") or start_data.get("sessionFile")
-        session_dir = start_data.get("session_dir") or start_data.get("sessionDir")
+        session_file = start_data.get("session_file")
+        session_dir = start_data.get("session_dir")
         if session_file:
             ref_config["session_file"] = session_file
         if session_dir:

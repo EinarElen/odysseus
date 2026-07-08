@@ -9,8 +9,8 @@ def test_harness_context_reconciliation_is_stable():
         {"role": "user", "content": "Now"},
     ]
 
-    first = reconcile_prompt_for_harness(messages=messages, current_message="Now", harness_id="pi")
-    second = reconcile_prompt_for_harness(messages=messages, current_message="Now", harness_id="pi")
+    first = reconcile_prompt_for_harness(messages=messages, current_message="Now", harness_id="example")
+    second = reconcile_prompt_for_harness(messages=messages, current_message="Now", harness_id="example")
 
     assert first["fingerprint"] == second["fingerprint"]
     assert first["serialized"] == second["serialized"]
@@ -23,7 +23,7 @@ def test_harness_context_reconciliation_excludes_current_user_turn():
             {"role": "user", "content": "Current request"},
         ],
         current_message="Current request",
-        harness_id="pi",
+        harness_id="example",
     )
 
     assert data["messages"] == [{"role": "system", "content": "System rules"}]
@@ -39,9 +39,9 @@ def test_harness_context_reconciliation_changes_only_when_context_changes():
         {"role": "user", "content": "Now"},
     ]
 
-    first = reconcile_prompt_for_harness(messages=base, current_message="Now", harness_id="pi")
-    same = reconcile_prompt_for_harness(messages=base, current_message="Now", harness_id="pi")
-    second = reconcile_prompt_for_harness(messages=changed, current_message="Now", harness_id="pi")
+    first = reconcile_prompt_for_harness(messages=base, current_message="Now", harness_id="example")
+    same = reconcile_prompt_for_harness(messages=base, current_message="Now", harness_id="example")
+    second = reconcile_prompt_for_harness(messages=changed, current_message="Now", harness_id="example")
 
     assert first["fingerprint"] == same["fingerprint"]
     assert first["fingerprint"] != second["fingerprint"]
@@ -53,7 +53,7 @@ def test_harness_context_is_applied_without_mutating_empty_context_prompts():
     data = reconcile_prompt_for_harness(
         messages=[{"role": "system", "content": "System rules"}, {"role": "user", "content": "Hello"}],
         current_message="Hello",
-        harness_id="pi",
+        harness_id="example",
     )
     prompt = apply_reconciled_context_to_prompt(prompt="Hello", reconciliation=data)
 
