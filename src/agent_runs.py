@@ -158,6 +158,16 @@ def get_status(session_id: str) -> Optional[str]:
     return r.status if r else None
 
 
+def buffered_event_count(session_id: str) -> int:
+    """Return the current replay-buffer size for a detached run."""
+    run = _RUNS.get(session_id)
+    return len(run.buffer) if run else 0
+
+
+def reset_for_tests() -> None:
+    _RUNS.clear()
+
+
 async def _drain(session_id: str, agen: AsyncGenerator[str, None],
                  prev_task: Optional[asyncio.Task] = None) -> None:
     """Pull every event from the wrapped generator into the run buffer, fanning

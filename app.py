@@ -689,6 +689,11 @@ app.include_router(setup_chat_routes(
     skills_manager=skills_manager,
 ))
 
+from routes.terminal_client_routes import setup_terminal_client_routes
+app.include_router(setup_terminal_client_routes(
+    session_manager=session_manager,
+))
+
 # Research (background deep-research tasks)
 from routes.research.research_routes import setup_research_routes
 app.include_router(setup_research_routes(research_handler, session_manager=session_manager))

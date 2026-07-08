@@ -47,6 +47,116 @@ def isolated_term_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.delenv("LOCALHOST_BYPASS", raising=False)
 
 
+@pytest.fixture
+def terminal_api_fake(monkeypatch: pytest.MonkeyPatch):
+    calls: list[tuple[str, str, dict[str, object] | None, dict[str, object] | None]] = []
+    state: dict[str, object] = {"runs": {}, "events": {}}
+
+    def _summary(run: dict[str, object]) -> dict[str, object]:
+        events = state["events"].get(run["run_id"], [])  # type: ignore[index, union-attr]
+        return {
+            **run,
+            "events_available": bool(events),
+            "replay_available": bool(events),
+            "cursor_available": bool(events),
+            "event_count": len(events),
+            "last_activity": {
+                "time": events[-1]["time"],
+                "kind": events[-1]["kind"],
+                "level": events[-1]["level"],
+                "summary": events[-1]["summary"],
+            }
+            if events
+            else None,
+            "heartbeat": {
+                "time": events[-1]["time"],
+                "kind": events[-1]["kind"],
+                "level": events[-1]["level"],
+                "summary": events[-1]["summary"],
+            }
+            if events
+            else None,
+        }
+
+    def fake_api(
+        request: ody_term.CommandRequest,
+        method: str,
+        path: str,
+        *,
+        query: dict[str, object] | None = None,
+        body: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        calls.append((method, path, query, body))
+        runs = state["runs"]  # type: ignore[assignment]
+        events_by_run = state["events"]  # type: ignore[assignment]
+        if method == "POST" and path == "/api/terminal/runs":
+            assert body is not None
+            run_id = f"run_api_{len(runs) + 1}"
+            session_id = str(body.get("session_id") or f"ses_api_{len(runs) + 1}")
+            run = {
+                "run_id": run_id,
+                "session_id": session_id,
+                "kind": "chat",
+                "status": "running",
+                "started_at": "2026-07-09T00:00:00+00:00",
+                "updated_at": "2026-07-09T00:00:00+00:00",
+                "finished_at": None,
+            }
+            runs[run_id] = run
+            events_by_run[run_id] = [
+                {
+                    "schema": "ody.event.v1",
+                    "id": f"evt_{run_id}_1",
+                    "seq": 1,
+                    "time": "2026-07-09T00:00:00+00:00",
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "source": "chat",
+                    "kind": "run.status",
+                    "level": "info",
+                    "summary": "chat Run started",
+                    "payload": {"status": "running", "message": str(body.get("message") or ""), "kind": "chat"},
+                    "raw": {
+                        "transport": "sse",
+                        "type": "status",
+                        "body": {"status": "running", "message": str(body.get("message") or "")},
+                    },
+                }
+            ]
+            return {"run": _summary(run), "cursor": {"after": None, "next": "1", "count": 1}}
+        if method == "GET" and path == "/api/terminal/runs":
+            kind = query.get("kind") if query else None
+            status = query.get("status") if query else None
+            values = [_summary(run) for run in runs.values() if (not kind or run.get("kind") == kind)]
+            if status:
+                values = [run for run in values if run.get("status") == status]
+            return {"runs": values}
+        if method == "GET" and path.startswith("/api/terminal/runs/") and path.endswith("/events"):
+            run_id = path.split("/")[4]
+            cursor = int(query["cursor"]) if query and query.get("cursor") is not None else None
+            events = [event for event in events_by_run[run_id] if cursor is None or event["seq"] > cursor]
+            next_cursor = str(events[-1]["seq"]) if events else (str(cursor) if cursor is not None else None)
+            return {
+                "run": _summary(runs[run_id]),
+                "events": events,
+                "cursor": {"after": str(cursor) if cursor is not None else None, "next": next_cursor, "count": len(events)},
+            }
+        if method == "GET" and path.startswith("/api/terminal/runs/"):
+            run_id = path.rsplit("/", 1)[1]
+            return {"run": _summary(runs[run_id])}
+        if method == "POST" and path.endswith("/stop"):
+            run_id = path.split("/")[4]
+            run = runs[run_id]
+            run["status"] = "stopped"
+            run["updated_at"] = "2026-07-09T00:00:01+00:00"
+            run["finished_at"] = "2026-07-09T00:00:01+00:00"
+            return {"run": _summary(run), "stopped": True}
+        raise AssertionError(f"unexpected API request {method} {path}")
+
+    monkeypatch.setattr(ody_term, "_terminal_api_request", fake_api)
+    return {"calls": calls, "state": state}
+
+
 def test_help_exposes_terminal_client_domains() -> None:
     exit_code, stdout, stderr = run_cli(["--help"], is_tty=True)
 
@@ -540,7 +650,7 @@ def test_confirmation_gates_do_not_bypass_missing_capability(isolated_term_state
 
 
 def test_run_start_creates_distinct_chat_run_for_new_session(
-    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
 
@@ -557,15 +667,33 @@ def test_run_start_creates_distinct_chat_run_for_new_session(
     assert run["run_id"] != run["session_id"]
     assert run["events_available"] is True
     assert data["cursor"] == {"after": None, "next": "1", "count": 1}
+    assert terminal_api_fake["calls"][0][0:2] == ("POST", "/api/terminal/runs")
+    assert not Path(ody_term._run_state_path()).exists()
+
+
+def test_run_start_default_chat_uses_terminal_client_api(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+
+    exit_code, stdout, stderr = run_cli(["run", "start", "--message", "default chat", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    run = json.loads(stdout)["data"]["run"]
+    assert run["kind"] == "chat"
+    assert terminal_api_fake["calls"][0][0:2] == ("POST", "/api/terminal/runs")
+    assert terminal_api_fake["calls"][0][3]["message"] == "default chat"
+    assert not Path(ody_term._run_state_path()).exists()
 
 
 def test_run_start_can_target_existing_session_and_status_lists_recent_runs(
-    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
 
     run_cli(["run", "start", "--kind", "chat", "--session-id", "ses_existing", "--message", "first", "--format=json"])
-    exit_code, stdout, stderr = run_cli(["run", "list", "--format=json"])
+    exit_code, stdout, stderr = run_cli(["run", "list", "--kind", "chat", "--format=json"])
 
     assert exit_code == 0
     assert stderr == ""
@@ -589,7 +717,7 @@ def test_run_start_can_target_existing_session_and_status_lists_recent_runs(
 
 
 def test_run_attach_emits_chat_run_event_envelopes_as_jsonl(
-    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
     _, stdout, _ = run_cli(["run", "start", "--kind", "chat", "--session-id", "ses_chat", "--message", "hi"])
@@ -641,7 +769,7 @@ def test_run_attach_raw_requires_raw_event_capability(
 
 
 def test_run_attach_raw_capture_outputs_source_native_diagnostics(
-    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
     _, stdout, _ = run_cli(["run", "start", "--kind", "chat", "--message", "raw me", "--format=json"])
@@ -654,15 +782,9 @@ def test_run_attach_raw_capture_outputs_source_native_diagnostics(
     raw_events = json.loads(stdout)
     assert raw_events == [
         {
-            "body": {
-                "harness_adapter_id": None,
-                "harness_session_id": None,
-                "kind": "chat",
-                "message": "raw me",
-                "status": "running",
-            },
-            "transport": "compat",
-            "type": "run.status",
+            "body": {"message": "raw me", "status": "running"},
+            "transport": "sse",
+            "type": "status",
         }
     ]
 
@@ -782,8 +904,8 @@ def test_run_attach_by_session_fails_when_multiple_active_runs_match(
     isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
-    run_cli(["run", "start", "--session-id", "ses_ambiguous", "--message", "one", "--format=json"])
-    run_cli(["run", "start", "--session-id", "ses_ambiguous", "--message", "two", "--format=json"])
+    run_cli(["run", "start", "--kind", "agent", "--session-id", "ses_ambiguous", "--message", "one", "--format=json"])
+    run_cli(["run", "start", "--kind", "agent", "--session-id", "ses_ambiguous", "--message", "two", "--format=json"])
 
     exit_code, stdout, stderr = run_cli(["run", "attach", "--session-id", "ses_ambiguous", "--format=json"])
 
@@ -801,7 +923,7 @@ def test_run_stop_targets_run_lifecycle_and_updates_status(
     isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
-    _, stdout, _ = run_cli(["run", "start", "--session-id", "ses_stop", "--message", "stop me", "--format=json"])
+    _, stdout, _ = run_cli(["run", "start", "--kind", "agent", "--session-id", "ses_stop", "--message", "stop me", "--format=json"])
     run_id = json.loads(stdout)["data"]["run"]["run_id"]
 
     exit_code, stdout, stderr = run_cli(["run", "stop", run_id, "--yes", "--format=json"])
@@ -836,7 +958,7 @@ def test_ordinary_confirmation_accepts_yes_when_capability_allows(
     isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
-    _, stdout, _ = run_cli(["run", "start", "--message", "confirm stop", "--format=json"])
+    _, stdout, _ = run_cli(["run", "start", "--kind", "agent", "--message", "confirm stop", "--format=json"])
     run_id = json.loads(stdout)["data"]["run"]["run_id"]
 
     exit_code, stdout, stderr = run_cli(["run", "stop", run_id, "--yes", "--format=json"])

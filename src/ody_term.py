@@ -13,6 +13,9 @@ import signal
 import subprocess
 import sys
 import uuid
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request as UrlRequest, urlopen
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -574,6 +577,58 @@ def _resolve_target(request: CommandRequest) -> dict[str, object]:
     }
 
 
+def _token_value() -> str | None:
+    env_token = os.getenv("ODY_TERM_TOKEN", "").strip()
+    if env_token:
+        return env_token
+    token_ref = _selected_token_ref()
+    entry = _secret_token_entry(token_ref)
+    token = entry.get("token")
+    return str(token) if isinstance(token, str) and token else None
+
+
+def _terminal_api_request(
+    request: CommandRequest,
+    method: str,
+    path: str,
+    *,
+    query: dict[str, object] | None = None,
+    body: dict[str, object] | None = None,
+) -> dict[str, object]:
+    target = _resolve_target(request)
+    if not target.get("ok") or not isinstance(target.get("url"), str):
+        raise CommandError(
+            "target_unresolved",
+            str(target.get("reason") or "no target URL found for terminal-client API command"),
+            details={"target": target},
+        )
+    base = str(target["url"]).rstrip("/")
+    query_string = f"?{urlencode({k: v for k, v in (query or {}).items() if v is not None})}" if query else ""
+    url = f"{base}{path}{query_string}"
+    payload = json.dumps(body or {}).encode("utf-8") if body is not None else None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+    token = _token_value()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = UrlRequest(url, data=payload, headers=headers, method=method)
+    try:
+        with urlopen(req, timeout=30) as response:  # noqa: S310 - user-selected Odysseus target URL.
+            data = json.loads(response.read().decode("utf-8") or "{}")
+    except HTTPError as exc:
+        try:
+            details = json.loads(exc.read().decode("utf-8") or "{}")
+        except Exception:
+            details = {"status": exc.code}
+        raise CommandError("terminal_api_error", f"terminal-client API returned HTTP {exc.code}", exit_code=1, details=details) from exc
+    except (OSError, URLError, json.JSONDecodeError) as exc:
+        raise CommandError("terminal_api_unavailable", f"terminal-client API request failed: {exc}", exit_code=1) from exc
+    if not isinstance(data, dict):
+        raise CommandError("terminal_api_error", "terminal-client API response must be a JSON object", exit_code=1)
+    return cast(dict[str, object], data)
+
+
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -836,6 +891,17 @@ def _run_events(state: dict[str, object], run_id: str) -> list[dict[str, object]
     return [event for event in events if isinstance(event, dict)]
 
 
+def _has_local_run(run_id: str | None) -> bool:
+    if not run_id:
+        return False
+    try:
+        return run_id in _runs_payload(_load_run_state())
+    except CommandError:
+        raise
+    except Exception:
+        return False
+
+
 def _all_run_events(state: dict[str, object]) -> list[dict[str, object]]:
     events: list[dict[str, object]] = []
     for run_id in _events_payload(state):
@@ -973,6 +1039,23 @@ def _run_start(request: CommandRequest) -> CommandResponse:
     kind = str(options.get("kind") or "chat")
     if kind not in {"chat", "agent", "harness"}:
         raise CommandError("unsupported_run_kind", f"run start supports chat, agent, and harness Runs, not {kind}")
+    if kind == "chat":
+        payload = _terminal_api_request(
+            request,
+            "POST",
+            "/api/terminal/runs",
+            body={
+                "kind": "chat",
+                "session_id": options.get("session_id") if isinstance(options.get("session_id"), str) else None,
+                "message": str(options.get("message") or ""),
+            },
+        )
+        return CommandResponse(
+            ok=True,
+            command=["run", "start"],
+            message=f"Started chat Run {cast(dict[str, object], payload.get('run', {})).get('run_id', '')}",
+            data=payload,
+        )
     if kind == "harness" and not isinstance(options.get("harness_adapter"), str):
         raise CommandError("missing_harness_adapter", "harness Runs require --harness-adapter")
     state = _load_run_state()
@@ -1034,10 +1117,20 @@ def _run_list(request: CommandRequest) -> CommandResponse:
     options, positionals = _parse_command_options(request.args)
     if positionals:
         raise CommandError("unexpected_run_args", f"unexpected run list args: {' '.join(positionals)}")
+    kind_filter = str(options.get("kind")) if isinstance(options.get("kind"), str) else None
+    status_filter = str(options.get("status")) if isinstance(options.get("status"), str) else None
+    if kind_filter == "chat":
+        payload = _terminal_api_request(request, "GET", "/api/terminal/runs", query={"kind": "chat", "status": status_filter})
+        runs = payload.get("runs")
+        return CommandResponse(
+            ok=True,
+            command=["run", "list"],
+            message=f"{len(runs) if isinstance(runs, list) else 0} Run(s)",
+            data={"runs": runs if isinstance(runs, list) else []},
+        )
     state = _load_run_state()
     runs = [_run_summary(state, run) for run in _runs_payload(state).values()]
     runs.sort(key=lambda run: str(run.get("updated_at") or ""), reverse=True)
-    status_filter = str(options.get("status")) if isinstance(options.get("status"), str) else None
     if status_filter:
         runs = [run for run in runs if run.get("status") == status_filter]
     return CommandResponse(ok=True, command=["run", "list"], message=f"{len(runs)} Run(s)", data={"runs": runs})
@@ -1050,6 +1143,15 @@ def _run_status(request: CommandRequest) -> CommandResponse:
         raise CommandError("unexpected_run_args", f"unexpected run status args: {' '.join(positionals[1:])}")
     run_id = positionals[0] if positionals else (str(options["run_id"]) if isinstance(options.get("run_id"), str) else None)
     session_id = str(options["session_id"]) if isinstance(options.get("session_id"), str) else None
+    if run_id and run_id.startswith("run_") and not _has_local_run(run_id):
+        payload = _terminal_api_request(request, "GET", f"/api/terminal/runs/{run_id}")
+        run = cast(dict[str, object], payload.get("run", {}))
+        return CommandResponse(
+            ok=True,
+            command=["run", "status"],
+            message=f"Run {run.get('run_id', run_id)} is {run.get('status', 'unknown')}",
+            data={"run": run},
+        )
     state = _load_run_state()
     run = _resolve_run_reference(state, run_id=run_id, session_id=session_id)
     return CommandResponse(
@@ -1073,6 +1175,16 @@ def _run_attach(request: CommandRequest) -> CommandResponse:
         cursor = int(raw_cursor) if isinstance(raw_cursor, str) and raw_cursor else None
     except ValueError as exc:
         raise CommandError("invalid_cursor", f"--cursor must be an integer: {raw_cursor}") from exc
+    if run_id and run_id.startswith("run_") and not _has_local_run(run_id):
+        payload = _terminal_api_request(request, "GET", f"/api/terminal/runs/{run_id}/events", query={"cursor": cursor})
+        events = payload.get("events")
+        return CommandResponse(
+            ok=True,
+            command=["run", "attach"],
+            message=f"{len(events) if isinstance(events, list) else 0} Run Event Envelope(s)",
+            data=payload,
+            raw=[event.get("raw") for event in events if isinstance(event, dict)] if isinstance(events, list) else [],
+        )
     state = _load_run_state()
     run = _resolve_run_reference(state, run_id=run_id, session_id=session_id)
     events = []
@@ -1103,6 +1215,15 @@ def _run_stop(request: CommandRequest) -> CommandResponse:
         raise CommandError("unexpected_run_args", f"unexpected run stop args: {' '.join(positionals[1:])}")
     run_id = positionals[0] if positionals else (str(options["run_id"]) if isinstance(options.get("run_id"), str) else None)
     session_id = str(options["session_id"]) if isinstance(options.get("session_id"), str) else None
+    if run_id and run_id.startswith("run_") and not _has_local_run(run_id):
+        payload = _terminal_api_request(request, "POST", f"/api/terminal/runs/{run_id}/stop")
+        run = cast(dict[str, object], payload.get("run", {}))
+        return CommandResponse(
+            ok=True,
+            command=["run", "stop"],
+            message=f"Stopped Run {run.get('run_id', run_id)}",
+            data={"run": run, "confirmation": confirmation},
+        )
     state = _load_run_state()
     run = _resolve_run_reference(state, run_id=run_id, session_id=session_id)
     now = _utc_now()
