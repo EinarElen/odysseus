@@ -13,6 +13,10 @@ if str(SRC) not in sys.path:
 
 import ody_term  # noqa: E402
 
+MODEL_ENDPOINT_URL = "http://model.local/v1/chat/completions"
+TEST_MODEL = "test-model"
+TEST_PRESET = "default"
+
 
 class TtyStringIO(io.StringIO):
     def __init__(self, *, is_tty: bool) -> None:
@@ -722,6 +726,36 @@ def test_run_start_default_chat_uses_terminal_client_api(
     assert terminal_api_fake["calls"][0][0:2] == ("POST", "/api/terminal/runs")
     assert terminal_api_fake["calls"][0][3]["message"] == "default chat"
     assert not Path(ody_term._run_state_path()).exists()
+
+
+def test_run_start_forwards_new_session_runtime_fields(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+
+    exit_code, stdout, stderr = run_cli(
+        [
+            "run",
+            "start",
+            "--message",
+            "new chat",
+            "--endpoint-url",
+            MODEL_ENDPOINT_URL,
+            "--model",
+            TEST_MODEL,
+            "--preset-id",
+            TEST_PRESET,
+            "--format=json",
+        ]
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert json.loads(stdout)["data"]["run"]["session_id"].startswith("ses_")
+    body = terminal_api_fake["calls"][0][3]
+    assert body["endpoint_url"] == MODEL_ENDPOINT_URL
+    assert body["model"] == TEST_MODEL
+    assert body["preset_id"] == TEST_PRESET
 
 
 def test_run_start_can_target_existing_session_and_status_lists_recent_runs(

@@ -233,10 +233,6 @@ async def stop_run(*, run_id: str | None = None, session_id: str | None = None) 
     if stopped:
         await asyncio.sleep(0)
     _sync_run_status(run)
-    if not stopped and run.status == "running":
-        run.status = "stopped"
-        run.updated_at = _utc_now()
-        run.finished_at = run.updated_at
     return {"run": run_summary(run), "stopped": stopped}
 
 

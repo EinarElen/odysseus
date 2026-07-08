@@ -266,6 +266,9 @@ def _parse_command_options(args: list[str]) -> tuple[dict[str, str | bool], list
         "--parent-id",
         "--tag",
         "--message",
+        "--endpoint-url",
+        "--model",
+        "--preset-id",
         "--status",
         "--view",
         "--key",
@@ -1147,6 +1150,9 @@ def _run_start(request: CommandRequest) -> CommandResponse:
                 "kind": "chat",
                 "session_id": options.get("session_id") if isinstance(options.get("session_id"), str) else None,
                 "message": str(options.get("message") or ""),
+                "endpoint_url": options.get("endpoint_url") if isinstance(options.get("endpoint_url"), str) else None,
+                "model": options.get("model") if isinstance(options.get("model"), str) else None,
+                "preset_id": options.get("preset_id") if isinstance(options.get("preset_id"), str) else None,
             },
         )
         return CommandResponse(

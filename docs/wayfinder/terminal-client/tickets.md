@@ -244,6 +244,17 @@ detached-run substrate and still must be wired into full Odysseus chat
 execution with real session/model validation, chat processing, and durable
 history updates.
 
+2026-07-09 update: `POST /api/terminal/runs` now requires the real Odysseus
+chat runtime, can create a real Session when `endpoint_url` and `model` are
+provided, targets existing Sessions through `SessionManager`, drains
+`stream_llm_with_fallback` through the existing detached run buffer, persists
+user/assistant turns, and refuses to fake success when the chat runtime is not
+registered. `ody-term run start` forwards `--endpoint-url`, `--model`, and
+`--preset-id` to that API path. Focused route/CLI tests prove the API no longer
+uses the synthetic single-event stream, but the ticket remains open until this
+is verified against a live configured model/backend rather than a test-patched
+LLM stream.
+
 ## Promote Event Inspection To Real Odysseus Activity
 
 **What to build:** `ody-term inspect events` reads normalized Event Envelopes
