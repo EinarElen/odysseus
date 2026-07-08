@@ -20,6 +20,7 @@ from src.llm_core import (
     stream_llm_with_fallback,
     _is_ollama_native_url,
 )
+from src.chatgpt_subscription import is_chatgpt_subscription_base
 from src.model_context import estimate_tokens
 from src.settings import get_setting
 from src.prompt_security import untrusted_context_message
@@ -3135,7 +3136,13 @@ async def stream_agent_loop(
     # the fenced-block path is used instead of native function calling.
     _is_ollama_native = _is_ollama_native_url(endpoint_url or "")
     _ollama_openai_compat = _is_ollama_openai_compat_url(endpoint_url or "")
-    if _endpoint_supports is True:
+    if is_chatgpt_subscription_base(endpoint_url):
+        # The ChatGPT Subscription Codex Responses backend is a hosted tool-call
+        # provider. Older local endpoint rows may have supports_tools=False from
+        # before provisioning stamped it true; do not let that stale UI flag
+        # downgrade Codex to fenced-text tools and hide native-only tools.
+        _is_api_model = True
+    elif _endpoint_supports is True:
         _is_api_model = True
     elif (
         _endpoint_supports is False

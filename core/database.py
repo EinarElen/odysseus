@@ -1044,6 +1044,37 @@ def _migrate_add_supports_tools_column():
             pass
 
 
+def _migrate_chatgpt_subscription_supports_tools():
+    """ChatGPT Subscription Codex endpoints always use native tool schemas."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute("PRAGMA table_info(model_endpoints)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if not columns or "supports_tools" not in columns:
+            return
+        conn.execute(
+            """
+            UPDATE model_endpoints
+               SET supports_tools = 1
+             WHERE lower(rtrim(base_url, '/')) = 'https://chatgpt.com/backend-api/codex'
+               AND (supports_tools IS NULL OR supports_tools = 0)
+            """
+        )
+        conn.commit()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"chatgpt supports_tools migration failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def _migrate_add_cached_models_column():
     """Add cached_models column to model_endpoints if it doesn't exist."""
     import sqlite3
@@ -1891,6 +1922,7 @@ def init_db():
     _migrate_add_model_endpoint_owner_column()
     _migrate_add_provider_auth_id_column()
     _migrate_add_supports_tools_column()
+    _migrate_chatgpt_subscription_supports_tools()
     _migrate_add_task_run_model_column()
     _migrate_add_owner_column()
     _migrate_add_document_archived_column()

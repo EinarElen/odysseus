@@ -1,7 +1,12 @@
 import asyncio
 import json
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from core.database import Base, ModelEndpoint
 from src import chatgpt_subscription, llm_core
+import src.agent_loop as agent_loop
 
 
 class _FakeResp:
@@ -189,3 +194,62 @@ def test_chatgpt_subscription_stream_emits_tool_calls(monkeypatch):
     assert client.calls[0][2]["json"]["tools"][0]["name"] == "bash"
     calls = next(event["calls"] for event in events if event.get("type") == "tool_calls")
     assert calls == [{"id": "call_1", "name": "bash", "arguments": '{"command":"pwd"}'}]
+
+
+def test_chatgpt_subscription_agent_sends_tools_despite_stale_false_endpoint(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    TestSessionLocal = sessionmaker(bind=engine, autoflush=False)
+    db = TestSessionLocal()
+    try:
+        db.add(ModelEndpoint(
+            id="chatgpt-old",
+            name="ChatGPT Subscription",
+            base_url="https://chatgpt.com/backend-api/codex",
+            owner="alice",
+            is_enabled=True,
+            endpoint_kind="api",
+            supports_tools=False,
+            cached_models=json.dumps(["gpt-5.5"]),
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    import core.database as database
+
+    monkeypatch.setattr(database, "SessionLocal", TestSessionLocal)
+    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: 0 if key == "agent_input_token_budget" else default, raising=False)
+    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None, raising=False)
+    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *a, **k: 10, raising=False)
+    monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda owner: set(), raising=False)
+
+    captured = {}
+
+    async def _fake_stream(_candidates, messages, **kwargs):
+        captured["tools"] = kwargs.get("tools")
+        yield "data: " + json.dumps({"delta": "ok"}) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", _fake_stream, raising=False)
+
+    async def _run():
+        return [
+            chunk async for chunk in agent_loop.stream_agent_loop(
+                "https://chatgpt.com/backend-api/codex/responses",
+                "gpt-5.5",
+                [{"role": "user", "content": "Please research diff viewer tools."}],
+                max_rounds=1,
+                owner="alice",
+                relevant_tools={"trigger_research"},
+            )
+        ]
+
+    asyncio.run(_run())
+
+    tool_names = {
+        tool["function"]["name"]
+        for tool in (captured.get("tools") or [])
+        if isinstance(tool, dict) and "function" in tool
+    }
+    assert "trigger_research" in tool_names
