@@ -419,11 +419,11 @@ async function command(id, payload) {
 				sessionId: session.sessionId,
 				session_file: session.sessionFile,
 				session_dir: sessionManager?.getSessionDir?.(),
-				model: session.model,
+				model: compactValue(session.model),
 				thinkingLevel: session.thinkingLevel,
 				isStreaming: session.isStreaming,
-				activeTools: session.getActiveToolNames(),
-				allTools: session.getAllTools(),
+				activeTools: session.getActiveToolNames?.() ?? [],
+				allTools: compactValue(session.getAllTools?.() ?? []),
 			});
 			break;
 		default:
