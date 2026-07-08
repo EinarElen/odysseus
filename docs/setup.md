@@ -81,6 +81,11 @@ ODYSSEUS_HOST=0.0.0.0 ./start-macos.sh
 The script also reads `.env` at startup, so `APP_BIND=0.0.0.0` and `APP_PORT`
 set there are picked up automatically without a command-line override each run.
 
+For ongoing remote access, prefer **Settings -> Remote Access** with Tailscale
+Serve. That keeps Odysseus listening on `127.0.0.1` and exposes
+`http://127.0.0.1:<port>` privately through a tailnet HTTPS endpoint. See
+[`docs/remote-access.md`](remote-access.md).
+
 Keep `AUTH_ENABLED=true` (the default) before binding outside loopback. Do not
 expose this port directly to the public internet. To build a clickable app wrapper:
 
@@ -413,7 +418,7 @@ Odysseus serves plain HTTP on its app port. Docker Compose binds Odysseus and th
 3. Put the authenticated Odysseus web/API entrypoint behind that layer.
 4. Keep raw service and model ports internal-only.
 
-Cloudflare Access, Tailscale, Caddy, nginx, and Traefik can all fit this pattern; none are required by Odysseus. If your access layer reaches Odysseus on the same host, proxy to `http://127.0.0.1:7000` and keep `AUTH_ENABLED=true`, `LOCALHOST_BYPASS=false`, and `SECURE_COOKIES=true`.
+Cloudflare Access, Tailscale, Caddy, nginx, and Traefik can all fit this pattern; none are required by Odysseus. If your access layer reaches Odysseus on the same host, proxy to `http://127.0.0.1:7000` and keep `AUTH_ENABLED=true`, `LOCALHOST_BYPASS=false`, and `SECURE_COOKIES=true`. For Tailscale, the built-in Remote Access settings page can create pairing invites, show candidate endpoints, and run Tailscale Serve against loopback.
 `ALLOWED_ORIGINS` lists exact permitted origins for cross-origin browser/API clients; ordinary same-origin reverse-proxy access usually does not need a special CORS entry.
 
 Common internal-only ports from the default docs/compose setup:

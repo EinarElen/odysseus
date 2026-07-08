@@ -11,6 +11,11 @@ Odysseus server offers and pair to it, without duplicating any LLM logic.
 | GET | `/api/companion/pair` | **admin cookie** | pairing page (a form; never mints) |
 | POST | `/api/companion/pair` | **admin cookie** | mint a one-time pairing token (`?format=json` for an in-app screen) |
 
+For new client work, prefer the client-agnostic remote-access flow in
+`docs/remote-access.md`. It adds short-lived pairing invites, known-client
+records, endpoint advertisement, and Tailscale Serve controls. The companion
+bridge remains a small compatibility layer for the existing LAN/mobile bridge.
+
 `/models` scopes to the caller's real owner plus legacy null-owner shared rows
 (same rule as `owner_filter`) and never returns API-key material.
 
