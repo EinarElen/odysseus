@@ -37,10 +37,11 @@ ody-term inspect aliases --format=json
 
 ## Authentication
 
-When server authentication is enabled, create an owner-attributed API token
-with the backend `terminal` profile, then store it locally together with the
-scopes the server granted. The scopes are capability hints for the client; the
-server remains the authorization boundary.
+When server authentication is enabled, open **Settings → Integrations → Add
+Integration → Terminal Client** and create an owner-attributed API token with
+the backend `terminal` profile. The token is revealed once together with a
+ready-to-copy login command. The scopes are capability hints for the client;
+the server remains the authorization boundary.
 
 ```bash
 ody-term auth login \

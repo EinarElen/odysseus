@@ -9,6 +9,7 @@ import { sortModelIds } from './modelSort.js';
 import { providerLogo } from './providers.js';
 import { isAltGrEvent } from './platform.js';
 import { bindMenuDismiss } from './escMenuStack.js';
+import { clearTerminalSecrets, copyTerminalCommand, createTerminalToken, isTerminalToken } from './terminalClientIntegration.js';
 
 let initialized = false;
 let modalEl = null;
@@ -3775,6 +3776,7 @@ const INTG_TYPES = {
   mcp:     { label: 'MCP',     icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>' },
   codex:   { label: 'Codex',   icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M22.282 9.821a5.985 5.985 0 0 0-.516-4.91 6.046 6.046 0 0 0-6.51-2.9A6.065 6.065 0 0 0 10.696.453a6.023 6.023 0 0 0-5.75 4.172 6.061 6.061 0 0 0-3.946 2.945 6.024 6.024 0 0 0 .742 7.099 5.98 5.98 0 0 0 .516 4.911 6.046 6.046 0 0 0 6.51 2.9A5.996 5.996 0 0 0 13.26 23.547a6.023 6.023 0 0 0 5.75-4.172 6.061 6.061 0 0 0 3.946-2.945 6.024 6.024 0 0 0-.674-6.609zM13.26 21.047a4.508 4.508 0 0 1-2.886-1.041l.143-.082 4.793-2.769a.777.777 0 0 0 .391-.676V10.34l2.026 1.17a.072.072 0 0 1 .039.061v5.596a4.532 4.532 0 0 1-4.506 4.48zM3.968 17.64a4.473 4.473 0 0 1-.537-3.018l.143.086 4.793 2.769a.79.79 0 0 0 .782 0l5.852-3.379v2.34a.072.072 0 0 1-.029.062l-4.845 2.796a4.532 4.532 0 0 1-6.159-1.656zM2.804 7.922a4.49 4.49 0 0 1 2.348-1.973V11.6a.778.778 0 0 0 .391.676l5.852 3.378-2.026 1.17a.072.072 0 0 1-.068 0L4.456 14.03a4.532 4.532 0 0 1-1.652-6.108zm16.423 3.823L13.375 8.367l2.026-1.17a.072.072 0 0 1 .068 0l4.845 2.796a4.525 4.525 0 0 1-.7 8.08V12.42a.778.778 0 0 0-.387-.676zm2.015-3.025l-.143-.086-4.793-2.769a.79.79 0 0 0-.782 0L9.672 9.243V6.903a.072.072 0 0 1 .029-.062l4.845-2.796a4.525 4.525 0 0 1 6.696 4.675zM8.598 12.66L6.57 11.49a.072.072 0 0 1-.039-.061V5.833a4.525 4.525 0 0 1 7.413-3.48l-.143.082-4.793 2.769a.777.777 0 0 0-.391.676l-.019 6.78zm1.1-2.379l2.607-1.505 2.607 1.505v3.01l-2.607 1.505-2.607-1.505z"/></svg>' },
   claude:  { label: 'Claude',  icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z"/></svg>' },
+  terminal:{ label: 'Terminal', icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3"/><path d="M13 15h4"/></svg>' },
   vault:   { label: 'Vault',   icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>' },
 };
 
@@ -3926,7 +3928,8 @@ async function initUnifiedIntegrations() {
       const scopes = tok.scopes || [];
       const lowerName = (tok.name || '').toLowerCase();
       let agentType = null;
-      if (lowerName.startsWith('claude agent')) agentType = 'claude';
+      if (isTerminalToken(tok)) agentType = 'terminal';
+      else if (lowerName.startsWith('claude agent')) agentType = 'claude';
       else if (lowerName.startsWith('codex agent')) agentType = 'codex';
       else if (scopes.some(s => String(s || '').startsWith('todos:') || String(s || '').startsWith('email:') || String(s || '').startsWith('documents:'))) {
         // Legacy / un-prefixed scoped tokens fall back to Codex for backwards compat.
@@ -3934,7 +3937,8 @@ async function initUnifiedIntegrations() {
       }
       if (!agentType) continue;
       const detail = `${tok.token_prefix || 'token'}... - ${scopes.join(', ') || 'chat'}`;
-      items.push({ type: agentType, id: tok.id, name: tok.name || (agentType === 'claude' ? 'Claude Agent' : 'Codex Agent'), detail, enabled: true, data: tok });
+      const fallbackName = agentType === 'terminal' ? 'Terminal Client' : agentType === 'claude' ? 'Claude Agent' : 'Codex Agent';
+      items.push({ type: agentType, id: tok.id, name: tok.name || fallbackName, detail, enabled: true, data: tok });
     }
     // Vaultwarden removed as an integration option.
     return items;
@@ -3948,14 +3952,14 @@ async function initUnifiedIntegrations() {
     const statusDot = item.enabled
       ? '<span style="width:8px;height:8px;border-radius:50%;background:var(--color-success,#50fa7b);flex-shrink:0;--notif-glow:var(--color-success,#50fa7b);animation:cookbook-notif-pulse 2s ease-in-out infinite;" title="Active"></span>'
       : '<span style="width:8px;height:8px;border-radius:50%;background:var(--fg);opacity:0.3;flex-shrink:0" title="Disabled"></span>';
-    return `<div class="intg-card" data-intg-id="${item.id}" data-intg-type="${item.type}" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:color-mix(in srgb, var(--fg) 3%, transparent);margin-bottom:6px;cursor:pointer;transition:all 0.15s;" title="Click to edit">
+    return `<div class="intg-card" data-intg-id="${esc(item.id)}" data-intg-type="${esc(item.type)}" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:color-mix(in srgb, var(--fg) 3%, transparent);margin-bottom:6px;cursor:pointer;transition:all 0.15s;" title="Click to edit">
       <span style="color:var(--accent, var(--red));flex-shrink:0">${t.icon}</span>
       <div style="flex:1;min-width:0">
-        <div style="font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px">${item.name} <span style="font-size:9px;text-transform:uppercase;letter-spacing:0.5px;padding:1px 5px;border:1px solid color-mix(in srgb, var(--accent, var(--red)) 50%, transparent);border-radius:3px;color:var(--accent, var(--red));background:color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);">${t.label}</span></div>
-        <div style="font-size:11px;opacity:0.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${item.detail || ''}</div>
+        <div style="font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px">${esc(item.name)} <span style="font-size:9px;text-transform:uppercase;letter-spacing:0.5px;padding:1px 5px;border:1px solid color-mix(in srgb, var(--accent, var(--red)) 50%, transparent);border-radius:3px;color:var(--accent, var(--red));background:color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);">${esc(t.label)}</span></div>
+        <div style="font-size:11px;opacity:0.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(item.detail || '')}</div>
       </div>
       ${statusDot}
-      <button class="admin-btn-sm intg-del-btn" data-intg-id="${item.id}" data-intg-type="${item.type}" data-intg-name="${(item.name || '').replace(/"/g, '&quot;')}" title="Remove" style="background:none;border:none;padding:4px;cursor:pointer;color:var(--red);opacity:0.55;display:inline-flex;align-items:center;justify-content:center;">
+      <button class="admin-btn-sm intg-del-btn" data-intg-id="${esc(item.id)}" data-intg-type="${esc(item.type)}" data-intg-name="${esc(item.name || '')}" title="Remove" style="background:none;border:none;padding:4px;cursor:pointer;color:var(--red);opacity:0.55;display:inline-flex;align-items:center;justify-content:center;">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
       </button>
     </div>`;
@@ -4010,10 +4014,11 @@ async function initUnifiedIntegrations() {
           }
           else if (type === 'email') await fetch(`/api/email/accounts/${id}`, { method: 'DELETE', credentials: 'same-origin' });
           else if (type === 'mcp') await fetch(`/api/mcp/servers/${id}`, { method: 'DELETE', credentials: 'same-origin' });
-          else if (type === 'codex' || type === 'claude') await fetch(`/api/tokens/${id}`, { method: 'DELETE', credentials: 'same-origin' });
+          else if (type === 'codex' || type === 'claude' || type === 'terminal') await fetch(`/api/tokens/${id}`, { method: 'DELETE', credentials: 'same-origin' });
           else if (type === 'vault') await fetch('/api/vault/logout', { method: 'POST', credentials: 'same-origin' });
         } catch (_) {}
         formEl.style.display = 'none';
+        clearTerminalSecrets(formEl);
         await renderList();
         notifyIntegrationsChanged();
       });
@@ -4029,6 +4034,7 @@ async function initUnifiedIntegrations() {
     else if (type === 'mcp') showMcpForm(editId);
     else if (type === 'codex') showAgentForm('codex', editId);
     else if (type === 'claude') showAgentForm('claude', editId);
+    else if (type === 'terminal') showTerminalForm(editId);
     else if (type === 'vault') showVaultForm();
   }
 
@@ -5916,6 +5922,102 @@ async function initUnifiedIntegrations() {
     // remain unwired so they only persist on Save click below.
   }
 
+  async function showTerminalForm(editId) {
+    let existing = null;
+    if (editId && editId !== 'new') {
+      try {
+        const r = await fetch('/api/tokens', { credentials: 'same-origin' });
+        if (!r.ok) throw new Error('Token lookup failed');
+        const tokens = await r.json();
+        existing = (Array.isArray(tokens) ? tokens : []).find(tok => String(tok.id) === String(editId)) || null;
+      } catch (err) {
+        formEl.innerHTML = `<div class="admin-card" style="margin-top:8px"><span style="font-size:11px;color:var(--red)">${esc(err?.message || 'Token lookup failed')}</span></div>`;
+        return;
+      }
+    }
+
+    if (existing) {
+      const scopes = Array.isArray(existing.scopes) ? existing.scopes : [];
+      formEl.innerHTML = `
+        <div class="admin-card" style="margin-top:8px">
+          <div class="settings-col">
+            <h2 style="font-size:13px;margin:0 0 4px">${esc(existing.name || 'Terminal Client')}</h2>
+            <div style="font-size:11px;opacity:0.62">${esc(existing.token_prefix || 'ody_')}... · ${esc(scopes.join(', '))}</div>
+            <div style="font-size:11px;opacity:0.62;margin-top:8px;line-height:1.4">The secret is shown only when created. Revoke this token from its integration card if it needs to be replaced.</div>
+            <div style="display:flex;justify-content:flex-end;margin-top:10px">
+              <button class="admin-btn-add" id="uf-terminal-close">Close</button>
+            </div>
+          </div>
+        </div>`;
+      el('uf-terminal-close')?.addEventListener('click', () => { formEl.style.display = 'none'; });
+      return;
+    }
+
+    formEl.innerHTML = `
+      <div class="admin-card" style="margin-top:8px">
+        <div class="settings-col">
+          <h2 style="font-size:13px;margin:0">Terminal Client</h2>
+          <div style="font-size:11px;opacity:0.62;line-height:1.4">Create an owner-attributed token with the complete Terminal Client profile. The server still enforces every scope and ownership check.</div>
+          <div id="uf-terminal-prompt">
+            <div class="settings-row" style="margin-top:8px">
+              <label class="settings-label">Name</label>
+              <input id="uf-terminal-name" class="settings-input" value="Terminal Client" maxlength="100">
+            </div>
+          </div>
+          <div id="uf-terminal-reveal" style="display:none">
+            <div style="font-weight:600;font-size:12px;margin:8px 0 4px">Token</div>
+            <div style="font-size:11px;opacity:0.62;margin-bottom:4px">Copy this token now. It will not be shown again.</div>
+            <code id="uf-terminal-token" style="display:block;word-break:break-all;font-size:11px;padding:7px 8px;background:rgba(0,0,0,0.08);border-radius:4px"></code>
+            <div style="font-weight:600;font-size:12px;margin:12px 0 4px">Store with ody-term</div>
+            <pre style="margin:0;white-space:pre-wrap;overflow-x:auto;font-size:10px;line-height:1.45;padding:8px 10px;background:rgba(0,0,0,0.08);border-radius:4px"><code id="uf-terminal-command"></code></pre>
+            <button type="button" class="admin-btn-sm" id="uf-terminal-copy-command" style="margin-top:6px">Copy command</button>
+          </div>
+          <div class="settings-row" style="margin-top:10px;align-items:center;gap:6px">
+            <button class="admin-btn-add" id="uf-terminal-cancel">Cancel</button>
+            <span id="uf-terminal-msg" style="font-size:11px;flex:1;text-align:center"></span>
+            <button class="admin-btn-add" id="uf-terminal-create" style="font-weight:600">Create token</button>
+          </div>
+        </div>
+      </div>`;
+
+    el('uf-terminal-cancel')?.addEventListener('click', () => {
+      clearTerminalSecrets(formEl);
+      formEl.style.display = 'none';
+    });
+    el('uf-terminal-create')?.addEventListener('click', async () => {
+      const createBtn = el('uf-terminal-create');
+      const msg = el('uf-terminal-msg');
+      const name = (el('uf-terminal-name')?.value || '').trim() || 'Terminal Client';
+      createBtn.disabled = true;
+      msg.textContent = 'Creating…';
+      try {
+        const d = await createTerminalToken(fetch, name);
+        el('uf-terminal-token').textContent = d.token;
+        el('uf-terminal-command').textContent = d.command;
+        el('uf-terminal-prompt').style.display = 'none';
+        el('uf-terminal-reveal').style.display = '';
+        createBtn.style.display = 'none';
+        msg.textContent = 'Created. Store it before closing.';
+        msg.style.color = 'var(--green, #50fa7b)';
+        el('uf-terminal-copy-command')?.addEventListener('click', async () => {
+          try {
+            const command = el('uf-terminal-command')?.textContent || '';
+            await copyTerminalCommand(navigator.clipboard, command);
+            msg.textContent = 'Command copied';
+          } catch (_) {
+            msg.textContent = 'Select and copy the command above';
+          }
+        });
+        await renderList();
+        notifyIntegrationsChanged();
+      } catch (err) {
+        createBtn.disabled = false;
+        msg.textContent = err?.message || 'Token creation failed';
+        msg.style.color = 'var(--red)';
+      }
+    });
+  }
+
   // ── Add button now drops a type-picker menu directly anchored to itself ──
   if (addBtn) {
     const _typeOptions = [
@@ -5923,6 +6025,7 @@ async function initUnifiedIntegrations() {
       ['caldav', 'CalDAV Calendar'],
       ['claude', 'Claude Agent'],
       ['codex', 'Codex Agent'],
+      ['terminal', 'Terminal Client'],
       ['carddav', 'Contacts (CardDAV)'],
       ['contacts', 'Contacts Import'],
       ['email', 'Email (IMAP/SMTP)'],
@@ -6017,6 +6120,7 @@ export function open(tab) {
 
 export function close() {
   if (!modalEl) return;
+  clearTerminalSecrets(modalEl);
   // Always clear the appearance-tab body class so the rest of the app
   // doesn't keep its dimmed state if the modal got closed mid-tab.
   document.body.classList.remove('settings-appearance-open');
