@@ -289,6 +289,15 @@ the real recent Run with heartbeat/activity metadata. A second live Run
 status reported `stopped` with a server-side `finished_at`. This closes the
 ticket.
 
+2026-07-10 default-resolution follow-up: a new chat Run with no Session,
+`endpoint_url`, or `model` now resolves the API-token owner's configured
+Default Model through the shared owner-scoped endpoint resolver. Explicit
+endpoint/model pairs still win, incomplete explicit pairs fail, and a missing
+default returns a bounded error without creating a Session. Live verification
+created `run_2bea4044edfe49b2` and new Session `ses_7823b73aac534194`
+without runtime flags, streamed seven persisted envelopes, selected configured
+model `gpt-5.5`, and returned `ODY_TERM_DEFAULT_OK`.
+
 ## Promote Event Inspection To Real Odysseus Activity
 
 **What to build:** `ody-term inspect events` reads normalized Event Envelopes

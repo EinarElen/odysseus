@@ -476,6 +476,10 @@ def test_terminal_client_chat_run_can_create_real_session(monkeypatch):
         yield 'data: {"delta": "new session"}\n\n'
         yield "data: [DONE]\n\n"
 
+    monkeypatch.setattr(
+        "src.endpoint_resolver.resolve_endpoint",
+        lambda *args, **kwargs: pytest.fail("explicit endpoint/model must not resolve the configured default"),
+    )
     monkeypatch.setattr("routes.terminal_client_routes.stream_llm_with_fallback", fake_stream_llm_with_fallback)
     install_terminal_route_fakes(monkeypatch)
 
@@ -499,6 +503,60 @@ def test_terminal_client_chat_run_can_create_real_session(monkeypatch):
     assert manager.sessions[run["session_id"]].model == CREATED_MODEL
     events = client.get(f"/api/terminal/runs/{run['run_id']}/events").json()["events"]
     assert events[-1]["kind"] == "run.status"
+
+
+def test_terminal_client_chat_run_resolves_owner_default_model(monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    manager = FakeSessionManager()
+    resolved_for = []
+
+    def fake_resolve_endpoint(prefix, owner=None):
+        resolved_for.append((prefix, owner))
+        return MODEL_ENDPOINT_URL, CREATED_MODEL, {"Authorization": "Bearer resolved"}
+
+    async def fake_stream_llm_with_fallback(candidates, messages, **kwargs):
+        yield 'data: {"delta": "default model"}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr("src.endpoint_resolver.resolve_endpoint", fake_resolve_endpoint)
+    monkeypatch.setattr("routes.terminal_client_routes.effective_user", lambda request: "alice")
+    monkeypatch.setattr("routes.terminal_client_routes.stream_llm_with_fallback", fake_stream_llm_with_fallback)
+    install_terminal_route_fakes(monkeypatch)
+
+    app = FastAPI()
+    app.include_router(setup_terminal_client_routes(session_manager=manager, chat_handler=FakeChatHandler()))
+    client = TestClient(app)
+
+    started = client.post(
+        "/api/terminal/runs",
+        json={"kind": "chat", "message": "hello"},
+    )
+
+    assert started.status_code == 200
+    session = manager.sessions[started.json()["run"]["session_id"]]
+    assert resolved_for == [("default", "alice")]
+    assert session.endpoint_url == MODEL_ENDPOINT_URL
+    assert session.model == CREATED_MODEL
+    assert session.owner == "alice"
+    assert session.headers == {"Authorization": "Bearer resolved"}
+
+
+def test_terminal_client_chat_run_reports_missing_default_model(monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    manager = FakeSessionManager()
+    initial_session_ids = set(manager.sessions)
+    monkeypatch.setattr("src.endpoint_resolver.resolve_endpoint", lambda prefix, owner=None: (None, None, None))
+    install_terminal_route_fakes(monkeypatch)
+
+    app = FastAPI()
+    app.include_router(setup_terminal_client_routes(session_manager=manager, chat_handler=FakeChatHandler()))
+    client = TestClient(app)
+
+    started = client.post("/api/terminal/runs", json={"kind": "chat", "message": "hello"})
+
+    assert started.status_code == 400
+    assert started.json()["detail"] == "No default chat model is configured; pass endpoint_url and model"
+    assert set(manager.sessions) == initial_session_ids
 
 
 def test_terminal_client_chat_run_without_runtime_does_not_fake_success(monkeypatch):

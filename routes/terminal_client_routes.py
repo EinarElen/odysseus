@@ -64,8 +64,18 @@ def _get_or_create_chat_session(
 
     endpoint_url = (payload.endpoint_url or "").strip()
     model = (payload.model or "").strip()
-    if not endpoint_url or not model:
-        raise HTTPException(400, "Starting a new chat Run requires endpoint_url and model")
+    resolved_headers: dict[str, Any] = {}
+    if not endpoint_url and not model:
+        from src.endpoint_resolver import resolve_endpoint
+
+        resolved_url, resolved_model, headers = resolve_endpoint("default", owner=owner)
+        endpoint_url = (resolved_url or "").strip()
+        model = (resolved_model or "").strip()
+        resolved_headers = dict(headers or {})
+        if not endpoint_url or not model:
+            raise HTTPException(400, "No default chat model is configured; pass endpoint_url and model")
+    elif not endpoint_url or not model:
+        raise HTTPException(400, "Starting a new chat Run requires both endpoint_url and model")
 
     session_id = f"ses_{uuid.uuid4().hex[:16]}"
     try:
@@ -78,6 +88,8 @@ def _get_or_create_chat_session(
         )
     except TypeError:
         session = session_manager.create_session(session_id, "ody-term chat", endpoint_url, model)
+    if resolved_headers:
+        session.headers = resolved_headers
     return session_id, session
 
 

@@ -80,6 +80,11 @@ ody-term inspect events --format=jsonl
 ody-term service logs main-server --format=jsonl
 ```
 
+Starting a new chat Run without `--session-id`, `--endpoint-url`, or `--model`
+uses the authenticated owner's configured Default Model. Pass both
+`--endpoint-url` and `--model` to override it, or pass `--session-id` to reuse
+that Session's model selection.
+
 `inspect events` reads real chat activity through the Terminal Client API when
 given `--run-id` or `--session-id`. Without either identity it reads local server
 logs; use `--source server` to select that source explicitly when also passing
