@@ -19,7 +19,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import AsyncGenerator, Dict, Optional
+from typing import AsyncGenerator, Callable, Dict, Optional
 
 from core.atomic_io import atomic_write_json
 from src.constants import DATA_DIR
@@ -29,14 +29,15 @@ _STORE = Path(DATA_DIR) / "agent_runs.json"
 
 
 class _Run:
-    __slots__ = ("buffer", "subscribers", "status", "task", "evict_task")
+    __slots__ = ("buffer", "subscribers", "status", "task", "evict_task", "on_event")
 
-    def __init__(self) -> None:
+    def __init__(self, *, on_event: Callable[[int, str], None] | None = None) -> None:
         self.buffer: list = []          # ordered SSE event strings (replay log)
         self.subscribers: set = set()   # one asyncio.Queue per connected client
         self.status: str = "running"    # running | done | error | stopped
         self.task: Optional[asyncio.Task] = None
         self.evict_task: Optional[asyncio.Task] = None
+        self.on_event = on_event
 
 
 _RUNS: Dict[str, _Run] = {}
@@ -119,6 +120,11 @@ def _publish(run: _Run, ev: str) -> None:
     """Append one SSE event and fan it out to every live subscriber."""
     run.buffer.append(ev)
     seq = len(run.buffer) - 1
+    if run.on_event is not None:
+        try:
+            run.on_event(seq + 1, ev)
+        except Exception:
+            logger.debug("[agent-run] event persistence callback failed", exc_info=True)
     for q in list(run.subscribers):
         try:
             q.put_nowait((seq, ev))
@@ -224,7 +230,12 @@ async def _drain(session_id: str, agen: AsyncGenerator[str, None],
         _schedule_evict(session_id)
 
 
-def start(session_id: str, agen: AsyncGenerator[str, None]) -> _Run:
+def start(
+    session_id: str,
+    agen: AsyncGenerator[str, None],
+    *,
+    on_event: Callable[[int, str], None] | None = None,
+) -> _Run:
     """Start a detached run draining `agen` for a session. If a run is already in
     flight for this session (e.g. a rapid double-send), it's cancelled first."""
     prev = _RUNS.get(session_id)
@@ -235,7 +246,7 @@ def start(session_id: str, agen: AsyncGenerator[str, None]) -> _Run:
             prev_task = prev.task   # new run awaits this before it starts writing
         if prev.evict_task and not prev.evict_task.done():
             prev.evict_task.cancel()
-    run = _Run()
+    run = _Run(on_event=on_event)
     _RUNS[session_id] = run
     _set_persisted_status(session_id, "running", started_at=time.time())
     run.task = asyncio.create_task(_drain(session_id, agen, prev_task))

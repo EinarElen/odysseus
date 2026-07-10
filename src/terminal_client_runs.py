@@ -23,6 +23,8 @@ from src.constants import TERMINAL_CLIENT_RUNS_FILE
 RUN_ACTIVE_STATUSES = {"queued", "starting", "running", "waiting", "stopping"}
 STOP_STATUS_WAIT_ATTEMPTS = 20
 STOP_STATUS_POLL_INTERVAL_S = 0.05
+DEFAULT_EVENT_QUERY_LIMIT = 80
+MAX_EVENT_QUERY_LIMIT = 500
 _TERMINAL_RUN_STORE = Path(TERMINAL_CLIENT_RUNS_FILE)
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,7 @@ class TerminalRun:
 
 _RUNS: dict[str, TerminalRun] = {}
 _SESSION_ACTIVE: dict[str, list[str]] = {}
+_LIVE_RUN_BY_SESSION: dict[str, str] = {}
 _LOADED = False
 
 
@@ -49,6 +52,7 @@ def reset_for_tests(*, clear_persisted: bool = False) -> None:
     global _LOADED
     _RUNS.clear()
     _SESSION_ACTIVE.clear()
+    _LIVE_RUN_BY_SESSION.clear()
     _LOADED = True
     if clear_persisted:
         try:
@@ -126,6 +130,13 @@ def _save_persisted_runs() -> None:
 
 
 def _sync_run_status(run: TerminalRun) -> None:
+    if _LIVE_RUN_BY_SESSION.get(run.session_id) != run.run_id:
+        if run.status in RUN_ACTIVE_STATUSES:
+            run.status = "interrupted"
+            run.finished_at = run.finished_at or _utc_now()
+            run.updated_at = _utc_now()
+            _save_persisted_runs()
+        return
     live = agent_runs.get_status(run.session_id)
     persisted = agent_runs.get_persisted_status(run.session_id)
     original = (run.status, run.finished_at)
@@ -193,6 +204,38 @@ def _summary(kind: str, payload: Any) -> str:
     return kind
 
 
+def _event_envelope(run: TerminalRun, *, seq: int, raw: str) -> dict[str, Any]:
+    event_type, payload = _parse_sse_event(raw)
+    kind = _event_kind(event_type, payload)
+    return {
+        "schema": "ody.event.v1",
+        "id": f"evt_{run.run_id}_{seq}",
+        "seq": seq,
+        "time": run.updated_at,
+        "session_id": run.session_id,
+        "run_id": run.run_id,
+        "source": "chat",
+        "kind": kind,
+        "level": _event_level(event_type, payload),
+        "summary": _summary(kind, payload),
+        "payload": payload if isinstance(payload, dict) else {"value": payload},
+        "raw": {"transport": "sse", "type": event_type, "body": raw},
+    }
+
+
+def _persist_raw_event(run: TerminalRun, seq: int, raw: str) -> None:
+    event = _event_envelope(run, seq=seq, raw=raw)
+    event_type = str(event["raw"]["type"])
+    if event_type == "done":
+        run.status = "done"
+        run.finished_at = _utc_now()
+    elif event_type == "error":
+        run.status = "error"
+        run.finished_at = _utc_now()
+    run.updated_at = _utc_now()
+    _remember_events(run, [event])
+
+
 async def _collect_events(run: TerminalRun, *, cursor: int | None = None) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     seq = 0
@@ -202,24 +245,7 @@ async def _collect_events(run: TerminalRun, *, cursor: int | None = None) -> lis
         seq += 1
         if cursor is not None and seq <= cursor:
             continue
-        event_type, payload = _parse_sse_event(raw)
-        kind = _event_kind(event_type, payload)
-        events.append(
-            {
-                "schema": "ody.event.v1",
-                "id": f"evt_{run.run_id}_{seq}",
-                "seq": seq,
-                "time": run.updated_at,
-                "session_id": run.session_id,
-                "run_id": run.run_id,
-                "source": "chat",
-                "kind": kind,
-                "level": _event_level(event_type, payload),
-                "summary": _summary(kind, payload),
-                "payload": payload if isinstance(payload, dict) else {"value": payload},
-                "raw": {"transport": "sse", "type": event_type, "body": raw},
-            }
-        )
+        events.append(_event_envelope(run, seq=seq, raw=raw))
     return events
 
 
@@ -248,7 +274,12 @@ def run_summary(run: TerminalRun, *, event_count: int | None = None) -> dict[str
     _sync_run_status(run)
     count = event_count
     if count is None:
-        count = max(agent_runs.buffered_event_count(run.session_id), len(run.events))
+        buffered_count = (
+            agent_runs.buffered_event_count(run.session_id)
+            if _LIVE_RUN_BY_SESSION.get(run.session_id) == run.run_id
+            else 0
+        )
+        count = max(buffered_count, len(run.events))
     last_activity = None
     if count:
         last_event = run.events[-1] if run.events else None
@@ -286,8 +317,13 @@ def create_chat_run(
     run = TerminalRun(run_id=_new_identity("run"), session_id=resolved_session_id, message=message)
     _RUNS[run.run_id] = run
     _SESSION_ACTIVE.setdefault(resolved_session_id, []).append(run.run_id)
+    _LIVE_RUN_BY_SESSION[resolved_session_id] = run.run_id
     _save_persisted_runs()
-    agent_runs.start(resolved_session_id, stream)
+    agent_runs.start(
+        resolved_session_id,
+        stream,
+        on_event=lambda seq, raw: _persist_raw_event(run, seq, raw),
+    )
     return {"run": run_summary(run), "cursor": {"after": None, "next": "0", "count": 0}}
 
 
@@ -330,9 +366,12 @@ def resolve_run(*, run_id: str | None = None, session_id: str | None = None) -> 
 
 async def attach_run(*, run_id: str | None = None, session_id: str | None = None, cursor: int | None = None) -> dict[str, Any]:
     run = resolve_run(run_id=run_id, session_id=session_id)
-    events = await _collect_events(run, cursor=cursor)
-    if events:
-        _remember_events(run, events)
+    if _LIVE_RUN_BY_SESSION.get(run.session_id) == run.run_id:
+        events = await _collect_events(run, cursor=cursor)
+        if events:
+            _remember_events(run, events)
+        else:
+            events = _stored_events_after(run, cursor=cursor)
     else:
         events = _stored_events_after(run, cursor=cursor)
     _sync_run_status(run)
@@ -344,9 +383,39 @@ async def attach_run(*, run_id: str | None = None, session_id: str | None = None
     }
 
 
+async def query_events(
+    *,
+    run_id: str | None = None,
+    session_id: str | None = None,
+    cursor: int | None = None,
+    source: str | None = None,
+    kind: str | None = None,
+    level: str | None = None,
+    limit: int = DEFAULT_EVENT_QUERY_LIMIT,
+) -> dict[str, Any]:
+    """Query a bounded Run snapshot without waiting for live execution to end."""
+    run = resolve_run(run_id=run_id, session_id=session_id)
+    bounded_limit = min(max(limit, 0), MAX_EVENT_QUERY_LIMIT)
+    scanned = _stored_events_after(run, cursor=cursor)[:bounded_limit]
+    filters = {"source": source, "kind": kind, "level": level}
+    events = [
+        event
+        for event in scanned
+        if all(expected is None or event.get(field) == expected for field, expected in filters.items())
+    ]
+    _sync_run_status(run)
+    next_cursor = str(scanned[-1]["seq"]) if scanned else (str(cursor) if cursor is not None else None)
+    return {
+        "run": run_summary(run),
+        "events": events,
+        "cursor": {"after": str(cursor) if cursor is not None else None, "next": next_cursor, "count": len(events)},
+        "filters": filters,
+    }
+
+
 async def stop_run(*, run_id: str | None = None, session_id: str | None = None) -> dict[str, Any]:
     run = resolve_run(run_id=run_id, session_id=session_id)
-    stopped = agent_runs.stop(run.session_id)
+    stopped = _LIVE_RUN_BY_SESSION.get(run.session_id) == run.run_id and agent_runs.stop(run.session_id)
     if stopped:
         for _ in range(STOP_STATUS_WAIT_ATTEMPTS):
             await asyncio.sleep(STOP_STATUS_POLL_INTERVAL_S)

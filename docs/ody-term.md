@@ -4,10 +4,11 @@
 
 Current implementation status: the command surface, renderers, local server
 bootstrap, capability shapes, file/keychain auth storage, lifecycle inventory
-scaffold, a first `/api/terminal/runs` chat-run compatibility seam, and
-`ody.tui.v1` state model exist. Full chat execution through the terminal-client
-API, Event Envelopes over live Odysseus activity streams, and a full-screen
-interactive TUI are still open work tracked in
+scaffold, API-backed chat Run execution, persisted Run identity, bounded real
+chat Event Envelope query/replay, and the `ody.tui.v1` state model exist.
+Continuous live event tailing, API-backed agent
+and harness Runs, real-state lifecycle integration, and a full-screen interactive
+TUI are still open work tracked in
 `docs/wayfinder/terminal-client/implementation-review.md`.
 
 ## Command Shape
@@ -57,6 +58,21 @@ Use `--format jsonl` for event streams. Event-stream commands emit one `ody.even
 ody-term run attach run_abc --format=jsonl
 ody-term inspect events --format=jsonl
 ody-term service logs main-server --format=jsonl
+```
+
+`inspect events` reads real chat activity through the Terminal Client API when
+given `--run-id` or `--session-id`. Without either identity it reads local server
+logs; use `--source server` to select that source explicitly when also passing
+identity filters. `--lines` bounds each API snapshot; pass `data.cursor.next`
+back through `--cursor` to continue. JSONL currently renders each bounded
+snapshot one envelope per line rather than keeping a continuous live tail open.
+Chat Event Envelopes are persisted under Run identity while execution drains,
+so recent replay does not require a client to have been attached at execution
+time.
+
+```bash
+ody-term inspect events --run-id run_abc --source chat --format=jsonl
+ody-term inspect events --session-id ses_abc --kind message.delta --cursor 4 --format=json
 ```
 
 The stable replay contract is the normalized Event Envelope, not raw backend transport:

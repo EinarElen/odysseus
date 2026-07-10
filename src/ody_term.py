@@ -1313,7 +1313,12 @@ def _run_attach(request: CommandRequest) -> CommandResponse:
         raise CommandError("invalid_cursor", f"--cursor must be an integer: {raw_cursor}") from exc
     kind = str(options.get("kind")) if isinstance(options.get("kind"), str) else None
     if _chat_run_uses_api(kind, run_id):
-        payload = _terminal_api_request(request, "GET", _chat_run_api_path(run_id, session_id, "/events"), query={"cursor": cursor})
+        payload = _terminal_api_request(
+            request,
+            "GET",
+            _chat_run_api_path(run_id, session_id, "/events"),
+            query={"cursor": cursor, "include_raw": request.globals.format in {"raw", "debug"}},
+        )
         events = payload.get("events")
         return CommandResponse(
             ok=True,
@@ -1500,7 +1505,28 @@ def _inspect_events(request: CommandRequest) -> CommandResponse:
         "parent_id": str(options["parent_id"]) if isinstance(options.get("parent_id"), str) else None,
         "tag": str(options["tag"]) if isinstance(options.get("tag"), str) else None,
     }
-    payload = _server_log_events(lines=max(lines, 0), cursor=cursor)
+    run_id = filters["run_id"]
+    session_id = filters["session_id"]
+    use_terminal_api = bool(run_id or session_id) and filters["source"] != "server"
+    if use_terminal_api:
+        payload = _terminal_api_request(
+            request,
+            "GET",
+            "/api/terminal/events",
+            query={
+                "run_id": run_id,
+                "session_id": session_id,
+                "cursor": cursor,
+                "source": filters["source"],
+                "kind": filters["kind"],
+                "level": filters["level"],
+                "limit": max(lines, 0),
+                "include_raw": request.globals.format in {"raw", "debug"},
+            },
+        )
+        payload["source"] = "terminal-api"
+    else:
+        payload = _server_log_events(lines=max(lines, 0), cursor=cursor)
     events = cast(list[dict[str, object]], payload["events"])
     events = _filter_events(events, filters=filters)
     cursor_payload = cast(dict[str, object], payload["cursor"])

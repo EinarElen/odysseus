@@ -108,6 +108,17 @@ def _db_ctx(session):
 # ---------------------------------------------------------------------------
 
 
+def test_terminal_token_profile_exposes_terminal_client_scopes(token_routes_mod):
+    mod = token_routes_mod
+
+    scopes = mod._normalize_scopes(profile="terminal")
+
+    assert "run:start" in scopes
+    assert "event:read" in scopes
+    assert "event:raw" in scopes
+    assert set(scopes) <= mod.ALLOWED_SCOPES
+
+
 def test_api_token_routes_require_admin_for_list_create_delete(monkeypatch, token_routes_mod):
     monkeypatch.setenv("AUTH_ENABLED", "true")
     mod = token_routes_mod

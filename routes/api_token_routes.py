@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Request, Form
 from core.database import get_db_session, ApiToken
 from core.middleware import require_admin
 from src.auth_helpers import get_current_user
+from src.terminal_client_auth import TERMINAL_CLIENT_SCOPES
 
 MAX_NAME_LEN = 100
 DEFAULT_SCOPES = "chat"
@@ -27,12 +28,13 @@ ALLOWED_SCOPES = {
     "memory:write",
     "cookbook:read",
     "cookbook:launch",
-}
+} | TERMINAL_CLIENT_SCOPES
 TOKEN_PROFILES = {
     "chat": ["chat"],
     "codex_todos": ["todos:read", "todos:write"],
     "codex_documents": ["documents:read", "documents:write"],
     "codex_email_drafts": ["email:read", "email:draft", "documents:read", "documents:write"],
+    "terminal": sorted(TERMINAL_CLIENT_SCOPES),
 }
 
 

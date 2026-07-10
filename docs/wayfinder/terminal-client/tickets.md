@@ -101,12 +101,12 @@ ticket is explicitly labelled scaffold-only.
 - [x] Source-native details are preserved in payload or raw fields where available.
 - [x] JSONL emits one Event Envelope per line for streaming and automation.
 - [x] Raw and debug modes expose source details without becoming the default automation contract.
-- [ ] Event filtering and cursor metadata have a stable initial behavior over real Odysseus activity streams, not only local server logs.
+- [x] Event filtering and cursor metadata have a stable initial behavior over real Odysseus activity streams, not only local server logs.
 
 Correction note: the current implementation normalizes local server logs and
-client-local run fixtures. It does not yet inspect existing Odysseus chat,
-agent, harness, service, process, and system streams. See
-[Terminal Client Implementation Review](implementation-review.md).
+real API-backed chat Run events. Agent, harness, service, process, and system
+streams remain open. See [Terminal Client Implementation
+Review](implementation-review.md).
 
 ## Create Run Identity Compatibility Layer For Chat Runs
 
@@ -114,16 +114,16 @@ agent, harness, service, process, and system streams. See
 
 **Blocked by:** Introduce Event Envelope Inspection Over Existing Streams.
 
-- [ ] A chat Run has distinct Run identity linked to durable Session identity in the backend/API layer.
+- [x] A chat Run has distinct Run identity linked to durable Session identity in the backend/API layer.
 - [x] Starting a Run can create a new Session or target an existing Session.
 - [x] Listing and status show active/recent Runs with status, timestamps, heartbeat/activity summary, and event availability.
 - [x] Attach follows the Run Event Envelope stream.
 - [x] Attach-by-Session fails with a structured ambiguity response when more than one active Run can match.
 - [x] Stop targets Run lifecycle rather than hiding cancellation under Session commands.
 
-Correction note: the CLI currently models this with local JSON run state. The
-remaining work is to bind these commands to real Odysseus chat execution through
-a terminal-client API layer.
+Correction note: chat Runs now use the real terminal-client API and persisted
+Run identity. Agent and harness Runs still use client-local JSON state and are
+tracked in the production-recovery tickets below.
 
 ## Extend Run Surface To Agent And Harness Workflows
 
@@ -298,16 +298,35 @@ transport shapes.
 
 **Blocked by:** Build API-Backed Chat Run Vertical Slice.
 
-- [ ] `inspect events` can read real chat Run events by Run, Session, source,
+- [x] `inspect events` can read real chat Run events by Run, Session, source,
       kind, level, and cursor.
-- [ ] Local server logs remain available as Event Envelopes, but are no longer
+- [x] Local server logs remain available as Event Envelopes, but are no longer
       the only implemented source.
-- [ ] Raw/debug modes preserve source-native event details without replacing
+- [x] Raw/debug modes preserve source-native event details without replacing
       the normalized Event Envelope contract.
 - [ ] Cursor behavior is verified across bounded JSON responses, JSONL streams,
       and reconnect after a previous cursor.
-- [ ] Tests include at least one real backend/API-backed event source and fail
+- [x] Tests include at least one real backend/API-backed event source and fail
       if only local fixture/log state is queried.
+
+2026-07-10 foundation note: `GET /api/terminal/events` now queries one bounded,
+non-blocking snapshot of a real Run by Run or Session identity, filters
+normalized envelopes by source, kind, and level, and preserves the Run replay
+cursor after filtering. `--lines` supplies the bounded page size, capped
+server-side. API-token callers require owner-attributed `event:read` or
+`event:raw` scope, Session ownership is checked server-side, and raw transport
+details are removed unless explicitly authorized. Normalized events are
+persisted under distinct Run identity as the detached stream drains, so a
+later Run on the same Session cannot alias its buffer and recent replay does
+not depend on a client having attached before eviction. Existing Run API
+routes now enforce `run:start`, `run:read`, and `run:stop` scopes as well.
+`ody-term inspect events --run-id/--session-id` consumes that API in JSON,
+JSONL, raw, and debug modes, while identity-free inspection and explicit
+`--source server` retain local server-log envelopes. Route tests start a real
+terminal chat Run through the API seam before querying its events; CLI tests
+verify Run and Session selection, filtering, bounded cursor reconnect across
+JSON and JSONL invocations, and source-native debug details. Continuous live
+JSONL tailing remains open, so this ticket is not yet complete.
 
 ## Extend Real Runs To Agent And Harness Workflows
 

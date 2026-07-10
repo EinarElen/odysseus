@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from routes.terminal_client_routes import setup_terminal_client_routes
@@ -29,6 +30,7 @@ def isolate_terminal_client_run_store(tmp_path, monkeypatch):
 def reset_terminal_run_process_memory() -> None:
     terminal_client_runs._RUNS.clear()
     terminal_client_runs._SESSION_ACTIVE.clear()
+    terminal_client_runs._LIVE_RUN_BY_SESSION.clear()
     terminal_client_runs._LOADED = False
     agent_runs.reset_for_tests()
 
@@ -69,9 +71,10 @@ class FakeChatHandler:
             session.name = f"Chat: {message}"
 
 
-def install_terminal_route_fakes(monkeypatch):
+def install_terminal_route_fakes(monkeypatch, *, patch_owner=True):
     monkeypatch.setattr("routes.terminal_client_routes.resolve_session_auth", lambda *args, **kwargs: None)
-    monkeypatch.setattr("routes.terminal_client_routes._verify_session_owner", lambda *args, **kwargs: None)
+    if patch_owner:
+        monkeypatch.setattr("routes.terminal_client_routes._verify_session_owner", lambda *args, **kwargs: None)
 
     def fake_save_assistant_response(sess, session_manager, session_id, full_response, last_metrics, **kwargs):
         sess.add_message(ChatMessage("assistant", full_response, metadata=last_metrics or {}))
@@ -122,7 +125,9 @@ def test_terminal_client_chat_run_api_exposes_distinct_run_events_and_stop(monke
     assert [event["schema"] for event in payload["events"]] == ["ody.event.v1"] * 5
     assert payload["events"][0]["run_id"] == run["run_id"]
     assert payload["events"][0]["session_id"] == "ses-real"
-    assert payload["events"][0]["raw"]["transport"] == "sse"
+    assert "raw" not in payload["events"][0]
+    raw_events = client.get(f"/api/terminal/runs/{run['run_id']}/events", params={"include_raw": True}).json()
+    assert raw_events["events"][0]["raw"]["transport"] == "sse"
     assert stream_calls
     assert stream_calls[0]["candidates"][0][1] == TEST_MODEL
     assert stream_calls[0]["messages"][-1] == {"role": "user", "content": "hello"}
@@ -132,6 +137,202 @@ def test_terminal_client_chat_run_api_exposes_distinct_run_events_and_stop(monke
     stopped = client.post(f"/api/terminal/runs/{run['run_id']}/stop")
     assert stopped.status_code == 200
     assert stopped.json()["run"]["status"] in {"done", "stopped"}
+
+
+def test_terminal_client_event_query_filters_real_run_events(monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    manager = FakeSessionManager()
+
+    async def fake_stream_llm_with_fallback(candidates, messages, **kwargs):
+        yield 'data: {"delta": "real event"}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr("routes.terminal_client_routes.stream_llm_with_fallback", fake_stream_llm_with_fallback)
+    install_terminal_route_fakes(monkeypatch)
+
+    app = FastAPI()
+    app.include_router(setup_terminal_client_routes(session_manager=manager, chat_handler=FakeChatHandler()))
+    client = TestClient(app)
+
+    run = client.post(
+        "/api/terminal/runs",
+        json={"kind": "chat", "session_id": "ses-real", "message": "hello"},
+    ).json()["run"]
+
+    response = client.get(
+        "/api/terminal/events",
+        params={"run_id": run["run_id"], "source": "chat", "level": "info", "cursor": 1, "limit": 1},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["run"]["run_id"] == run["run_id"]
+    assert payload["cursor"] == {"after": "1", "next": "2", "count": 1}
+    assert [event["seq"] for event in payload["events"]] == [2]
+    assert {event["source"] for event in payload["events"]} == {"chat"}
+    assert {event["level"] for event in payload["events"]} == {"info"}
+
+    reconnected = client.get(
+        "/api/terminal/events",
+        params={"run_id": run["run_id"], "cursor": payload["cursor"]["next"], "limit": 1},
+    ).json()
+    assert reconnected["cursor"] == {"after": "2", "next": "3", "count": 1}
+    assert [event["seq"] for event in reconnected["events"]] == [3]
+
+    by_session = client.get(
+        "/api/terminal/events",
+        params={"session_id": "ses-real", "kind": "run.status", "cursor": 1},
+    )
+    assert by_session.status_code == 200
+    filtered = by_session.json()
+    assert filtered["cursor"] == {"after": "1", "next": "4", "count": 1}
+    assert [(event["seq"], event["kind"]) for event in filtered["events"]] == [(4, "run.status")]
+
+
+def test_terminal_client_event_query_requires_run_or_session():
+    app = FastAPI()
+    app.include_router(setup_terminal_client_routes(session_manager=FakeSessionManager(), chat_handler=FakeChatHandler()))
+    client = TestClient(app)
+
+    response = client.get("/api/terminal/events")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Terminal event query requires run_id or session_id"
+
+
+def test_terminal_client_event_query_does_not_wait_for_active_run():
+    async def scenario():
+        draining = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_stream():
+            yield 'data: {"delta": "first"}\n\n'
+            draining.set()
+            await release.wait()
+            yield "data: [DONE]\n\n"
+
+        created = terminal_client_runs.create_chat_run(session_id="ses-slow", message="hello", stream=slow_stream())
+        await asyncio.wait_for(draining.wait(), timeout=0.2)
+        payload = await asyncio.wait_for(
+            terminal_client_runs.query_events(run_id=created["run"]["run_id"], limit=1),
+            timeout=0.2,
+        )
+        release.set()
+        await asyncio.sleep(0)
+        return payload
+
+    payload = asyncio.run(scenario())
+
+    assert payload["run"]["status"] == "running"
+    assert payload["cursor"] == {"after": None, "next": "1", "count": 1}
+    assert payload["events"][0]["payload"] == {"delta": "first"}
+
+
+def test_terminal_client_events_remain_bound_to_distinct_runs_on_one_session():
+    async def scenario():
+        async def stream(text):
+            yield f'data: {{"delta": "{text}"}}\n\n'
+            yield "data: [DONE]\n\n"
+
+        first = terminal_client_runs.create_chat_run(session_id="ses-shared", message="first", stream=stream("first"))
+        await asyncio.sleep(0.01)
+        second = terminal_client_runs.create_chat_run(session_id="ses-shared", message="second", stream=stream("second"))
+        await asyncio.sleep(0.01)
+        first_events = await terminal_client_runs.query_events(run_id=first["run"]["run_id"])
+        second_events = await terminal_client_runs.query_events(run_id=second["run"]["run_id"])
+        return first_events, second_events
+
+    first_events, second_events = asyncio.run(scenario())
+
+    assert first_events["events"][0]["run_id"] != second_events["events"][0]["run_id"]
+    assert first_events["events"][0]["payload"] == {"delta": "first"}
+    assert second_events["events"][0]["payload"] == {"delta": "second"}
+
+    first_attach = asyncio.run(terminal_client_runs.attach_run(run_id=first_events["run"]["run_id"]))
+    assert first_attach["events"][0]["payload"] == {"delta": "first"}
+
+
+def test_terminal_client_events_persist_without_a_reader():
+    async def complete_unobserved_run():
+        async def stream():
+            yield 'data: {"delta": "durable"}\n\n'
+            yield "data: [DONE]\n\n"
+
+        created = terminal_client_runs.create_chat_run(session_id="ses-durable", message="hello", stream=stream())
+        await asyncio.sleep(0.01)
+        return created["run"]["run_id"]
+
+    run_id = asyncio.run(complete_unobserved_run())
+    reset_terminal_run_process_memory()
+    payload = asyncio.run(terminal_client_runs.query_events(run_id=run_id))
+
+    assert payload["events"][0]["payload"] == {"delta": "durable"}
+    assert payload["cursor"]["next"] == "2"
+
+
+def test_terminal_client_event_query_enforces_owner_and_raw_scope(monkeypatch):
+    manager = FakeSessionManager()
+    manager.sessions["ses-real"].owner = "alice"
+    token = {"owner": "alice", "scopes": ["run:start", "event:read"]}
+
+    async def fake_stream_llm_with_fallback(candidates, messages, **kwargs):
+        yield 'data: {"delta": "private"}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr("routes.terminal_client_routes.stream_llm_with_fallback", fake_stream_llm_with_fallback)
+    install_terminal_route_fakes(monkeypatch)
+
+    def verify_owner(request, session_id, session_manager):
+        session = session_manager.sessions[session_id]
+        if session.owner != request.state.api_token_owner:
+            raise HTTPException(404, f"Session {session_id} not found")
+
+    monkeypatch.setattr("routes.terminal_client_routes._verify_session_owner", verify_owner)
+
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def fake_token(request, call_next):
+        request.state.api_token = True
+        request.state.api_token_owner = token["owner"]
+        request.state.api_token_scopes = token["scopes"]
+        request.state.current_user = "api"
+        return await call_next(request)
+
+    app.include_router(setup_terminal_client_routes(session_manager=manager, chat_handler=FakeChatHandler()))
+    client = TestClient(app)
+    run_id = client.post(
+        "/api/terminal/runs",
+        json={"kind": "chat", "session_id": "ses-real", "message": "hello"},
+    ).json()["run"]["run_id"]
+
+    bounded = client.get("/api/terminal/events", params={"run_id": run_id})
+    assert bounded.status_code == 200
+    assert bounded.json()["events"]
+    assert all("raw" not in event for event in bounded.json()["events"])
+
+    raw_denied = client.get("/api/terminal/events", params={"run_id": run_id, "include_raw": True})
+    assert raw_denied.status_code == 403
+    assert "event:raw" in raw_denied.json()["detail"]
+
+    token["scopes"] = ["event:raw"]
+    raw_allowed = client.get("/api/terminal/events", params={"run_id": run_id, "include_raw": True})
+    assert raw_allowed.status_code == 200
+    assert raw_allowed.json()["events"][0]["raw"]["transport"] == "sse"
+
+    token["scopes"] = ["event:read"]
+    assert client.get("/api/terminal/runs").status_code == 403
+    assert client.get(f"/api/terminal/runs/{run_id}").status_code == 403
+    assert client.post(f"/api/terminal/runs/{run_id}/stop").status_code == 403
+
+    token["scopes"] = ["run:read"]
+    assert client.get("/api/terminal/runs").status_code == 200
+    assert client.get(f"/api/terminal/runs/{run_id}").status_code == 200
+
+    token["scopes"] = ["event:raw"]
+    token["owner"] = "bob"
+    wrong_owner = client.get("/api/terminal/events", params={"run_id": run_id})
+    assert wrong_owner.status_code == 404
 
 
 def test_terminal_client_chat_run_can_create_real_session(monkeypatch):
@@ -169,9 +370,10 @@ def test_terminal_client_chat_run_can_create_real_session(monkeypatch):
     assert events[-1]["kind"] == "run.status"
 
 
-def test_terminal_client_chat_run_without_runtime_does_not_fake_success():
+def test_terminal_client_chat_run_without_runtime_does_not_fake_success(monkeypatch):
     terminal_client_runs.reset_for_tests()
     agent_runs.reset_for_tests()
+    monkeypatch.setenv("AUTH_ENABLED", "false")
 
     app = FastAPI()
     app.include_router(setup_terminal_client_routes())
@@ -329,7 +531,7 @@ def test_terminal_client_chat_run_stop_waits_for_terminal_status(monkeypatch):
     assert stopped.json()["run"]["status"] == "stopped"
 
 
-def test_terminal_client_chat_run_by_session_reports_ambiguity(monkeypatch):
+def test_terminal_client_chat_run_by_session_selects_only_current_execution(monkeypatch):
     terminal_client_runs.reset_for_tests()
     agent_runs.reset_for_tests()
     monkeypatch.setenv("AUTH_ENABLED", "false")
@@ -347,19 +549,21 @@ def test_terminal_client_chat_run_by_session_reports_ambiguity(monkeypatch):
     app.include_router(setup_terminal_client_routes(session_manager=manager, chat_handler=FakeChatHandler()))
     client = TestClient(app)
 
+    run_ids = []
     for _ in range(2):
         started = client.post(
             "/api/terminal/runs",
             json={"kind": "chat", "session_id": "ses-real", "message": "hello"},
         )
         assert started.status_code == 200
+        run_ids.append(started.json()["run"]["run_id"])
 
     status = client.get("/api/terminal/runs/by-session/ses-real")
 
-    assert status.status_code == 409
-    detail = status.json()["detail"]
-    assert detail["code"] == "ambiguous_run"
-    assert len(detail["choices"]) == 2
+    assert status.status_code == 200
+    assert status.json()["run"]["run_id"] == run_ids[-1]
+    previous = client.get(f"/api/terminal/runs/{run_ids[0]}").json()["run"]
+    assert previous["status"] in {"done", "interrupted"}
 
 
 def test_terminal_client_chat_run_by_session_uses_latest_completed_run(monkeypatch):
@@ -463,6 +667,7 @@ def test_terminal_client_reloaded_running_run_without_execution_is_interrupted(m
 
     reset_terminal_run_process_memory()
     monkeypatch.setattr("src.terminal_client_runs.agent_runs.get_persisted_status", lambda session_id: None)
+    monkeypatch.setattr("routes.terminal_client_routes._verify_session_owner", lambda *args, **kwargs: None)
 
     app = FastAPI()
     app.include_router(setup_terminal_client_routes(session_manager=FakeSessionManager(), chat_handler=FakeChatHandler()))

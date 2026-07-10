@@ -136,6 +136,39 @@ def terminal_api_fake(monkeypatch: pytest.MonkeyPatch):
             if status:
                 values = [run for run in values if run.get("status") == status]
             return {"runs": values}
+        if method == "GET" and path == "/api/terminal/events":
+            assert query is not None
+            run_id = str(query.get("run_id") or "")
+            session_id = str(query.get("session_id") or "")
+            if not run_id:
+                matches = [run for run in runs.values() if run.get("session_id") == session_id]
+                if len(matches) != 1:
+                    raise AssertionError(f"unexpected event query resolve for {session_id}")
+                run_id = str(matches[0]["run_id"])
+            cursor = int(query["cursor"]) if query.get("cursor") is not None else None
+            filters = {field: query.get(field) for field in ("source", "kind", "level")}
+            scanned = [event for event in events_by_run[run_id] if cursor is None or event["seq"] > cursor]
+            limit = int(query["limit"]) if query.get("limit") is not None else len(scanned)
+            scanned = scanned[:limit]
+            events = [
+                dict(event)
+                for event in scanned
+                if all(expected is None or event.get(field) == expected for field, expected in filters.items())
+            ]
+            if not query.get("include_raw"):
+                for event in events:
+                    event.pop("raw", None)
+            next_cursor = str(scanned[-1]["seq"]) if scanned else (str(cursor) if cursor is not None else None)
+            return {
+                "run": _summary(runs[run_id]),
+                "events": events,
+                "cursor": {
+                    "after": str(cursor) if cursor is not None else None,
+                    "next": next_cursor,
+                    "count": len(events),
+                },
+                "filters": filters,
+            }
         if method == "GET" and path.startswith("/api/terminal/runs/by-session/") and path.endswith("/events"):
             session_id = path.split("/")[5]
             matches = [run for run in runs.values() if run.get("session_id") == session_id and run.get("status") == "running"]
@@ -1541,6 +1574,170 @@ def test_inspect_events_json_normalizes_server_logs_as_event_envelopes(
     assert events[0]["raw"]["body"]["line"] == "WARNING: slow provider"
 
 
+def test_inspect_events_queries_real_terminal_run_events(
+    isolated_term_state: None,
+    terminal_api_fake,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    started_code, started_stdout, _ = run_cli(
+        ["--target", "http://ody.test", "run", "start", "--kind", "chat", "--message", "hello", "--format=json"]
+    )
+    assert started_code == 0
+    run_id = json.loads(started_stdout)["data"]["run"]["run_id"]
+    terminal_api_fake["state"]["events"][run_id].append(
+        {
+            "schema": "ody.event.v1",
+            "id": f"evt_{run_id}_2",
+            "seq": 2,
+            "time": "2026-07-09T00:00:01+00:00",
+            "session_id": "ses_api_1",
+            "run_id": run_id,
+            "source": "chat",
+            "kind": "message.delta",
+            "level": "info",
+            "summary": "next",
+            "payload": {"text": "next"},
+            "raw": {"transport": "sse", "type": "message", "body": "data: next\n\n"},
+        }
+    )
+
+    exit_code, stdout, stderr = run_cli(
+        [
+            "--target",
+            "http://ody.test",
+            "inspect",
+            "events",
+            "--run-id",
+            run_id,
+            "--source",
+            "chat",
+            "--kind",
+            "run.status",
+            "--level",
+            "info",
+            "--cursor",
+            "0",
+            "--lines",
+            "1",
+            "--format=json",
+        ]
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    data = json.loads(stdout)["data"]
+    assert data["source"] == "terminal-api"
+    assert data["cursor"] == {"after": "0", "next": "1", "count": 1}
+    assert [event["run_id"] for event in data["events"]] == [run_id]
+    assert terminal_api_fake["calls"][-1] == (
+        "GET",
+        "/api/terminal/events",
+        {
+            "run_id": run_id,
+            "session_id": None,
+            "cursor": 0,
+            "source": "chat",
+            "kind": "run.status",
+            "level": "info",
+            "limit": 1,
+            "include_raw": False,
+        },
+        None,
+    )
+
+    reconnect_code, reconnect_stdout, reconnect_stderr = run_cli(
+        [
+            "--target",
+            "http://ody.test",
+            "inspect",
+            "events",
+            "--run-id",
+            run_id,
+            "--cursor",
+            data["cursor"]["next"],
+            "--lines",
+            "1",
+            "--format=jsonl",
+        ]
+    )
+    assert reconnect_code == 0
+    assert reconnect_stderr == ""
+    assert [(event["seq"], event["payload"]) for event in map(json.loads, reconnect_stdout.splitlines())] == [
+        (2, {"text": "next"})
+    ]
+
+
+def test_inspect_events_by_session_streams_real_events_as_jsonl(
+    isolated_term_state: None,
+    terminal_api_fake,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    _, started_stdout, _ = run_cli(
+        [
+            "--target",
+            "http://ody.test",
+            "run",
+            "start",
+            "--kind",
+            "chat",
+            "--session-id",
+            "ses_api_real",
+            "--message",
+            "hello",
+            "--format=json",
+        ]
+    )
+    run_id = json.loads(started_stdout)["data"]["run"]["run_id"]
+
+    exit_code, stdout, stderr = run_cli(
+        [
+            "--target",
+            "http://ody.test",
+            "inspect",
+            "events",
+            "--session-id",
+            "ses_api_real",
+            "--cursor",
+            "0",
+            "--format=jsonl",
+        ]
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    events = [json.loads(line) for line in stdout.splitlines()]
+    assert [(event["run_id"], event["seq"]) for event in events] == [(run_id, 1)]
+
+
+def test_inspect_real_events_debug_preserves_source_native_details(
+    isolated_term_state: None,
+    terminal_api_fake,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    _, started_stdout, _ = run_cli(
+        ["--target", "http://ody.test", "run", "start", "--message", "hello", "--format=json"]
+    )
+    run_id = json.loads(started_stdout)["data"]["run"]["run_id"]
+
+    exit_code, stdout, stderr = run_cli(
+        ["--target", "http://ody.test", "inspect", "events", "--run-id", run_id, "--format=debug"]
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    payload = json.loads(stdout)
+    assert payload["data"]["source"] == "terminal-api"
+    assert payload["data"]["events"][0]["raw"] == {
+        "transport": "sse",
+        "type": "status",
+        "body": {"status": "running", "message": "hello"},
+    }
+    assert payload["renderer"]["raw_included"] is True
+
+
 def test_inspect_events_cursor_continues_after_last_seen_log_event(
     isolated_term_state: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1602,7 +1799,7 @@ def test_inspect_events_raw_requires_raw_event_capability(
     assert "event:raw" in error["message"]
 
 
-def test_inspect_events_filters_by_identity_and_correlation_fields(
+def test_inspect_server_events_filters_by_identity_and_correlation_fields(
     isolated_term_state: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
@@ -1614,7 +1811,17 @@ def test_inspect_events_filters_by_identity_and_correlation_fields(
     )
 
     exit_code, stdout, stderr = run_cli(
-        ["inspect", "events", "--run-id", "run_missing", "--span-id", "span_missing", "--format=json"]
+        [
+            "inspect",
+            "events",
+            "--source",
+            "server",
+            "--run-id",
+            "run_missing",
+            "--span-id",
+            "span_missing",
+            "--format=json",
+        ]
     )
 
     assert exit_code == 0

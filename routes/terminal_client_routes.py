@@ -14,6 +14,14 @@ from pydantic import BaseModel, Field
 
 from src import terminal_client_runs
 from src.auth_helpers import effective_user
+from src.terminal_client_auth import (
+    EVENT_RAW_SCOPES,
+    EVENT_READ_SCOPES,
+    RUN_READ_SCOPES,
+    RUN_START_SCOPES,
+    RUN_STOP_SCOPES,
+    require_terminal_scope,
+)
 from src.llm_core import stream_llm_with_fallback
 from src.model_context import estimate_tokens
 from core.models import ChatMessage
@@ -200,8 +208,21 @@ def _ambiguous_run_error(session_id: str, exc: ValueError) -> HTTPException:
 def setup_terminal_client_routes(session_manager=None, chat_handler=None, **_deps: Any) -> APIRouter:
     router = APIRouter(prefix="/api/terminal", tags=["terminal_client"])
 
+    def authorize_events(request: Request, run: terminal_client_runs.TerminalRun, *, include_raw: bool) -> None:
+        require_terminal_scope(request, EVENT_RAW_SCOPES if include_raw else EVENT_READ_SCOPES)
+        _verify_session_owner(request, run.session_id, session_manager)
+
+    def render_events(payload: dict[str, Any], *, include_raw: bool) -> dict[str, Any]:
+        rendered = dict(payload)
+        rendered["events"] = [dict(event) for event in payload["events"]]
+        if not include_raw:
+            for event in rendered["events"]:
+                event.pop("raw", None)
+        return rendered
+
     @router.post("/runs")
     async def start_run(request: Request, payload: RunStartRequest) -> dict[str, Any]:
+        require_terminal_scope(request, RUN_START_SCOPES)
         if payload.kind != "chat":
             raise HTTPException(400, "Terminal Client run start currently supports kind=chat")
         _require_chat_runtime(session_manager, chat_handler)
@@ -223,13 +244,57 @@ def setup_terminal_client_routes(session_manager=None, chat_handler=None, **_dep
         return terminal_client_runs.create_chat_run(session_id=session_id, message=payload.message, stream=stream)
 
     @router.get("/runs")
-    async def list_runs(kind: str | None = None, status: str | None = None) -> dict[str, Any]:
-        return {"runs": terminal_client_runs.list_runs(kind=kind, status=status)}
+    async def list_runs(request: Request, kind: str | None = None, status: str | None = None) -> dict[str, Any]:
+        require_terminal_scope(request, RUN_READ_SCOPES)
+        visible = []
+        for run in terminal_client_runs.list_runs(kind=kind, status=status):
+            try:
+                _verify_session_owner(request, str(run["session_id"]), session_manager)
+            except HTTPException as exc:
+                if exc.status_code == 404:
+                    continue
+                raise
+            visible.append(run)
+        return {"runs": visible}
+
+    @router.get("/events")
+    async def query_events(
+        request: Request,
+        run_id: str | None = None,
+        session_id: str | None = None,
+        cursor: int | None = None,
+        source: str | None = None,
+        kind: str | None = None,
+        level: str | None = None,
+        limit: int = terminal_client_runs.DEFAULT_EVENT_QUERY_LIMIT,
+        include_raw: bool = False,
+    ) -> dict[str, Any]:
+        if not run_id and not session_id:
+            raise HTTPException(400, "Terminal event query requires run_id or session_id")
+        try:
+            run = terminal_client_runs.resolve_run(run_id=run_id, session_id=session_id)
+            authorize_events(request, run, include_raw=include_raw)
+            payload = await terminal_client_runs.query_events(
+                run_id=run_id,
+                session_id=session_id,
+                cursor=cursor,
+                source=source,
+                kind=kind,
+                level=level,
+                limit=limit,
+            )
+            return render_events(payload, include_raw=include_raw)
+        except ValueError as exc:
+            raise _ambiguous_run_error(str(session_id), exc) from None
+        except KeyError:
+            raise HTTPException(404, "Run not found") from None
 
     @router.get("/runs/by-session/{session_id}")
-    async def run_status_by_session(session_id: str) -> dict[str, Any]:
+    async def run_status_by_session(request: Request, session_id: str) -> dict[str, Any]:
         try:
+            require_terminal_scope(request, RUN_READ_SCOPES)
             run = terminal_client_runs.resolve_run(session_id=session_id)
+            _verify_session_owner(request, run.session_id, session_manager)
         except ValueError as exc:
             raise _ambiguous_run_error(session_id, exc) from None
         except KeyError:
@@ -237,41 +302,65 @@ def setup_terminal_client_routes(session_manager=None, chat_handler=None, **_dep
         return {"run": terminal_client_runs.run_summary(run)}
 
     @router.get("/runs/by-session/{session_id}/events")
-    async def run_events_by_session(session_id: str, cursor: int | None = None) -> dict[str, Any]:
+    async def run_events_by_session(
+        request: Request,
+        session_id: str,
+        cursor: int | None = None,
+        include_raw: bool = False,
+    ) -> dict[str, Any]:
         try:
-            return await terminal_client_runs.attach_run(session_id=session_id, cursor=cursor)
+            run = terminal_client_runs.resolve_run(session_id=session_id)
+            authorize_events(request, run, include_raw=include_raw)
+            payload = await terminal_client_runs.attach_run(run_id=run.run_id, cursor=cursor)
+            return render_events(payload, include_raw=include_raw)
         except ValueError as exc:
             raise _ambiguous_run_error(session_id, exc) from None
         except KeyError:
             raise HTTPException(404, "Run not found") from None
 
     @router.post("/runs/by-session/{session_id}/stop")
-    async def stop_run_by_session(session_id: str) -> dict[str, Any]:
+    async def stop_run_by_session(request: Request, session_id: str) -> dict[str, Any]:
         try:
-            return await terminal_client_runs.stop_run(session_id=session_id)
+            require_terminal_scope(request, RUN_STOP_SCOPES)
+            run = terminal_client_runs.resolve_run(session_id=session_id)
+            _verify_session_owner(request, run.session_id, session_manager)
+            return await terminal_client_runs.stop_run(run_id=run.run_id)
         except ValueError as exc:
             raise _ambiguous_run_error(session_id, exc) from None
         except KeyError:
             raise HTTPException(404, "Run not found") from None
 
     @router.get("/runs/{run_id}")
-    async def run_status(run_id: str) -> dict[str, Any]:
+    async def run_status(request: Request, run_id: str) -> dict[str, Any]:
         try:
+            require_terminal_scope(request, RUN_READ_SCOPES)
             run = terminal_client_runs.resolve_run(run_id=run_id)
+            _verify_session_owner(request, run.session_id, session_manager)
         except KeyError:
             raise HTTPException(404, "Run not found") from None
         return {"run": terminal_client_runs.run_summary(run)}
 
     @router.get("/runs/{run_id}/events")
-    async def run_events(run_id: str, cursor: int | None = None) -> dict[str, Any]:
+    async def run_events(
+        request: Request,
+        run_id: str,
+        cursor: int | None = None,
+        include_raw: bool = False,
+    ) -> dict[str, Any]:
         try:
-            return await terminal_client_runs.attach_run(run_id=run_id, cursor=cursor)
+            run = terminal_client_runs.resolve_run(run_id=run_id)
+            authorize_events(request, run, include_raw=include_raw)
+            payload = await terminal_client_runs.attach_run(run_id=run_id, cursor=cursor)
+            return render_events(payload, include_raw=include_raw)
         except KeyError:
             raise HTTPException(404, "Run not found") from None
 
     @router.post("/runs/{run_id}/stop")
-    async def stop_run(run_id: str) -> dict[str, Any]:
+    async def stop_run(request: Request, run_id: str) -> dict[str, Any]:
         try:
+            require_terminal_scope(request, RUN_STOP_SCOPES)
+            run = terminal_client_runs.resolve_run(run_id=run_id)
+            _verify_session_owner(request, run.session_id, session_manager)
             return await terminal_client_runs.stop_run(run_id=run_id)
         except KeyError:
             raise HTTPException(404, "Run not found") from None

@@ -51,13 +51,16 @@ That let four real requirements slip through:
 
 ## Remaining Required Repairs
 
-1. Add a real terminal-client backend API layer with distinct Run identity over
-   the existing session-keyed chat/agent substrate.
-2. Wire `ody-term run start/list/status/attach/stop` to that API layer instead
-   of local JSON run state.
-3. Expose Event Envelopes from real chat, agent, harness, service, process,
-   server, and system sources with cursor/reconnect behavior.
+The API-backed chat Run vertical slice is complete, and the bounded real-chat
+Event Envelope query/replay foundation now exists. The remaining repairs are:
+
+1. Extend the real terminal-client Run API from chat to agent and harness
+   execution, removing their production dependence on local JSON state.
+2. Make lifecycle inventory, logs, and controls consume real Run, harness, and
+   service evidence instead of client-local fixtures.
+3. Add continuous live JSONL tailing, then extend Event Envelope inspection
+   beyond chat and local server logs to agent, harness, service, process, and
+   system sources.
 4. Replace the `ody-term tui` text/model fallback with an actual interactive
    terminal renderer. The existing `ody.tui.v1` model can remain the shared
    state seam.
-
