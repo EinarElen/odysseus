@@ -259,6 +259,7 @@ def _parse_command_options(args: list[str]) -> tuple[dict[str, str | bool], list
         "--port",
         "--lines",
         "--token",
+        "--scopes",
         "--source",
         "--kind",
         "--level",
@@ -444,17 +445,16 @@ def _selected_token_ref() -> str:
 
 
 def _secret_token_entry(ref: str) -> dict[str, object]:
-    os_secret = _load_os_secret(ref)
-    if os_secret:
-        return {"token": os_secret, "storage_mode": "keychain"}
     secrets = _load_secrets()
     tokens = secrets.get("tokens", {})
     if not isinstance(tokens, dict):
         raise CommandError("corrupt_secret_store", "Terminal Client secret store tokens must be an object")
     entry = tokens.get(ref)
-    if not isinstance(entry, dict):
-        return {}
-    return cast(dict[str, object], entry)
+    metadata = cast(dict[str, object], dict(entry)) if isinstance(entry, dict) else {}
+    os_secret = _load_os_secret(ref)
+    if os_secret:
+        return {**metadata, "token": os_secret, "storage_mode": "keychain"}
+    return metadata
 
 
 def _resolved_auth() -> dict[str, object]:
@@ -473,6 +473,9 @@ def _resolved_auth() -> dict[str, object]:
         "ref": token_ref,
         "visible_weaker_fallback": False,
     }
+
+    if token_present:
+        scopes = _parse_scopes(os.getenv("ODY_TERM_SCOPES", ""))
 
     if not token_present:
         token_ref = _selected_token_ref()
@@ -2500,21 +2503,31 @@ def _auth_login(request: CommandRequest) -> CommandResponse:
     if not isinstance(token, str) or not token:
         raise CommandError("missing_token", "auth login requires --token")
     token_ref = str(options.get("token_ref") or _default_token_ref())
+    scopes = _parse_scopes(options.get("scopes"))
     stored_in_os_secret = _store_os_secret(token_ref, token)
     if not stored_in_os_secret:
         token_ref = "file:default" if token_ref.startswith("keychain:") else token_ref
-        secrets = _load_secrets()
-        tokens = secrets.get("tokens", {})
-        if not isinstance(tokens, dict):
-            raise CommandError("corrupt_secret_store", "Terminal Client secret store tokens must be an object")
-        tokens = cast(dict[str, object], tokens)
-        tokens[token_ref] = {
+    secrets = _load_secrets()
+    tokens = secrets.get("tokens", {})
+    if not isinstance(tokens, dict):
+        raise CommandError("corrupt_secret_store", "Terminal Client secret store tokens must be an object")
+    tokens = cast(dict[str, object], tokens)
+    tokens[token_ref] = (
+        {
             "token": token,
+            "scopes": scopes,
             "updated_at": _utc_now(),
             "storage_mode": "file-fallback",
         }
-        secrets["tokens"] = tokens
-        _save_secrets(secrets)
+        if not stored_in_os_secret
+        else {
+            "scopes": scopes,
+            "updated_at": _utc_now(),
+            "storage_mode": "keychain-metadata",
+        }
+    )
+    secrets["tokens"] = tokens
+    _save_secrets(secrets)
     return CommandResponse(
         ok=True,
         command=command,

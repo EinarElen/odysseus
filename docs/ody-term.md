@@ -35,6 +35,25 @@ Aliases are metadata, not a separate semantic surface. Discover them with:
 ody-term inspect aliases --format=json
 ```
 
+## Authentication
+
+When server authentication is enabled, create an owner-attributed API token
+with the backend `terminal` profile, then store it locally together with the
+scopes the server granted. The scopes are capability hints for the client; the
+server remains the authorization boundary.
+
+```bash
+ody-term auth login \
+  --token 'ody_...' \
+  --scopes 'run:start,run:read,run:stop,event:read,event:raw'
+ody-term auth status --format=json
+```
+
+The token is stored in the OS keychain when available. If keychain storage is
+unavailable, `ody-term` reports that it used the visible, weaker, mode-`0600`
+file fallback. For ephemeral use, set `ODY_TERM_TOKEN` and `ODY_TERM_SCOPES`
+instead. Do not pass or print token values in shared logs.
+
 ## Automation Contracts
 
 Use `--output clanker --format json` for bounded command responses. `clanker` means stable machine-oriented output; `grug` means compact human scan output. Non-TTY stdout defaults to the `clanker` profile, so scripts can usually request only `--format=json`.

@@ -696,6 +696,30 @@ def test_auth_login_stores_token_in_visible_file_fallback_without_printing_secre
     assert "ody_test_secret" not in stdout
 
 
+def test_auth_login_persists_declared_scope_metadata(isolated_term_state: None) -> None:
+    exit_code, stdout, stderr = run_cli(
+        [
+            "auth",
+            "login",
+            "--token",
+            "ody_test_secret",
+            "--scopes",
+            "run:start, run:read,event:read,event:raw",
+            "--format=json",
+        ]
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    auth = json.loads(stdout)["data"]["auth"]
+    assert auth["token"]["scopes"] == ["event:raw", "event:read", "run:read", "run:start"]
+    assert "ody_test_secret" not in stdout
+
+    secrets = ody_term._load_secrets()
+    entry = secrets["tokens"]["file:default"]
+    assert entry["scopes"] == ["event:raw", "event:read", "run:read", "run:start"]
+
+
 def test_auth_login_uses_keychain_when_available(
     isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -714,6 +738,56 @@ def test_auth_login_uses_keychain_when_available(
     assert auth["token"]["storage"]["mode"] == "keychain"
     assert auth["token"]["storage"]["visible_weaker_fallback"] is False
     assert "ody_keychain_secret" not in stdout
+
+
+def test_auth_login_keeps_scope_metadata_for_keychain_token(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stored: dict[str, str] = {}
+    monkeypatch.setenv("ODY_TERM_SECRET_BACKEND", "auto")
+    monkeypatch.setattr(ody_term, "_keychain_available", lambda: True)
+    monkeypatch.setattr(ody_term, "_store_os_secret", lambda ref, token: stored.setdefault(ref, token) == token)
+    monkeypatch.setattr(ody_term, "_load_os_secret", lambda ref: stored.get(ref))
+
+    exit_code, stdout, stderr = run_cli(
+        [
+            "auth",
+            "login",
+            "--token",
+            "ody_keychain_secret",
+            "--scopes=run:start,event:read",
+            "--format=json",
+        ]
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    auth = json.loads(stdout)["data"]["auth"]
+    assert auth["token"]["storage"]["mode"] == "keychain"
+    assert auth["token"]["scopes"] == ["event:read", "run:start"]
+    assert "ody_keychain_secret" not in stdout
+
+    secrets = ody_term._load_secrets()
+    entry = secrets["tokens"]["keychain:ody-term/default"]
+    assert "token" not in entry
+    assert entry["scopes"] == ["event:read", "run:start"]
+
+
+def test_environment_token_accepts_declared_scope_metadata(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ODY_TERM_TOKEN", "ody_env_secret")
+    monkeypatch.setenv("ODY_TERM_SCOPES", "run:start event:read,event:raw")
+
+    exit_code, stdout, stderr = run_cli(["auth", "capabilities", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    data = json.loads(stdout)["data"]
+    assert data["auth_facts"]["token_scopes"] == ["event:raw", "event:read", "run:start"]
+    assert data["capabilities"]["run:start"]["allowed"] is True
+    assert data["capabilities"]["event:read"]["allowed"] is True
+    assert "ody_env_secret" not in stdout
 
 
 def test_auth_capabilities_reports_token_facts_without_trusting_local_policy(
