@@ -14,13 +14,14 @@ import signal
 import subprocess
 import sys
 import uuid
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import Request as UrlRequest, urlopen
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, TextIO, TypedDict, cast
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request as UrlRequest
+from urllib.request import urlopen
 
 try:
     from src.constants import (
@@ -1072,19 +1073,38 @@ def _local_run_kind(run_id: str | None) -> str | None:
     return None
 
 
-def _chat_run_uses_api(kind: str | None, run_id: str | None) -> bool:
+def _has_local_session_run(session_id: str | None) -> bool:
+    if not session_id:
+        return False
+    try:
+        return any(
+            run.get("session_id") == session_id
+            for run in _runs_payload(_load_run_state()).values()
+        )
+    except CommandError:
+        raise
+    except Exception:
+        return False
+
+
+def _run_uses_api(kind: str | None, run_id: str | None, session_id: str | None = None) -> bool:
     return bool(
-        kind == "chat"
-        or (run_id and run_id.startswith("run_") and (not _has_local_run(run_id) or _local_run_kind(run_id) == "chat"))
+        kind in {"chat", "agent"}
+        or (session_id and not _has_local_session_run(session_id))
+        or (
+            run_id
+            and run_id.startswith("run_")
+            and (not _has_local_run(run_id) or _local_run_kind(run_id) in {"chat", "agent"})
+        )
     )
 
 
-def _chat_run_api_path(run_id: str | None, session_id: str | None, suffix: str = "") -> str:
+def _run_api_path(run_id: str | None, session_id: str | None, suffix: str = "") -> str:
     if run_id:
         return f"/api/terminal/runs/{run_id}{suffix}"
     if session_id:
         return f"/api/terminal/runs/by-session/{session_id}{suffix}"
-    raise CommandError("missing_run_target", "chat run command requires a run id or --session-id")
+    raise CommandError("missing_run_target", "run command requires a run id or --session-id")
 
 
 def _all_run_events(state: dict[str, object]) -> list[dict[str, object]]:
@@ -1224,13 +1244,13 @@ def _run_start(request: CommandRequest) -> CommandResponse:
     kind = str(options.get("kind") or "chat")
     if kind not in {"chat", "agent", "harness"}:
         raise CommandError("unsupported_run_kind", f"run start supports chat, agent, and harness Runs, not {kind}")
-    if kind == "chat":
+    if kind in {"chat", "agent"}:
         payload = _terminal_api_request(
             request,
             "POST",
             "/api/terminal/runs",
             body={
-                "kind": "chat",
+                "kind": kind,
                 "session_id": options.get("session_id") if isinstance(options.get("session_id"), str) else None,
                 "message": str(options.get("message") or ""),
                 "endpoint_url": options.get("endpoint_url") if isinstance(options.get("endpoint_url"), str) else None,
@@ -1241,7 +1261,7 @@ def _run_start(request: CommandRequest) -> CommandResponse:
         return CommandResponse(
             ok=True,
             command=["run", "start"],
-            message=f"Started chat Run {cast(dict[str, object], payload.get('run', {})).get('run_id', '')}",
+            message=f"Started {kind} Run {cast(dict[str, object], payload.get('run', {})).get('run_id', '')}",
             data=payload,
         )
     if kind == "harness" and not isinstance(options.get("harness_adapter"), str):
@@ -1307,8 +1327,13 @@ def _run_list(request: CommandRequest) -> CommandResponse:
         raise CommandError("unexpected_run_args", f"unexpected run list args: {' '.join(positionals)}")
     kind_filter = str(options.get("kind")) if isinstance(options.get("kind"), str) else None
     status_filter = str(options.get("status")) if isinstance(options.get("status"), str) else None
-    if kind_filter == "chat":
-        payload = _terminal_api_request(request, "GET", "/api/terminal/runs", query={"kind": "chat", "status": status_filter})
+    if kind_filter in {"chat", "agent"}:
+        payload = _terminal_api_request(
+            request,
+            "GET",
+            "/api/terminal/runs",
+            query={"kind": kind_filter, "status": status_filter},
+        )
         runs = payload.get("runs")
         return CommandResponse(
             ok=True,
@@ -1332,8 +1357,8 @@ def _run_status(request: CommandRequest) -> CommandResponse:
     run_id = positionals[0] if positionals else (str(options["run_id"]) if isinstance(options.get("run_id"), str) else None)
     session_id = str(options["session_id"]) if isinstance(options.get("session_id"), str) else None
     kind = str(options.get("kind")) if isinstance(options.get("kind"), str) else None
-    if _chat_run_uses_api(kind, run_id):
-        payload = _terminal_api_request(request, "GET", _chat_run_api_path(run_id, session_id))
+    if _run_uses_api(kind, run_id, session_id):
+        payload = _terminal_api_request(request, "GET", _run_api_path(run_id, session_id))
         run = cast(dict[str, object], payload.get("run", {}))
         return CommandResponse(
             ok=True,
@@ -1365,11 +1390,11 @@ def _run_attach(request: CommandRequest) -> CommandResponse:
     except ValueError as exc:
         raise CommandError("invalid_cursor", f"--cursor must be an integer: {raw_cursor}") from exc
     kind = str(options.get("kind")) if isinstance(options.get("kind"), str) else None
-    if _chat_run_uses_api(kind, run_id):
+    if _run_uses_api(kind, run_id, session_id):
         payload = _terminal_api_request(
             request,
             "GET",
-            _chat_run_api_path(run_id, session_id, "/events"),
+            _run_api_path(run_id, session_id, "/events"),
             query={"cursor": cursor, "include_raw": request.globals.format in {"raw", "debug"}},
         )
         events = payload.get("events")
@@ -1411,8 +1436,8 @@ def _run_stop(request: CommandRequest) -> CommandResponse:
     run_id = positionals[0] if positionals else (str(options["run_id"]) if isinstance(options.get("run_id"), str) else None)
     session_id = str(options["session_id"]) if isinstance(options.get("session_id"), str) else None
     kind = str(options.get("kind")) if isinstance(options.get("kind"), str) else None
-    if _chat_run_uses_api(kind, run_id):
-        payload = _terminal_api_request(request, "POST", _chat_run_api_path(run_id, session_id, "/stop"))
+    if _run_uses_api(kind, run_id, session_id):
+        payload = _terminal_api_request(request, "POST", _run_api_path(run_id, session_id, "/stop"))
         run = cast(dict[str, object], payload.get("run", {}))
         stopped = bool(payload.get("stopped"))
         return CommandResponse(
@@ -1502,10 +1527,14 @@ def _harness_stop(request: CommandRequest) -> CommandResponse:
     options, positionals = _parse_command_options(request.args)
     if len(positionals) > 1:
         raise CommandError("unexpected_harness_args", f"unexpected harness stop args: {' '.join(positionals[1:])}")
-    state = _load_run_state()
     run_id = positionals[0] if positionals else (str(options["run_id"]) if isinstance(options.get("run_id"), str) else None)
     session_id = str(options["session_id"]) if isinstance(options.get("session_id"), str) else None
-    run = _resolve_run_reference(state, run_id=run_id, session_id=session_id)
+    state = _load_run_state()
+    if (run_id and _has_local_run(run_id)) or (not run_id and session_id):
+        run = _resolve_run_reference(state, run_id=run_id, session_id=session_id)
+    else:
+        payload = _terminal_api_request(request, "GET", _run_api_path(run_id, session_id))
+        run = cast(dict[str, object], payload.get("run", {}))
     if run.get("kind") != "harness" or not run.get("harness_adapter_id"):
         raise CommandError(
             "not_harness_run",

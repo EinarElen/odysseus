@@ -19,7 +19,6 @@ from core.atomic_io import atomic_write_json
 from src import agent_runs
 from src.constants import TERMINAL_CLIENT_RUNS_FILE
 
-
 RUN_ACTIVE_STATUSES = {"queued", "starting", "running", "waiting", "stopping"}
 STOP_STATUS_WAIT_ATTEMPTS = 20
 STOP_STATUS_POLL_INTERVAL_S = 0.05
@@ -208,6 +207,8 @@ def _summary(kind: str, payload: Any) -> str:
 def _event_envelope(run: TerminalRun, *, seq: int, raw: str) -> dict[str, Any]:
     event_type, payload = _parse_sse_event(raw)
     kind = _event_kind(event_type, payload)
+    if run.kind == "agent" and kind == "agent_prep":
+        kind = "heartbeat"
     return {
         "schema": "ody.event.v1",
         "id": f"evt_{run.run_id}_{seq}",
@@ -215,7 +216,7 @@ def _event_envelope(run: TerminalRun, *, seq: int, raw: str) -> dict[str, Any]:
         "time": run.updated_at,
         "session_id": run.session_id,
         "run_id": run.run_id,
-        "source": "chat",
+        "source": run.kind,
         "kind": kind,
         "level": _event_level(event_type, payload),
         "summary": _summary(kind, payload),
@@ -307,15 +308,21 @@ def run_summary(run: TerminalRun, *, event_count: int | None = None) -> dict[str
     }
 
 
-def create_chat_run(
+def create_run(
     *,
+    kind: str,
     session_id: str | None,
     message: str,
     stream: AsyncGenerator[str, None],
 ) -> dict[str, Any]:
     _load_persisted_runs()
     resolved_session_id = session_id or _new_identity("ses")
-    run = TerminalRun(run_id=_new_identity("run"), session_id=resolved_session_id, message=message)
+    run = TerminalRun(
+        run_id=_new_identity("run"),
+        session_id=resolved_session_id,
+        kind=kind,
+        message=message,
+    )
     _RUNS[run.run_id] = run
     _SESSION_ACTIVE.setdefault(resolved_session_id, []).append(run.run_id)
     _LIVE_RUN_BY_SESSION[resolved_session_id] = run.run_id
@@ -326,6 +333,16 @@ def create_chat_run(
         on_event=lambda seq, raw: _persist_raw_event(run, seq, raw),
     )
     return {"run": run_summary(run), "cursor": {"after": None, "next": "0", "count": 0}}
+
+
+def create_chat_run(
+    *,
+    session_id: str | None,
+    message: str,
+    stream: AsyncGenerator[str, None],
+) -> dict[str, Any]:
+    """Compatibility wrapper for existing chat Run callers."""
+    return create_run(kind="chat", session_id=session_id, message=message, stream=stream)
 
 
 def list_runs(*, kind: str | None = None, status: str | None = None) -> list[dict[str, Any]]:

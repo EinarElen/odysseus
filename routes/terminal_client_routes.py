@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import uuid
 import asyncio
 import json
 import time
+import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -13,9 +13,23 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from core.models import ChatMessage
+from routes.chat_helpers import (
+    _enforce_chat_privileges,
+    build_chat_context,
+    clean_thinking_for_save,
+    resolve_session_auth,
+    save_assistant_response,
+)
+from routes.session_routes import _verify_session_owner
 from src import terminal_client_runs
+from src.agent_access import AgentAccess, resolve_agent_access
+from src.agent_loop import stream_agent_loop
+from src.agent_runtime import resolve_agent_execution_limits
 from src.auth_helpers import effective_user
 from src.constants import TERMINAL_EVENT_STREAM_MEDIA_TYPE
+from src.llm_core import stream_llm_with_fallback
+from src.model_context import estimate_tokens
 from src.terminal_client_auth import (
     EVENT_RAW_SCOPES,
     EVENT_READ_SCOPES,
@@ -24,11 +38,7 @@ from src.terminal_client_auth import (
     RUN_STOP_SCOPES,
     require_terminal_scope,
 )
-from src.llm_core import stream_llm_with_fallback
-from src.model_context import estimate_tokens
-from core.models import ChatMessage
-from routes.chat_helpers import clean_thinking_for_save, resolve_session_auth, save_assistant_response
-from routes.session_routes import _verify_session_owner
+from src.tool_policy import build_effective_tool_policy
 
 
 class RunStartRequest(BaseModel):
@@ -43,6 +53,12 @@ class RunStartRequest(BaseModel):
 def _require_chat_runtime(session_manager: Any, chat_handler: Any) -> None:
     if session_manager is None or chat_handler is None:
         raise HTTPException(503, "Terminal Client chat Runs require the Odysseus chat runtime")
+
+
+def _require_agent_runtime(session_manager: Any, chat_handler: Any, chat_processor: Any) -> None:
+    _require_chat_runtime(session_manager, chat_handler)
+    if chat_processor is None:
+        raise HTTPException(503, "Terminal Client agent Runs require the Odysseus agent runtime")
 
 
 def _get_or_create_chat_session(
@@ -81,13 +97,13 @@ def _get_or_create_chat_session(
     try:
         session = session_manager.create_session(
             session_id=session_id,
-            name="ody-term chat",
+            name=f"ody-term {payload.kind}",
             endpoint_url=endpoint_url,
             model=model,
             owner=owner,
         )
     except TypeError:
-        session = session_manager.create_session(session_id, "ody-term chat", endpoint_url, model)
+        session = session_manager.create_session(session_id, f"ody-term {payload.kind}", endpoint_url, model)
     if resolved_headers:
         session.headers = resolved_headers
     return session_id, session
@@ -210,6 +226,113 @@ def _terminal_chat_stream(
     return _stream()
 
 
+def _terminal_agent_stream(
+    *,
+    request: Request,
+    session_manager: Any,
+    chat_handler: Any,
+    chat_processor: Any,
+    session_id: str,
+    sess: Any,
+    message: str,
+    preset_id: str | None,
+    owner: str | None,
+    access: AgentAccess,
+) -> AsyncGenerator[str, None]:
+    async def _stream() -> AsyncGenerator[str, None]:
+        resolve_session_auth(sess, session_id, owner=owner)
+        ctx = await build_chat_context(
+            sess,
+            request,
+            chat_handler,
+            chat_processor,
+            message,
+            session_id,
+            preset_id=preset_id,
+            agent_mode=True,
+        )
+        disabled_tools = set(access.disabled_tools)
+        tool_policy = build_effective_tool_policy(
+            disabled_tools=disabled_tools,
+            last_user_message=message,
+        )
+
+        limits = resolve_agent_execution_limits()
+
+        full_response = ""
+        thinking_response = ""
+        metrics: dict[str, Any] = {}
+        requested_model = str(getattr(sess, "model", "") or "")
+        try:
+            async for chunk in stream_agent_loop(
+                sess.endpoint_url,
+                sess.model,
+                ctx.messages,
+                headers=getattr(sess, "headers", {}) or {},
+                temperature=ctx.preset.temperature if ctx.preset.temperature is not None else 0.3,
+                max_tokens=ctx.preset.max_tokens if ctx.preset.max_tokens is not None else 4096,
+                prompt_type=preset_id,
+                max_tool_calls=limits.max_tool_calls,
+                max_rounds=limits.max_rounds,
+                context_length=ctx.context_length,
+                session_id=session_id,
+                disabled_tools=disabled_tools or None,
+                tool_policy=tool_policy,
+                owner=owner,
+                uploaded_files=ctx.uploaded_files,
+                provider_options=getattr(sess, "provider_options", None) or {},
+            ):
+                if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
+                    try:
+                        data = json.loads(chunk[6:])
+                    except json.JSONDecodeError:
+                        yield chunk
+                        continue
+                    if "delta" in data:
+                        if data.get("thinking"):
+                            thinking_response += str(data["delta"])
+                        else:
+                            full_response += str(data["delta"])
+                    elif data.get("type") == "metrics":
+                        raw_metrics = data.get("data", {})
+                        metrics = dict(raw_metrics) if isinstance(raw_metrics, dict) else {}
+                        metrics["requested_model"] = requested_model
+                        metrics["model"] = metrics.get("model") or requested_model
+                        chunk = f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
+                    yield chunk
+                elif chunk == "data: [DONE]\n\n":
+                    if full_response or metrics.get("tool_events"):
+                        response_to_save = full_response or "Done."
+                        if thinking_response.strip() and not metrics.get("thinking"):
+                            metrics["thinking"] = thinking_response.strip()
+                        saved_id = save_assistant_response(
+                            sess,
+                            session_manager,
+                            session_id,
+                            response_to_save,
+                            metrics,
+                            character_name=ctx.preset.character_name or "",
+                            rag_sources=ctx.rag_sources,
+                            used_memories=ctx.used_memories,
+                        )
+                        if saved_id:
+                            yield f"data: {json.dumps({'type': 'message_saved', 'id': saved_id})}\n\n"
+                    yield chunk
+                else:
+                    yield chunk
+        except (GeneratorExit, asyncio.CancelledError):
+            if full_response:
+                content, metadata = clean_thinking_for_save(
+                    full_response,
+                    {"stopped": True, "model": requested_model, "requested_model": requested_model},
+                )
+                sess.add_message(ChatMessage("assistant", content, metadata=metadata))
+                session_manager.save_sessions()
+            raise
+
+    return _stream()
+
+
 def _ambiguous_run_error(session_id: str, exc: ValueError) -> HTTPException:
     choices = [
         terminal_client_runs.run_summary(run)
@@ -219,7 +342,12 @@ def _ambiguous_run_error(session_id: str, exc: ValueError) -> HTTPException:
     return HTTPException(409, {"code": "ambiguous_run", "session_id": session_id, "choices": choices})
 
 
-def setup_terminal_client_routes(session_manager=None, chat_handler=None, **_deps: Any) -> APIRouter:
+def setup_terminal_client_routes(
+    session_manager=None,
+    chat_handler=None,
+    chat_processor=None,
+    **_deps: Any,
+) -> APIRouter:
     router = APIRouter(prefix="/api/terminal", tags=["terminal_client"])
 
     def authorize_events(request: Request, run: terminal_client_runs.TerminalRun, *, include_raw: bool) -> None:
@@ -237,25 +365,53 @@ def setup_terminal_client_routes(session_manager=None, chat_handler=None, **_dep
     @router.post("/runs")
     async def start_run(request: Request, payload: RunStartRequest) -> dict[str, Any]:
         require_terminal_scope(request, RUN_START_SCOPES)
-        if payload.kind != "chat":
-            raise HTTPException(400, "Terminal Client run start currently supports kind=chat")
-        _require_chat_runtime(session_manager, chat_handler)
+        if payload.kind not in {"chat", "agent"}:
+            raise HTTPException(400, "Terminal Client run start currently supports kind=chat or kind=agent")
+        if payload.kind == "agent":
+            _require_agent_runtime(session_manager, chat_handler, chat_processor)
+        else:
+            _require_chat_runtime(session_manager, chat_handler)
+        owner = effective_user(request)
+        access = resolve_agent_access(request, owner) if payload.kind == "agent" else None
+        if access is not None and not access.agent_allowed:
+            raise HTTPException(403, "Agent execution is not permitted for this user")
         session_id, sess = _get_or_create_chat_session(
             request=request,
             session_manager=session_manager,
             payload=payload,
-            owner=effective_user(request),
+            owner=owner,
         )
-        stream = _terminal_chat_stream(
-            request=request,
-            session_manager=session_manager,
-            chat_handler=chat_handler,
+        _enforce_chat_privileges(request, sess)
+        if payload.kind == "agent":
+            assert access is not None
+            stream = _terminal_agent_stream(
+                request=request,
+                session_manager=session_manager,
+                chat_handler=chat_handler,
+                chat_processor=chat_processor,
+                session_id=session_id,
+                sess=sess,
+                message=payload.message,
+                preset_id=payload.preset_id,
+                owner=owner,
+                access=access,
+            )
+        else:
+            stream = _terminal_chat_stream(
+                request=request,
+                session_manager=session_manager,
+                chat_handler=chat_handler,
+                session_id=session_id,
+                sess=sess,
+                message=payload.message,
+                preset_id=payload.preset_id,
+            )
+        return terminal_client_runs.create_run(
+            kind=payload.kind,
             session_id=session_id,
-            sess=sess,
             message=payload.message,
-            preset_id=payload.preset_id,
+            stream=stream,
         )
-        return terminal_client_runs.create_chat_run(session_id=session_id, message=payload.message, stream=stream)
 
     @router.get("/runs")
     async def list_runs(request: Request, kind: str | None = None, status: str | None = None) -> dict[str, Any]:

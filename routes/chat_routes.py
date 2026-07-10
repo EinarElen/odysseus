@@ -44,6 +44,8 @@ from routes.chat_helpers import (
 )
 from src.action_intents import ToolIntent, classify_tool_intent as _classify_tool_intent
 from src.tool_policy import build_effective_tool_policy
+from src.agent_access import resolve_agent_access
+from src.agent_runtime import resolve_agent_execution_limits
 from src.harness import get_harness_adapter, harness_config_from_session, is_harness_session
 from src.harness.transcript import (
     finish_harness_run,
@@ -1120,39 +1122,24 @@ def setup_chat_routes(
                 "mcp__email__reply_to_email",
             })
 
-        # Enforce per-user privileges
-        _privs = {}
+        # Enforce per-user privileges and global agent policy through the same
+        # Module used by non-browser execution adapters.
         _user = ctx.user
-        if _user and hasattr(request.app.state, 'auth_manager') and request.app.state.auth_manager:
-            _privs = request.app.state.auth_manager.get_privileges(_user)
-        if _privs:
-            if not _privs.get("can_use_bash", True):
-                disabled_tools.update({"bash", "python", "read_file", "write_file"})
-            if not _privs.get("can_use_browser", True):
-                disabled_tools.add("builtin_browser")
-            if not _privs.get("can_use_documents", True):
-                disabled_tools.update({"create_document", "edit_document", "update_document", "suggest_document"})
-            if not _privs.get("can_generate_images", True):
-                disabled_tools.add("generate_image")
-            if not _privs.get("can_manage_memory", True):
-                disabled_tools.update({"manage_memory", "manage_skills"})
-            if not _privs.get("can_use_research", True):
-                _research_flags["do"] = False
-            if not _privs.get("can_use_agent", True):
-                _effective_mode = 'chat'
-                chat_mode = 'chat'
-        # Global admin disabled tools
-        from src.settings import get_setting
-        _global_disabled = get_setting("disabled_tools", [])
-        if _global_disabled and isinstance(_global_disabled, list):
-            explicit_web_allowed = (
-                _explicit_web_intent
-                or (allow_web_search is not None and str(allow_web_search).lower() == "true")
-            )
-            if explicit_web_allowed:
-                disabled_tools.update(t for t in _global_disabled if t not in {"web_search", "web_fetch"})
-            else:
-                disabled_tools.update(_global_disabled)
+        explicit_web_allowed = (
+            _explicit_web_intent
+            or (allow_web_search is not None and str(allow_web_search).lower() == "true")
+        )
+        agent_access = resolve_agent_access(
+            request,
+            _user,
+            allow_globally_disabled_web=explicit_web_allowed,
+        )
+        disabled_tools.update(agent_access.disabled_tools)
+        if not agent_access.research_allowed:
+            _research_flags["do"] = False
+        if not agent_access.agent_allowed:
+            _effective_mode = 'chat'
+            chat_mode = 'chat'
 
         # Light auto-escalation: the user is in chat mode and just expressed a
         # notes/calendar/email intent. Grant the relevant managers but withhold
@@ -1867,23 +1854,7 @@ def setup_chat_routes(
                 _requested_model = sess.model
                 _actual_model = None
                 try:
-                    from src.settings import get_setting
-                    from src.agent_tools import MAX_AGENT_ROUNDS as _DEFAULT_ROUNDS
-                    # Per-message tool budget from settings; guard defensively in
-                    # case settings.json was hand-edited to a non-numeric value
-                    # (the HTTP admin endpoint validates, but direct edits bypass
-                    # it). 0 = unlimited, matching auth_routes set_settings().
-                    try:
-                        _tool_budget = int(get_setting("agent_max_tool_calls", 0))
-                    except (TypeError, ValueError):
-                        _tool_budget = 0
-                    # Per-message round cap from settings; clamp defensively in
-                    # case settings.json was hand-edited to a bad value.
-                    try:
-                        _max_rounds = int(get_setting("agent_max_rounds", _DEFAULT_ROUNDS) or _DEFAULT_ROUNDS)
-                    except (TypeError, ValueError):
-                        _max_rounds = _DEFAULT_ROUNDS
-                    _max_rounds = max(1, min(_max_rounds, 200))
+                    _agent_limits = resolve_agent_execution_limits()
 
                     _forced_tools = set(capability_forced_tools) if capability_forced_tools else None
                     if _explicit_web_intent:
@@ -1901,8 +1872,8 @@ def setup_chat_routes(
                         temperature=ctx.preset.temperature,
                         max_tokens=ctx.preset.max_tokens,
                         prompt_type=preset_id,
-                        max_tool_calls=_tool_budget,
-                        max_rounds=_max_rounds,
+                        max_tool_calls=_agent_limits.max_tool_calls,
+                        max_rounds=_agent_limits.max_rounds,
                         context_length=ctx.context_length,
                         active_document=active_doc,
                         active_email=active_email_ctx,

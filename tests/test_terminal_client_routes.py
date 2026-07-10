@@ -6,18 +6,18 @@ import socket
 import threading
 import time
 from pathlib import Path
-from urllib.request import Request as UrlRequest, urlopen
+from types import SimpleNamespace
+from urllib.request import Request as UrlRequest
+from urllib.request import urlopen
 
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
+from core.models import ChatMessage, Session
 from routes.terminal_client_routes import setup_terminal_client_routes
 from src import agent_runs, terminal_client_runs
 from src.constants import TERMINAL_CLIENT_RUNS_FILE
-from core.models import Session
-from core.models import ChatMessage
-
 
 MODEL_ENDPOINT_URL = "http://model.local/v1/chat/completions"
 TEST_MODEL = "test-model"
@@ -87,6 +87,175 @@ def install_terminal_route_fakes(monkeypatch, *, patch_owner=True):
         return "msg_assistant"
 
     monkeypatch.setattr("routes.terminal_client_routes.save_assistant_response", fake_save_assistant_response)
+
+
+@pytest.mark.asyncio
+async def test_terminal_run_event_source_matches_agent_run_kind():
+    async def agent_stream():
+        yield 'data: {"type": "agent_prep", "data": {"prompt_build": 0.01}}\n\n'
+        yield "data: [DONE]\n\n"
+
+    created = terminal_client_runs.create_run(
+        kind="agent",
+        session_id="ses-agent",
+        message="work",
+        stream=agent_stream(),
+    )
+
+    attached = await terminal_client_runs.attach_run(run_id=created["run"]["run_id"])
+
+    assert attached["run"]["kind"] == "agent"
+    assert {event["source"] for event in attached["events"]} == {"agent"}
+    assert attached["events"][0]["kind"] == "heartbeat"
+    assert attached["events"][0]["payload"]["type"] == "agent_prep"
+
+
+def test_terminal_client_agent_run_uses_shared_context_policy_and_real_run_api(monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    manager = FakeSessionManager()
+    install_terminal_route_fakes(monkeypatch)
+    monkeypatch.setattr("routes.terminal_client_routes.effective_user", lambda request: "alice")
+
+    context_calls = []
+    stream_calls = []
+
+    async def fake_build_chat_context(sess, request, chat_handler, chat_processor, message, session_id, **kwargs):
+        context_calls.append(kwargs)
+        sess.add_message(ChatMessage("user", message))
+        return SimpleNamespace(
+            messages=sess.get_context_messages(),
+            context_length=8192,
+            preset=SimpleNamespace(temperature=0.2, max_tokens=321, character_name=None),
+            uploaded_files=[],
+            rag_sources=[],
+            used_memories=[],
+        )
+
+    async def fake_stream_agent_loop(endpoint_url, model, messages, **kwargs):
+        stream_calls.append({"endpoint_url": endpoint_url, "model": model, "messages": messages, "kwargs": kwargs})
+        yield 'data: {"type": "tool_start", "tool": "read_file"}\n\n'
+        yield 'data: {"delta": "agent result"}\n\n'
+        yield 'data: {"type": "metrics", "data": {"tool_events": [{"tool": "read_file"}]}}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr("routes.terminal_client_routes.build_chat_context", fake_build_chat_context)
+    monkeypatch.setattr("routes.terminal_client_routes.stream_agent_loop", fake_stream_agent_loop)
+    monkeypatch.setattr(
+        "routes.terminal_client_routes.resolve_agent_access",
+        lambda request, user: SimpleNamespace(
+            agent_allowed=True,
+            research_allowed=True,
+            disabled_tools=frozenset({"send_email"}),
+        ),
+    )
+
+    app = FastAPI()
+    app.include_router(
+        setup_terminal_client_routes(
+            session_manager=manager,
+            chat_handler=FakeChatHandler(),
+            chat_processor=object(),
+        )
+    )
+    client = TestClient(app)
+
+    started = client.post(
+        "/api/terminal/runs",
+        json={"kind": "agent", "session_id": "ses-real", "message": "inspect it"},
+    )
+    assert started.status_code == 200
+    run = started.json()["run"]
+    assert run["kind"] == "agent"
+
+    attached = client.get(f"/api/terminal/runs/{run['run_id']}/events").json()
+    assert {event["source"] for event in attached["events"]} == {"agent"}
+    assert context_calls[0]["agent_mode"] is True
+    assert stream_calls[0]["kwargs"]["owner"] == "alice"
+    assert stream_calls[0]["kwargs"]["disabled_tools"] == {"send_email"}
+    assert [message.role for message in manager.sessions["ses-real"].history] == ["user", "assistant"]
+    assert manager.sessions["ses-real"].history[-1].content == "agent result"
+
+
+def test_terminal_client_agent_run_rejects_owner_without_agent_privilege(monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    manager = FakeSessionManager()
+    install_terminal_route_fakes(monkeypatch)
+    monkeypatch.setattr("routes.terminal_client_routes.effective_user", lambda request: "alice")
+    monkeypatch.setattr(
+        "routes.terminal_client_routes.resolve_agent_access",
+        lambda request, user: SimpleNamespace(
+            agent_allowed=False,
+            research_allowed=True,
+            disabled_tools=frozenset(),
+        ),
+    )
+
+    app = FastAPI()
+    app.include_router(
+        setup_terminal_client_routes(
+            session_manager=manager,
+            chat_handler=FakeChatHandler(),
+            chat_processor=object(),
+        )
+    )
+
+    response = TestClient(app).post(
+        "/api/terminal/runs",
+        json={"kind": "agent", "session_id": "ses-real", "message": "inspect it"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Agent execution is not permitted for this user"
+    assert manager.sessions["ses-real"].history == []
+
+
+@pytest.mark.parametrize(
+    ("status_code", "detail"),
+    [
+        (403, "Your account is not allowed to use model 'test-model'."),
+        (429, "Daily message limit reached (1). Try again in 24 hours."),
+    ],
+)
+def test_terminal_client_agent_run_enforces_shared_model_and_quota_gate(
+    monkeypatch,
+    status_code,
+    detail,
+):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    manager = FakeSessionManager()
+    install_terminal_route_fakes(monkeypatch)
+    monkeypatch.setattr("routes.terminal_client_routes.effective_user", lambda request: "alice")
+    monkeypatch.setattr(
+        "routes.terminal_client_routes.resolve_agent_access",
+        lambda request, user: SimpleNamespace(
+            agent_allowed=True,
+            research_allowed=True,
+            disabled_tools=frozenset(),
+        ),
+    )
+
+    def reject_agent_run(request, sess):
+        raise HTTPException(status_code, detail)
+
+    monkeypatch.setattr("routes.terminal_client_routes._enforce_chat_privileges", reject_agent_run)
+
+    app = FastAPI()
+    app.include_router(
+        setup_terminal_client_routes(
+            session_manager=manager,
+            chat_handler=FakeChatHandler(),
+            chat_processor=object(),
+        )
+    )
+
+    response = TestClient(app).post(
+        "/api/terminal/runs",
+        json={"kind": "agent", "session_id": "ses-real", "message": "inspect it"},
+    )
+
+    assert response.status_code == status_code
+    assert response.json()["detail"] == detail
+    assert manager.sessions["ses-real"].history == []
 
 
 def test_terminal_client_chat_run_api_exposes_distinct_run_events_and_stop(monkeypatch):

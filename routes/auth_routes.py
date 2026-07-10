@@ -13,7 +13,13 @@ from pathlib import Path
 
 from core.atomic_io import atomic_write_json, atomic_write_text
 from core.auth import AuthManager, RESERVED_USERNAMES, SetAdminResult, TOKEN_TTL
-from src.constants import DEEP_RESEARCH_DIR, MEMORY_FILE, PASSWORD_MIN_LENGTH, SKILLS_DIR
+from src.constants import (
+    AGENT_MAX_ROUNDS_LIMIT,
+    DEEP_RESEARCH_DIR,
+    MEMORY_FILE,
+    PASSWORD_MIN_LENGTH,
+    SKILLS_DIR,
+)
 from src.rate_limiter import RateLimiter
 from src.settings_scrub import scrub_settings
 from src.settings import (
@@ -653,7 +659,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         # Per-key validation for numeric settings: coerce to int and clamp to a
         # sane range so a bad value can't disable the agent or let it run away.
         _INT_RANGES = {
-            "agent_max_rounds": (1, 200),
+            "agent_max_rounds": (1, AGENT_MAX_ROUNDS_LIMIT),
             "agent_max_tool_calls": (0, 1000),  # 0 = unlimited
         }
         for key in DEFAULT_SETTINGS:

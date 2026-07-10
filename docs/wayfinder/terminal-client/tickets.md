@@ -121,8 +121,8 @@ Review](implementation-review.md).
 - [x] Attach-by-Session fails with a structured ambiguity response when more than one active Run can match.
 - [x] Stop targets Run lifecycle rather than hiding cancellation under Session commands.
 
-Correction note: chat Runs now use the real terminal-client API and persisted
-Run identity. Agent and harness Runs still use client-local JSON state and are
+Correction note: chat and agent Runs now use the real terminal-client API and
+persisted Run identity. Harness Runs still use client-local JSON state and are
 tracked in the production-recovery tickets below.
 
 ## Extend Run Surface To Agent And Harness Workflows
@@ -131,7 +131,7 @@ tracked in the production-recovery tickets below.
 
 **Blocked by:** Create Run Identity Compatibility Layer For Chat Runs.
 
-- [ ] Agent Runs use the same real API-backed Run list, status, attach, and stop model as chat Runs.
+- [x] Agent Runs use the same real API-backed Run list, status, attach, and stop model as chat Runs.
 - [ ] Harness-linked Runs include Odysseus Session, Run, harness adapter, and Harness Session identity where known from backend state.
 - [x] Harness operations are capability-gated by adapter support and report unsupported actions clearly.
 - [ ] Heartbeats and activity updates are visible as Event Envelopes from real execution.
@@ -345,6 +345,22 @@ flushes each envelope as it arrives. Tests prove replay after a cursor, live
 delivery before an active Run finishes, and incremental CLI writes. This closes
 the recovery ticket; the next frontier is API-backed agent and harness Runs.
 
+2026-07-10 agent follow-up: `ody-term run start --kind agent` now uses the same
+owner-scoped terminal-client Run API as chat instead of writing client-local
+Run state. The backend builds the normal Odysseus agent context, applies the
+same resolved user privileges and globally disabled-tool policy as the browser
+adapter, executes `stream_agent_loop`, persists user and assistant Session
+history, and records real agent SSE activity as `ody.event.v1` envelopes with
+`source=agent`. The native `agent_prep` liveness signal is normalized to the
+stable `heartbeat` kind while its native payload/raw details remain available.
+CLI and route tests cover start, filtered list, status, attach, cursor
+continuation, Session ambiguity, stop, ownership policy, and durable history.
+Final live evidence used Run `run_299df42899ca4c6a`, Session
+`ses_e5183fcc5ba84575`, configured default model `gpt-5.5`, twelve real events,
+a normalized `heartbeat` retaining native `agent_prep` identity, and the
+persisted exact response `ODY_TERM_AGENT_HEARTBEAT_OK`. Harness execution
+remains the open half of this frontier.
+
 ## Extend Real Runs To Agent And Harness Workflows
 
 **What to build:** Agent and harness-backed execution use the same real Run
@@ -355,7 +371,7 @@ Session identity visible in command output and Event Envelopes.
 **Blocked by:** Build API-Backed Chat Run Vertical Slice; Promote Event
 Inspection To Real Odysseus Activity.
 
-- [ ] Agent Runs use the same real API-backed list, status, attach, and stop
+- [x] Agent Runs use the same real API-backed list, status, attach, and stop
       commands as chat Runs.
 - [ ] Harness-linked Runs include Odysseus Session identity, Run identity,
       harness adapter identity, and Harness Session identity where known.

@@ -98,10 +98,11 @@ def terminal_api_fake(monkeypatch: pytest.MonkeyPatch):
             assert body is not None
             run_id = f"run_api_{len(runs) + 1}"
             session_id = str(body.get("session_id") or f"ses_api_{len(runs) + 1}")
+            kind = str(body.get("kind") or "chat")
             run = {
                 "run_id": run_id,
                 "session_id": session_id,
-                "kind": "chat",
+                "kind": kind,
                 "status": "running",
                 "started_at": "2026-07-09T00:00:00+00:00",
                 "updated_at": "2026-07-09T00:00:00+00:00",
@@ -116,11 +117,11 @@ def terminal_api_fake(monkeypatch: pytest.MonkeyPatch):
                     "time": "2026-07-09T00:00:00+00:00",
                     "session_id": session_id,
                     "run_id": run_id,
-                    "source": "chat",
+                    "source": kind,
                     "kind": "run.status",
                     "level": "info",
-                    "summary": "chat Run started",
-                    "payload": {"status": "running", "message": str(body.get("message") or ""), "kind": "chat"},
+                    "summary": f"{kind} Run started",
+                    "payload": {"status": "running", "message": str(body.get("message") or ""), "kind": kind},
                     "raw": {
                         "transport": "sse",
                         "type": "status",
@@ -128,7 +129,29 @@ def terminal_api_fake(monkeypatch: pytest.MonkeyPatch):
                     },
                 }
             ]
-            return {"run": _summary(run), "cursor": {"after": None, "next": "1", "count": 1}}
+            if kind == "agent":
+                events_by_run[run_id].append(
+                    {
+                        "schema": "ody.event.v1",
+                        "id": f"evt_{run_id}_2",
+                        "seq": 2,
+                        "time": "2026-07-09T00:00:01+00:00",
+                        "session_id": session_id,
+                        "run_id": run_id,
+                        "source": "agent",
+                        "kind": "heartbeat",
+                        "level": "info",
+                        "summary": "agent Run heartbeat",
+                        "payload": {"status": "running", "activity": "started"},
+                        "raw": {
+                            "transport": "sse",
+                            "type": "heartbeat",
+                            "body": {"status": "running", "activity": "started"},
+                        },
+                    }
+                )
+            count = len(events_by_run[run_id])
+            return {"run": _summary(run), "cursor": {"after": None, "next": str(count), "count": count}}
         if method == "GET" and path == "/api/terminal/runs":
             kind = query.get("kind") if query else None
             status = query.get("status") if query else None
@@ -173,7 +196,12 @@ def terminal_api_fake(monkeypatch: pytest.MonkeyPatch):
             session_id = path.split("/")[5]
             matches = [run for run in runs.values() if run.get("session_id") == session_id and run.get("status") == "running"]
             if len(matches) != 1:
-                raise AssertionError(f"unexpected by-session event resolve for {session_id}")
+                raise ody_term.CommandError(
+                    "ambiguous_run",
+                    f"Session {session_id} matches multiple active Runs",
+                    exit_code=2,
+                    details={"session_id": session_id, "choices": [_summary(run) for run in matches]},
+                )
             run = matches[0]
             cursor = int(query["cursor"]) if query and query.get("cursor") is not None else None
             events = [event for event in events_by_run[run["run_id"]] if cursor is None or event["seq"] > cursor]
@@ -859,7 +887,7 @@ def test_confirmation_gates_do_not_bypass_missing_capability(isolated_term_state
 
 
 def test_yolo_satisfies_ordinary_confirmation(
-    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
     _, stdout, _ = run_cli(["run", "start", "--kind", "agent", "--format=json"])
@@ -1142,7 +1170,7 @@ def test_local_chat_run_state_does_not_satisfy_chat_commands(
 
 
 def test_run_attach_cursor_continues_after_last_seen_event(
-    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
     _, stdout, _ = run_cli(["run", "start", "--kind", "agent", "--session-id", "ses_cursor", "--format=json"])
@@ -1194,7 +1222,7 @@ def test_run_attach_raw_capture_outputs_source_native_diagnostics(
 
 
 def test_agent_runs_use_same_run_lifecycle_and_heartbeat_events(
-    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
 
@@ -1209,6 +1237,16 @@ def test_agent_runs_use_same_run_lifecycle_and_heartbeat_events(
     assert data["cursor"] == {"after": None, "next": "2", "count": 2}
 
     run_id = run["run_id"]
+    exit_code, stdout, stderr = run_cli(["run", "list", "--kind", "agent", "--format=json"])
+    assert exit_code == 0
+    assert stderr == ""
+    assert [item["run_id"] for item in json.loads(stdout)["data"]["runs"]] == [run_id]
+
+    exit_code, stdout, stderr = run_cli(["run", "status", run_id, "--format=json"])
+    assert exit_code == 0
+    assert stderr == ""
+    assert json.loads(stdout)["data"]["run"]["kind"] == "agent"
+
     exit_code, stdout, stderr = run_cli(["run", "attach", run_id, "--format=jsonl"])
 
     assert exit_code == 0
@@ -1219,6 +1257,8 @@ def test_agent_runs_use_same_run_lifecycle_and_heartbeat_events(
     assert events[0]["session_id"] == run["session_id"]
     assert events[0]["run_id"] == run_id
     assert events[1]["payload"] == {"activity": "started", "status": "running"}
+    assert not Path(ody_term._run_state_path()).exists()
+    assert terminal_api_fake["calls"][0][0:2] == ("POST", "/api/terminal/runs")
 
     exit_code, stdout, stderr = run_cli(["run", "stop", run_id, "--yes", "--format=json"])
 
@@ -1287,7 +1327,7 @@ def test_harness_commands_report_adapter_capabilities(
 
 
 def test_harness_stop_refuses_non_harness_runs_even_with_adapter_flag(
-    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
     _, stdout, _ = run_cli(["run", "start", "--kind", "agent", "--session-id", "ses_agent", "--format=json"])
@@ -1305,7 +1345,7 @@ def test_harness_stop_refuses_non_harness_runs_even_with_adapter_flag(
 
 
 def test_run_attach_by_session_fails_when_multiple_active_runs_match(
-    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
     run_cli(["run", "start", "--kind", "agent", "--session-id", "ses_ambiguous", "--message", "one", "--format=json"])
@@ -1324,7 +1364,7 @@ def test_run_attach_by_session_fails_when_multiple_active_runs_match(
 
 
 def test_run_stop_targets_run_lifecycle_and_updates_status(
-    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
     _, stdout, _ = run_cli(["run", "start", "--kind", "agent", "--session-id", "ses_stop", "--message", "stop me", "--format=json"])
@@ -1359,7 +1399,7 @@ def test_ordinary_confirmation_requires_yes_when_capability_allows(
 
 
 def test_ordinary_confirmation_accepts_yes_when_capability_allows(
-    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
     _, stdout, _ = run_cli(["run", "start", "--kind", "agent", "--message", "confirm stop", "--format=json"])
@@ -1565,7 +1605,9 @@ def test_service_stop_targets_run_lifecycle_without_host_process_mutation(
     isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
-    _, stdout, _ = run_cli(["run", "start", "--kind", "agent", "--format=json"])
+    _, stdout, _ = run_cli(
+        ["run", "start", "--kind", "harness", "--harness-adapter", "pi", "--format=json"]
+    )
     run_id = json.loads(stdout)["data"]["run"]["run_id"]
 
     exit_code, stdout, stderr = run_cli(["service", "stop", f"run:{run_id}", "--yes", "--format=json"])
@@ -2212,7 +2254,21 @@ def test_tui_human_screen_has_focused_live_repl_browse_and_inspect_views(
     isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
-    run_cli(["run", "start", "--kind", "agent", "--session-id", "ses_screen", "--message", "render", "--format=json"])
+    run_cli(
+        [
+            "run",
+            "start",
+            "--kind",
+            "harness",
+            "--harness-adapter",
+            "pi",
+            "--session-id",
+            "ses_screen",
+            "--message",
+            "render",
+            "--format=json",
+        ]
+    )
 
     exit_code, stdout, stderr = run_cli(["tui"], is_tty=True)
 
@@ -2220,7 +2276,7 @@ def test_tui_human_screen_has_focused_live_repl_browse_and_inspect_views(
     assert stderr == ""
     assert "ody-term tui" in stdout
     assert "[Live] | REPL | Browse | Inspect" in stdout
-    assert "agent.heartbeat" in stdout
+    assert "harness.heartbeat" in stdout
     assert "commands: status, tail, filter, stop, harness, service" in stdout
     assert "Session ses_screen" in stdout
     assert "sessions=1 runs=1 events=2" in stdout
