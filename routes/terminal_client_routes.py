@@ -10,10 +10,12 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from src import terminal_client_runs
 from src.auth_helpers import effective_user
+from src.constants import TERMINAL_EVENT_STREAM_MEDIA_TYPE
 from src.terminal_client_auth import (
     EVENT_RAW_SCOPES,
     EVENT_READ_SCOPES,
@@ -288,6 +290,44 @@ def setup_terminal_client_routes(session_manager=None, chat_handler=None, **_dep
             raise _ambiguous_run_error(str(session_id), exc) from None
         except KeyError:
             raise HTTPException(404, "Run not found") from None
+
+    @router.get("/events/stream")
+    async def stream_events(
+        request: Request,
+        run_id: str | None = None,
+        session_id: str | None = None,
+        cursor: int | None = None,
+        source: str | None = None,
+        kind: str | None = None,
+        level: str | None = None,
+        batch_limit: int = terminal_client_runs.DEFAULT_EVENT_QUERY_LIMIT,
+        include_raw: bool = False,
+    ) -> StreamingResponse:
+        if not run_id and not session_id:
+            raise HTTPException(400, "Terminal event stream requires run_id or session_id")
+        try:
+            run = terminal_client_runs.resolve_run(run_id=run_id, session_id=session_id)
+            authorize_events(request, run, include_raw=include_raw)
+        except ValueError as exc:
+            raise _ambiguous_run_error(str(session_id), exc) from None
+        except KeyError:
+            raise HTTPException(404, "Run not found") from None
+
+        async def jsonl_stream() -> AsyncGenerator[str, None]:
+            async for event in terminal_client_runs.stream_events(
+                run_id=run.run_id,
+                cursor=cursor,
+                source=source,
+                kind=kind,
+                level=level,
+                batch_limit=batch_limit,
+            ):
+                rendered = dict(event)
+                if not include_raw:
+                    rendered.pop("raw", None)
+                yield json.dumps(rendered, sort_keys=True, separators=(",", ":")) + "\n"
+
+        return StreamingResponse(jsonl_stream(), media_type=TERMINAL_EVENT_STREAM_MEDIA_TYPE)
 
     @router.get("/runs/by-session/{session_id}")
     async def run_status_by_session(request: Request, session_id: str) -> dict[str, Any]:

@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import socket
+import threading
+import time
 from pathlib import Path
+from urllib.request import Request as UrlRequest, urlopen
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -189,6 +194,120 @@ def test_terminal_client_event_query_filters_real_run_events(monkeypatch):
     assert [(event["seq"], event["kind"]) for event in filtered["events"]] == [(4, "run.status")]
 
 
+def test_terminal_client_event_stream_replays_jsonl_after_cursor(monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    manager = FakeSessionManager()
+
+    async def fake_stream_llm_with_fallback(candidates, messages, **kwargs):
+        yield 'data: {"delta": "streamed"}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr("routes.terminal_client_routes.stream_llm_with_fallback", fake_stream_llm_with_fallback)
+    install_terminal_route_fakes(monkeypatch)
+
+    app = FastAPI()
+    app.include_router(setup_terminal_client_routes(session_manager=manager, chat_handler=FakeChatHandler()))
+    client = TestClient(app)
+    run_id = client.post(
+        "/api/terminal/runs",
+        json={"kind": "chat", "session_id": "ses-real", "message": "hello"},
+    ).json()["run"]["run_id"]
+
+    with client.stream(
+        "GET",
+        "/api/terminal/events/stream",
+        params={"run_id": run_id, "cursor": 1, "source": "chat"},
+    ) as response:
+        lines = [json.loads(line) for line in response.iter_lines() if line]
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/x-ndjson")
+    assert [event["seq"] for event in lines] == [2, 3, 4]
+    assert all(event["run_id"] == run_id for event in lines)
+    assert all("raw" not in event for event in lines)
+
+
+def test_terminal_client_event_stream_yields_before_active_run_finishes():
+    async def scenario():
+        release = asyncio.Event()
+
+        async def slow_stream():
+            yield 'data: {"delta": "first"}\n\n'
+            await release.wait()
+            yield 'data: {"delta": "second"}\n\n'
+            yield "data: [DONE]\n\n"
+
+        created = terminal_client_runs.create_chat_run(session_id="ses-live", message="hello", stream=slow_stream())
+        stream = terminal_client_runs.stream_events(run_id=created["run"]["run_id"], cursor=0)
+        first = await asyncio.wait_for(anext(stream), timeout=0.2)
+        pending_second = asyncio.create_task(anext(stream))
+        await asyncio.sleep(0.02)
+        assert not pending_second.done()
+        release.set()
+        second = await asyncio.wait_for(pending_second, timeout=0.2)
+        await stream.aclose()
+        return first, second
+
+    first, second = asyncio.run(scenario())
+
+    assert first is not None and first["payload"] == {"delta": "first"}
+    assert second is not None and second["payload"] == {"delta": "second"}
+
+
+def test_terminal_client_http_stream_delivers_before_run_finishes(monkeypatch):
+    import uvicorn
+
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    manager = FakeSessionManager()
+    release = threading.Event()
+
+    async def fake_stream_llm_with_fallback(candidates, messages, **kwargs):
+        yield 'data: {"delta": "first"}\n\n'
+        while not release.is_set():
+            await asyncio.sleep(0.01)
+        yield 'data: {"delta": "second"}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr("routes.terminal_client_routes.stream_llm_with_fallback", fake_stream_llm_with_fallback)
+    install_terminal_route_fakes(monkeypatch)
+    app = FastAPI()
+    app.include_router(setup_terminal_client_routes(session_manager=manager, chat_handler=FakeChatHandler()))
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(5)
+    port = listener.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, log_level="error", lifespan="off"))
+    server_thread = threading.Thread(target=server.run, kwargs={"sockets": [listener]}, daemon=True)
+    server_thread.start()
+    deadline = time.monotonic() + 2
+    while not server.started and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    try:
+        started_request = UrlRequest(
+            f"http://127.0.0.1:{port}/api/terminal/runs",
+            data=json.dumps({"kind": "chat", "session_id": "ses-real", "message": "hello"}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(started_request, timeout=2) as started_response:
+            run_id = json.loads(started_response.read())["run"]["run_id"]
+
+        with urlopen(f"http://127.0.0.1:{port}/api/terminal/events/stream?run_id={run_id}", timeout=2) as response:
+            first = json.loads(response.readline())
+            assert first["payload"] == {"delta": "first"}
+            assert release.is_set() is False
+            release.set()
+            second = json.loads(response.readline())
+            assert second["payload"] == {"delta": "second"}
+    finally:
+        release.set()
+        server.should_exit = True
+        server_thread.join(timeout=2)
+        listener.close()
+
+
 def test_terminal_client_event_query_requires_run_or_session():
     app = FastAPI()
     app.include_router(setup_terminal_client_routes(session_manager=FakeSessionManager(), chat_handler=FakeChatHandler()))
@@ -310,15 +429,25 @@ def test_terminal_client_event_query_enforces_owner_and_raw_scope(monkeypatch):
     assert bounded.status_code == 200
     assert bounded.json()["events"]
     assert all("raw" not in event for event in bounded.json()["events"])
+    streamed = client.get("/api/terminal/events/stream", params={"run_id": run_id})
+    streamed_events = [json.loads(line) for line in streamed.text.splitlines()]
+    assert streamed.status_code == 200
+    assert streamed_events
+    assert all("raw" not in event for event in streamed_events)
 
     raw_denied = client.get("/api/terminal/events", params={"run_id": run_id, "include_raw": True})
     assert raw_denied.status_code == 403
     assert "event:raw" in raw_denied.json()["detail"]
+    stream_raw_denied = client.get("/api/terminal/events/stream", params={"run_id": run_id, "include_raw": True})
+    assert stream_raw_denied.status_code == 403
+    assert "event:raw" in stream_raw_denied.json()["detail"]
 
     token["scopes"] = ["event:raw"]
     raw_allowed = client.get("/api/terminal/events", params={"run_id": run_id, "include_raw": True})
     assert raw_allowed.status_code == 200
     assert raw_allowed.json()["events"][0]["raw"]["transport"] == "sse"
+    stream_raw_allowed = client.get("/api/terminal/events/stream", params={"run_id": run_id, "include_raw": True})
+    assert json.loads(stream_raw_allowed.text.splitlines()[0])["raw"]["transport"] == "sse"
 
     token["scopes"] = ["event:read"]
     assert client.get("/api/terminal/runs").status_code == 403
@@ -333,6 +462,8 @@ def test_terminal_client_event_query_enforces_owner_and_raw_scope(monkeypatch):
     token["owner"] = "bob"
     wrong_owner = client.get("/api/terminal/events", params={"run_id": run_id})
     assert wrong_owner.status_code == 404
+    wrong_owner_stream = client.get("/api/terminal/events/stream", params={"run_id": run_id})
+    assert wrong_owner_stream.status_code == 404
 
 
 def test_terminal_client_chat_run_can_create_real_session(monkeypatch):

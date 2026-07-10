@@ -221,7 +221,33 @@ def terminal_api_fake(monkeypatch: pytest.MonkeyPatch):
             return {"run": _summary(run), "stopped": True}
         raise AssertionError(f"unexpected API request {method} {path}")
 
+    def fake_event_stream(request, path, *, query=None):
+        assert path == "/api/terminal/events/stream"
+        assert query is not None
+        calls.append(("GET", path, query, None))
+        runs = state["runs"]
+        events_by_run = state["events"]
+        run_id = str(query.get("run_id") or "")
+        if not run_id:
+            session_id = str(query.get("session_id") or "")
+            matches = [run for run in runs.values() if run.get("session_id") == session_id]  # type: ignore[union-attr]
+            if len(matches) != 1:
+                raise AssertionError(f"unexpected event stream resolve for {session_id}")
+            run_id = str(matches[0]["run_id"])
+        cursor = int(query["cursor"]) if query.get("cursor") is not None else None
+        filters = {field: query.get(field) for field in ("source", "kind", "level")}
+        for stored in events_by_run[run_id]:  # type: ignore[index]
+            if cursor is not None and stored["seq"] <= cursor:
+                continue
+            if not all(expected is None or stored.get(field) == expected for field, expected in filters.items()):
+                continue
+            event = dict(stored)
+            if not query.get("include_raw"):
+                event.pop("raw", None)
+            yield event
+
     monkeypatch.setattr(ody_term, "_terminal_api_request", fake_api)
+    monkeypatch.setattr(ody_term, "_terminal_api_event_stream", fake_event_stream)
     return {"calls": calls, "state": state}
 
 
@@ -1709,6 +1735,74 @@ def test_inspect_events_by_session_streams_real_events_as_jsonl(
     assert stderr == ""
     events = [json.loads(line) for line in stdout.splitlines()]
     assert [(event["run_id"], event["seq"]) for event in events] == [(run_id, 1)]
+
+
+def test_inspect_events_jsonl_writes_live_api_events_incrementally(
+    isolated_term_state: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    stdout = TtyStringIO(is_tty=False)
+    stderr = TtyStringIO(is_tty=False)
+    first = {
+        "schema": "ody.event.v1",
+        "id": "evt_run_live_1",
+        "seq": 1,
+        "time": "2026-07-10T00:00:00+00:00",
+        "session_id": "ses_live",
+        "run_id": "run_live",
+        "source": "chat",
+        "kind": "message.delta",
+        "level": "info",
+        "payload": {"delta": "one"},
+    }
+    second = {**first, "id": "evt_run_live_2", "seq": 2, "payload": {"delta": "two"}}
+    calls = []
+
+    def fake_event_stream(request, path, *, query=None):
+        calls.append((path, query))
+        yield first
+        assert [json.loads(line) for line in stdout.getvalue().splitlines()] == [first]
+        yield second
+
+    monkeypatch.setattr(ody_term, "_terminal_api_event_stream", fake_event_stream, raising=False)
+
+    exit_code = ody_term.main(
+        [
+            "--target",
+            "http://ody.test",
+            "inspect",
+            "events",
+            "--run-id",
+            "run_live",
+            "--cursor",
+            "0",
+            "--lines",
+            "4",
+            "--format=jsonl",
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    assert stderr.getvalue() == ""
+    assert [json.loads(line) for line in stdout.getvalue().splitlines()] == [first, second]
+    assert calls == [
+        (
+            "/api/terminal/events/stream",
+            {
+                "run_id": "run_live",
+                "session_id": None,
+                "cursor": 0,
+                "source": None,
+                "kind": None,
+                "level": None,
+                "batch_limit": 4,
+                "include_raw": False,
+            },
+        )
+    ]
 
 
 def test_inspect_real_events_debug_preserves_source_native_details(

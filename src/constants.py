@@ -46,6 +46,8 @@ ODY_TERM_RUNTIME_FILE = os.path.join(DATA_DIR, "ody-term-runtime.json")
 ODY_TERM_SERVER_LOG_FILE = os.path.join(DATA_DIR, "ody-term-server.log")
 ODY_TERM_DEFAULT_HOST = os.getenv("ODY_TERM_DEFAULT_HOST", "127.0.0.1")
 ODY_TERM_DEFAULT_PORT = os.getenv("ODY_TERM_DEFAULT_PORT", "7860")
+TERMINAL_API_TIMEOUT_S = 30
+TERMINAL_EVENT_STREAM_MEDIA_TYPE = "application/x-ndjson"
 
 # Data subdirectories
 PERSONAL_UPLOADS_DIR = os.path.join(DATA_DIR, "personal_uploads")

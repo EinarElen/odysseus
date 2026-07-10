@@ -25,6 +25,7 @@ STOP_STATUS_WAIT_ATTEMPTS = 20
 STOP_STATUS_POLL_INTERVAL_S = 0.05
 DEFAULT_EVENT_QUERY_LIMIT = 80
 MAX_EVENT_QUERY_LIMIT = 500
+EVENT_STREAM_POLL_INTERVAL_S = 0.05
 _TERMINAL_RUN_STORE = Path(TERMINAL_CLIENT_RUNS_FILE)
 logger = logging.getLogger(__name__)
 
@@ -395,14 +396,9 @@ async def query_events(
 ) -> dict[str, Any]:
     """Query a bounded Run snapshot without waiting for live execution to end."""
     run = resolve_run(run_id=run_id, session_id=session_id)
-    bounded_limit = min(max(limit, 0), MAX_EVENT_QUERY_LIMIT)
-    scanned = _stored_events_after(run, cursor=cursor)[:bounded_limit]
+    scanned = _bounded_stored_events(run, cursor=cursor, limit=limit, allow_empty=True)
     filters = {"source": source, "kind": kind, "level": level}
-    events = [
-        event
-        for event in scanned
-        if all(expected is None or event.get(field) == expected for field, expected in filters.items())
-    ]
+    events = [event for event in scanned if _event_matches(event, filters)]
     _sync_run_status(run)
     next_cursor = str(scanned[-1]["seq"]) if scanned else (str(cursor) if cursor is not None else None)
     return {
@@ -411,6 +407,49 @@ async def query_events(
         "cursor": {"after": str(cursor) if cursor is not None else None, "next": next_cursor, "count": len(events)},
         "filters": filters,
     }
+
+
+def _bounded_stored_events(
+    run: TerminalRun,
+    *,
+    cursor: int | None,
+    limit: int,
+    allow_empty: bool,
+) -> list[dict[str, Any]]:
+    lower_bound = 0 if allow_empty else 1
+    bounded_limit = min(max(limit, lower_bound), MAX_EVENT_QUERY_LIMIT)
+    return _stored_events_after(run, cursor=cursor)[:bounded_limit]
+
+
+def _event_matches(event: dict[str, Any], filters: dict[str, str | None]) -> bool:
+    return all(expected is None or event.get(field) == expected for field, expected in filters.items())
+
+
+async def stream_events(
+    *,
+    run_id: str | None = None,
+    session_id: str | None = None,
+    cursor: int | None = None,
+    source: str | None = None,
+    kind: str | None = None,
+    level: str | None = None,
+    batch_limit: int = DEFAULT_EVENT_QUERY_LIMIT,
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Tail one Run's persisted Event Envelopes until it finishes."""
+    run = resolve_run(run_id=run_id, session_id=session_id)
+    next_cursor = max(cursor or 0, 0)
+    filters = {"source": source, "kind": kind, "level": level}
+
+    while True:
+        scanned = _bounded_stored_events(run, cursor=next_cursor, limit=batch_limit, allow_empty=False)
+        for event in scanned:
+            next_cursor = int(event.get("seq", next_cursor))
+            if _event_matches(event, filters):
+                yield event
+        _sync_run_status(run)
+        if run.status not in RUN_ACTIVE_STATUSES and not _stored_events_after(run, cursor=next_cursor):
+            break
+        await asyncio.sleep(EVENT_STREAM_POLL_INTERVAL_S)
 
 
 async def stop_run(*, run_id: str | None = None, session_id: str | None = None) -> dict[str, Any]:

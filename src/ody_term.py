@@ -20,7 +20,7 @@ from urllib.request import Request as UrlRequest, urlopen
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, TextIO, TypedDict, cast
+from typing import Callable, Iterable, Iterator, TextIO, TypedDict, cast
 
 try:
     from src.constants import (
@@ -32,6 +32,8 @@ try:
         ODY_TERM_RUNTIME_FILE,
         ODY_TERM_SECRETS_FILE,
         ODY_TERM_SERVER_LOG_FILE,
+        TERMINAL_API_TIMEOUT_S,
+        TERMINAL_EVENT_STREAM_MEDIA_TYPE,
     )
 except Exception:  # pragma: no cover - keeps standalone ody_term packaging usable.
     COOKBOOK_STATE_FILE = ""
@@ -42,6 +44,8 @@ except Exception:  # pragma: no cover - keeps standalone ody_term packaging usab
     ODY_TERM_RUNTIME_FILE = ""
     ODY_TERM_SECRETS_FILE = ""
     ODY_TERM_SERVER_LOG_FILE = ""
+    TERMINAL_API_TIMEOUT_S = 30
+    TERMINAL_EVENT_STREAM_MEDIA_TYPE = "application/x-ndjson"
 
 
 DOMAINS = ("auth", "config", "server", "session", "run", "harness", "service", "inspect", "tui")
@@ -142,6 +146,7 @@ class CommandResponse:
     message: str
     data: dict[str, object] = field(default_factory=dict)
     raw: object | None = None
+    event_stream: Iterable[dict[str, object]] | None = None
 
 
 class EventFilters(TypedDict):
@@ -688,14 +693,13 @@ def _token_value() -> str | None:
     return str(token) if isinstance(token, str) and token else None
 
 
-def _terminal_api_request(
+def _terminal_api_url_and_headers(
     request: CommandRequest,
-    method: str,
     path: str,
     *,
-    query: dict[str, object] | None = None,
-    body: dict[str, object] | None = None,
-) -> dict[str, object]:
+    query: dict[str, object] | None,
+    accept: str,
+) -> tuple[str, dict[str, str]]:
     target = _resolve_target(request)
     if not target.get("ok") or not isinstance(target.get("url"), str):
         raise CommandError(
@@ -705,29 +709,75 @@ def _terminal_api_request(
         )
     base = str(target["url"]).rstrip("/")
     query_string = f"?{urlencode({k: v for k, v in (query or {}).items() if v is not None})}" if query else ""
-    url = f"{base}{path}{query_string}"
-    payload = json.dumps(body or {}).encode("utf-8") if body is not None else None
-    headers = {"Accept": "application/json"}
-    if payload is not None:
-        headers["Content-Type"] = "application/json"
+    headers = {"Accept": accept}
     token = _token_value()
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    return f"{base}{path}{query_string}", headers
+
+
+def _terminal_api_http_error(exc: HTTPError) -> CommandError:
+    try:
+        details = json.loads(exc.read().decode("utf-8") or "{}")
+    except Exception:
+        details = {"status": exc.code}
+    return CommandError(
+        "terminal_api_error",
+        f"terminal-client API returned HTTP {exc.code}",
+        exit_code=1,
+        details=details,
+    )
+
+
+def _terminal_api_request(
+    request: CommandRequest,
+    method: str,
+    path: str,
+    *,
+    query: dict[str, object] | None = None,
+    body: dict[str, object] | None = None,
+) -> dict[str, object]:
+    url, headers = _terminal_api_url_and_headers(request, path, query=query, accept="application/json")
+    payload = json.dumps(body or {}).encode("utf-8") if body is not None else None
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
     req = UrlRequest(url, data=payload, headers=headers, method=method)
     try:
-        with urlopen(req, timeout=30) as response:  # noqa: S310 - user-selected Odysseus target URL.
+        with urlopen(req, timeout=TERMINAL_API_TIMEOUT_S) as response:  # noqa: S310 - user-selected target.
             data = json.loads(response.read().decode("utf-8") or "{}")
     except HTTPError as exc:
-        try:
-            details = json.loads(exc.read().decode("utf-8") or "{}")
-        except Exception:
-            details = {"status": exc.code}
-        raise CommandError("terminal_api_error", f"terminal-client API returned HTTP {exc.code}", exit_code=1, details=details) from exc
+        raise _terminal_api_http_error(exc) from exc
     except (OSError, URLError, json.JSONDecodeError) as exc:
         raise CommandError("terminal_api_unavailable", f"terminal-client API request failed: {exc}", exit_code=1) from exc
     if not isinstance(data, dict):
         raise CommandError("terminal_api_error", "terminal-client API response must be a JSON object", exit_code=1)
     return cast(dict[str, object], data)
+
+
+def _terminal_api_event_stream(
+    request: CommandRequest,
+    path: str,
+    *,
+    query: dict[str, object] | None = None,
+) -> Iterator[dict[str, object]]:
+    url, headers = _terminal_api_url_and_headers(request, path, query=query, accept=TERMINAL_EVENT_STREAM_MEDIA_TYPE)
+    req = UrlRequest(url, headers=headers, method="GET")
+    try:
+        with urlopen(req, timeout=None) as response:  # noqa: S310 - intentional live tail on user-selected target.
+            for raw_line in response:
+                line = raw_line.decode("utf-8").strip()
+                if not line:
+                    continue
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    raise CommandError("terminal_api_error", "terminal event stream item must be a JSON object", exit_code=1)
+                yield cast(dict[str, object], event)
+    except HTTPError as exc:
+        raise _terminal_api_http_error(exc) from exc
+    except CommandError:
+        raise
+    except (OSError, URLError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CommandError("terminal_api_unavailable", f"terminal event stream failed: {exc}", exit_code=1) from exc
 
 
 def _utc_now() -> str:
@@ -1508,23 +1558,34 @@ def _inspect_events(request: CommandRequest) -> CommandResponse:
     run_id = filters["run_id"]
     session_id = filters["session_id"]
     use_terminal_api = bool(run_id or session_id) and filters["source"] != "server"
+    event_stream: Iterable[dict[str, object]] | None = None
     if use_terminal_api:
-        payload = _terminal_api_request(
-            request,
-            "GET",
-            "/api/terminal/events",
-            query={
-                "run_id": run_id,
-                "session_id": session_id,
-                "cursor": cursor,
-                "source": filters["source"],
-                "kind": filters["kind"],
-                "level": filters["level"],
-                "limit": max(lines, 0),
-                "include_raw": request.globals.format in {"raw", "debug"},
-            },
-        )
-        payload["source"] = "terminal-api"
+        query: dict[str, object] = {
+            "run_id": run_id,
+            "session_id": session_id,
+            "cursor": cursor,
+            "source": filters["source"],
+            "kind": filters["kind"],
+            "level": filters["level"],
+            "include_raw": request.globals.format in {"raw", "debug"},
+        }
+        if request.globals.format == "jsonl":
+            query["batch_limit"] = max(lines, 1)
+            source_stream = _terminal_api_event_stream(request, "/api/terminal/events/stream", query=query)
+            event_stream = (
+                event
+                for event in source_stream
+                if _filter_events([event], filters=filters)
+            )
+            payload = {
+                "events": [],
+                "cursor": {"after": str(cursor) if cursor is not None else None, "next": None, "count": None},
+                "source": "terminal-api-stream",
+            }
+        else:
+            query["limit"] = max(lines, 0)
+            payload = _terminal_api_request(request, "GET", "/api/terminal/events", query=query)
+            payload["source"] = "terminal-api"
     else:
         payload = _server_log_events(lines=max(lines, 0), cursor=cursor)
     events = cast(list[dict[str, object]], payload["events"])
@@ -1550,6 +1611,7 @@ def _inspect_events(request: CommandRequest) -> CommandResponse:
         message=f"{len(events)} Event Envelope(s)",
         data=data,
         raw=[event.get("raw") for event in events],
+        event_stream=event_stream,
     )
 
 
@@ -2851,7 +2913,11 @@ def render(response: CommandResponse, request: CommandRequest, stdout: TextIO) -
     if output_format == "json":
         _write_json(payload, stdout)
     elif output_format == "jsonl":
-        if events is not None:
+        if response.event_stream is not None:
+            for event in response.event_stream:
+                _write_json(event, stdout)
+                stdout.flush()
+        elif events is not None:
             for event in events:
                 _write_json(event, stdout)
         else:

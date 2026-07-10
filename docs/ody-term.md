@@ -6,9 +6,9 @@ Current implementation status: the command surface, renderers, local server
 bootstrap, capability shapes, file/keychain auth storage, lifecycle inventory
 scaffold, API-backed chat Run execution, persisted Run identity, bounded real
 chat Event Envelope query/replay, and the `ody.tui.v1` state model exist.
-Continuous live event tailing, API-backed agent
-and harness Runs, real-state lifecycle integration, and a full-screen interactive
-TUI are still open work tracked in
+Live JSONL tailing is available for chat Runs. API-backed agent and harness
+Runs, real-state lifecycle integration, and a full-screen interactive TUI are
+still open work tracked in
 `docs/wayfinder/terminal-client/implementation-review.md`.
 
 ## Command Shape
@@ -64,8 +64,9 @@ ody-term service logs main-server --format=jsonl
 given `--run-id` or `--session-id`. Without either identity it reads local server
 logs; use `--source server` to select that source explicitly when also passing
 identity filters. `--lines` bounds each API snapshot; pass `data.cursor.next`
-back through `--cursor` to continue. JSONL currently renders each bounded
-snapshot one envelope per line rather than keeping a continuous live tail open.
+back through `--cursor` to continue. With `--format=jsonl`, Run/Session event
+inspection instead opens a live tail, replays after `--cursor`, and flushes one
+Event Envelope per line until the Run finishes.
 Chat Event Envelopes are persisted under Run identity while execution drains,
 so recent replay does not require a client to have been attached at execution
 time.

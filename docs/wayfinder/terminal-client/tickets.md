@@ -304,7 +304,7 @@ transport shapes.
       the only implemented source.
 - [x] Raw/debug modes preserve source-native event details without replacing
       the normalized Event Envelope contract.
-- [ ] Cursor behavior is verified across bounded JSON responses, JSONL streams,
+- [x] Cursor behavior is verified across bounded JSON responses, JSONL streams,
       and reconnect after a previous cursor.
 - [x] Tests include at least one real backend/API-backed event source and fail
       if only local fixture/log state is queried.
@@ -325,8 +325,16 @@ JSONL, raw, and debug modes, while identity-free inspection and explicit
 `--source server` retain local server-log envelopes. Route tests start a real
 terminal chat Run through the API seam before querying its events; CLI tests
 verify Run and Session selection, filtering, bounded cursor reconnect across
-JSON and JSONL invocations, and source-native debug details. Continuous live
-JSONL tailing remains open, so this ticket is not yet complete.
+JSON and JSONL invocations, and source-native debug details.
+
+2026-07-10 streaming follow-up: `GET /api/terminal/events/stream` tails the
+same persisted per-Run Event Envelopes as newline-delimited JSON, replays only
+events after `cursor`, applies source/kind/level filters, and closes after the
+Run reaches a terminal state. `ody-term inspect events
+--format=jsonl --run-id/--session-id` consumes that response incrementally and
+flushes each envelope as it arrives. Tests prove replay after a cursor, live
+delivery before an active Run finishes, and incremental CLI writes. This closes
+the recovery ticket; the next frontier is API-backed agent and harness Runs.
 
 ## Extend Real Runs To Agent And Harness Workflows
 
