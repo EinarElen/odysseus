@@ -110,6 +110,31 @@ async def test_terminal_run_event_source_matches_agent_run_kind():
     assert attached["events"][0]["payload"]["type"] == "agent_prep"
 
 
+@pytest.mark.asyncio
+async def test_harness_run_persists_adapter_and_harness_session_identity_from_stream():
+    async def harness_stream():
+        yield (
+            'data: {"type": "harness_start", "harness_adapter_id": "pi", '
+            '"harness_session_id": "pi-session-1"}\n\n'
+        )
+        yield "data: [DONE]\n\n"
+
+    created = terminal_client_runs.create_run(
+        kind="harness",
+        session_id="ses-ody",
+        message="observe",
+        stream=harness_stream(),
+        harness_adapter_id="pi",
+    )
+
+    attached = await terminal_client_runs.attach_run(run_id=created["run"]["run_id"])
+
+    assert attached["run"]["harness_adapter_id"] == "pi"
+    assert attached["run"]["harness_session_id"] == "pi-session-1"
+    assert attached["events"][0]["harness_adapter_id"] == "pi"
+    assert attached["events"][0]["harness_session_id"] == "pi-session-1"
+
+
 def test_terminal_client_agent_run_uses_shared_context_policy_and_real_run_api(monkeypatch):
     monkeypatch.setenv("AUTH_ENABLED", "false")
     manager = FakeSessionManager()
@@ -256,6 +281,108 @@ def test_terminal_client_agent_run_enforces_shared_model_and_quota_gate(
     assert response.status_code == status_code
     assert response.json()["detail"] == detail
     assert manager.sessions["ses-real"].history == []
+
+
+def test_terminal_client_harness_run_uses_adapter_and_exposes_linked_identities(monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    manager = FakeSessionManager()
+    install_terminal_route_fakes(monkeypatch)
+    monkeypatch.setattr("routes.terminal_client_routes.effective_user", lambda request: "alice")
+    monkeypatch.setattr("routes.terminal_client_routes._enforce_chat_privileges", lambda *args: None)
+    monkeypatch.setattr(
+        "routes.terminal_client_routes.resolve_agent_access",
+        lambda request, user: SimpleNamespace(
+            agent_allowed=True,
+            research_allowed=True,
+            disabled_tools=frozenset({"send_email"}),
+        ),
+    )
+
+    async def fake_build_chat_context(sess, request, chat_handler, chat_processor, message, session_id, **kwargs):
+        sess.add_message(ChatMessage("user", message))
+        return SimpleNamespace(
+            messages=sess.get_context_messages(),
+            context_length=8192,
+            preset=SimpleNamespace(temperature=0.2, max_tokens=321, character_name=None),
+            uploaded_files=[],
+            rag_sources=[],
+            used_memories=[],
+        )
+
+    class FakeHarnessAdapter:
+        id = "pi"
+        label = "Pi"
+        capabilities = SimpleNamespace(modes=["observe"])
+
+        async def start(self, config):
+            assert config["owner"] == "alice"
+            assert config["disabled_tools"] == ["send_email"]
+            return SimpleNamespace(
+                adapter_id="pi",
+                odysseus_session_id="ses-real",
+                harness_session_id="pi-session-live",
+                workspace="/tmp/workspace",
+                config={},
+            )
+
+        async def send(self, ref, message, attachments=None, reconciliation=None):
+            yield SimpleNamespace(type="text_delta", data={"text": "harness result"})
+            yield SimpleNamespace(type="done", data={})
+
+        async def close(self, ref):
+            return None
+
+    monkeypatch.setattr("routes.terminal_client_routes.build_chat_context", fake_build_chat_context)
+    monkeypatch.setattr("routes.terminal_client_routes.get_harness_adapter", lambda adapter_id: FakeHarnessAdapter())
+
+    app = FastAPI()
+    token = {"scopes": ["run:start"]}
+
+    @app.middleware("http")
+    async def fake_token(request, call_next):
+        request.state.api_token = True
+        request.state.api_token_owner = "alice"
+        request.state.api_token_scopes = token["scopes"]
+        return await call_next(request)
+
+    app.include_router(
+        setup_terminal_client_routes(
+            session_manager=manager,
+            chat_handler=FakeChatHandler(),
+            chat_processor=object(),
+        )
+    )
+    client = TestClient(app)
+
+    payload = {
+        "kind": "harness",
+        "session_id": "ses-real",
+        "message": "observe",
+        "harness_adapter_id": "pi",
+        "harness_session_id": "requested-session",
+        "workspace": "/tmp/workspace",
+    }
+    denied = client.post("/api/terminal/runs", json=payload)
+    assert denied.status_code == 403
+    assert "harness:control" in denied.json()["detail"]
+
+    token["scopes"] = ["run:start", "harness:control", "event:read"]
+    started = client.post(
+        "/api/terminal/runs",
+        json=payload,
+    )
+    assert started.status_code == 200
+    assert started.json()["run"]["harness_session_id"] is None
+    run_id = started.json()["run"]["run_id"]
+
+    attached = client.get(f"/api/terminal/runs/{run_id}/events").json()
+    run = attached["run"]
+    assert run["kind"] == "harness"
+    assert run["harness_adapter_id"] == "pi"
+    assert run["harness_session_id"] == "pi-session-live"
+    assert {event["source"] for event in attached["events"]} == {"harness"}
+    assert all(event["harness_session_id"] == "pi-session-live" for event in attached["events"])
+    assert manager.sessions["ses-real"].history[-1].content == "harness result"
 
 
 def test_terminal_client_chat_run_api_exposes_distinct_run_events_and_stop(monkeypatch):

@@ -34,6 +34,8 @@ class TerminalRun:
     run_id: str
     session_id: str
     kind: str = "chat"
+    harness_adapter_id: str | None = None
+    harness_session_id: str | None = None
     status: str = "running"
     started_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
@@ -86,6 +88,12 @@ def _run_from_record(record: Any) -> TerminalRun | None:
         run_id=run_id,
         session_id=session_id,
         kind=str(record.get("kind") or "chat"),
+        harness_adapter_id=str(record["harness_adapter_id"])
+        if isinstance(record.get("harness_adapter_id"), str)
+        else None,
+        harness_session_id=str(record["harness_session_id"])
+        if isinstance(record.get("harness_session_id"), str)
+        else None,
         status=str(record.get("status") or "running"),
         started_at=str(record.get("started_at") or _utc_now()),
         updated_at=str(record.get("updated_at") or _utc_now()),
@@ -222,10 +230,26 @@ def _event_envelope(run: TerminalRun, *, seq: int, raw: str) -> dict[str, Any]:
         "summary": _summary(kind, payload),
         "payload": payload if isinstance(payload, dict) else {"value": payload},
         "raw": {"transport": "sse", "type": event_type, "body": raw},
+        **(
+            {
+                "harness_adapter_id": run.harness_adapter_id,
+                "harness_session_id": run.harness_session_id,
+            }
+            if run.kind == "harness"
+            else {}
+        ),
     }
 
 
 def _persist_raw_event(run: TerminalRun, seq: int, raw: str) -> None:
+    _event_type, payload = _parse_sse_event(raw)
+    if isinstance(payload, dict) and payload.get("type") == "harness_start":
+        adapter_id = payload.get("harness_adapter_id") or payload.get("harness")
+        harness_session_id = payload.get("harness_session_id")
+        if isinstance(adapter_id, str) and adapter_id:
+            run.harness_adapter_id = adapter_id
+        if isinstance(harness_session_id, str) and harness_session_id:
+            run.harness_session_id = harness_session_id
     event = _event_envelope(run, seq=seq, raw=raw)
     event_type = str(event["raw"]["type"])
     if event_type == "done":
@@ -291,7 +315,7 @@ def run_summary(run: TerminalRun, *, event_count: int | None = None) -> dict[str
             "level": str(last_event.get("level") if last_event else "info"),
             "summary": str(last_event.get("summary") if last_event else run.status),
         }
-    return {
+    summary = {
         "run_id": run.run_id,
         "session_id": run.session_id,
         "kind": run.kind,
@@ -306,6 +330,10 @@ def run_summary(run: TerminalRun, *, event_count: int | None = None) -> dict[str
         "last_activity": last_activity,
         "heartbeat": last_activity,
     }
+    if run.kind == "harness":
+        summary["harness_adapter_id"] = run.harness_adapter_id
+        summary["harness_session_id"] = run.harness_session_id
+    return summary
 
 
 def create_run(
@@ -314,6 +342,8 @@ def create_run(
     session_id: str | None,
     message: str,
     stream: AsyncGenerator[str, None],
+    harness_adapter_id: str | None = None,
+    harness_session_id: str | None = None,
 ) -> dict[str, Any]:
     _load_persisted_runs()
     resolved_session_id = session_id or _new_identity("ses")
@@ -321,6 +351,8 @@ def create_run(
         run_id=_new_identity("run"),
         session_id=resolved_session_id,
         kind=kind,
+        harness_adapter_id=harness_adapter_id,
+        harness_session_id=harness_session_id,
         message=message,
     )
     _RUNS[run.run_id] = run

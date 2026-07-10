@@ -361,6 +361,15 @@ a normalized `heartbeat` retaining native `agent_prep` identity, and the
 persisted exact response `ODY_TERM_AGENT_HEARTBEAT_OK`. Harness execution
 remains the open half of this frontier.
 
+2026-07-10 harness backbone: the terminal-client backend Run Interface now
+accepts `kind=harness`, resolves a registered `HarnessAdapter`, validates its
+mode capability, runs `start`/`send`, persists the returned Harness Session
+identity, and places Odysseus Session, Run, adapter, and Harness Session
+identity on normalized `source=harness` envelopes. Focused route tests exercise
+the Adapter seam and durable identity update. This is foundation only:
+`ody-term run start --kind harness` still uses client-local state until the CLI
+migration and live adapter evidence close the remaining criteria below.
+
 ## Extend Real Runs To Agent And Harness Workflows
 
 **What to build:** Agent and harness-backed execution use the same real Run

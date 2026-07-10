@@ -28,11 +28,13 @@ from src.agent_loop import stream_agent_loop
 from src.agent_runtime import resolve_agent_execution_limits
 from src.auth_helpers import effective_user
 from src.constants import TERMINAL_EVENT_STREAM_MEDIA_TYPE
+from src.harness import get_harness_adapter
 from src.llm_core import stream_llm_with_fallback
 from src.model_context import estimate_tokens
 from src.terminal_client_auth import (
     EVENT_RAW_SCOPES,
     EVENT_READ_SCOPES,
+    HARNESS_CONTROL_SCOPES,
     RUN_READ_SCOPES,
     RUN_START_SCOPES,
     RUN_STOP_SCOPES,
@@ -48,6 +50,10 @@ class RunStartRequest(BaseModel):
     endpoint_url: str | None = None
     model: str | None = None
     preset_id: str | None = None
+    harness_adapter_id: str | None = None
+    harness_session_id: str | None = None
+    harness_mode: str = "observe"
+    workspace: str | None = None
 
 
 def _require_chat_runtime(session_manager: Any, chat_handler: Any) -> None:
@@ -333,6 +339,125 @@ def _terminal_agent_stream(
     return _stream()
 
 
+def _terminal_harness_stream(
+    *,
+    request: Request,
+    session_manager: Any,
+    chat_handler: Any,
+    chat_processor: Any,
+    session_id: str,
+    sess: Any,
+    message: str,
+    preset_id: str | None,
+    owner: str | None,
+    access: AgentAccess,
+    adapter: Any,
+    harness_session_id: str | None,
+    harness_mode: str,
+    workspace: str | None,
+) -> AsyncGenerator[str, None]:
+    async def _stream() -> AsyncGenerator[str, None]:
+        resolve_session_auth(sess, session_id, owner=owner)
+        ctx = await build_chat_context(
+            sess,
+            request,
+            chat_handler,
+            chat_processor,
+            message,
+            session_id,
+            preset_id=preset_id,
+            agent_mode=True,
+        )
+        config = {
+            "id": adapter.id,
+            "mode": harness_mode,
+            "odysseus_session_id": session_id,
+            "requested_session_id": harness_session_id,
+            "workspace": workspace,
+            "owner": owner,
+            "disabled_tools": sorted(access.disabled_tools),
+        }
+        ref = None
+        full_response = ""
+        thinking_response = ""
+        started = time.time()
+        try:
+            ref = await adapter.start(config)
+            yield f"data: {json.dumps({'type': 'harness_start', 'harness_adapter_id': adapter.id, 'harness_session_id': ref.harness_session_id, 'workspace': ref.workspace, 'mode': harness_mode})}\n\n"
+            from src.harness.context import reconcile_prompt_for_harness
+
+            reconciliation = reconcile_prompt_for_harness(
+                messages=ctx.messages,
+                current_message=message,
+                harness_id=adapter.id,
+            )
+            async for event in adapter.send(
+                ref,
+                message,
+                attachments=ctx.uploaded_files,
+                reconciliation=reconciliation,
+            ):
+                event_type = str(event.type)
+                data = dict(event.data or {})
+                if event_type == "text_delta":
+                    delta = str(data.get("text") or "")
+                    if delta:
+                        full_response += delta
+                        yield f"data: {json.dumps({'delta': delta})}\n\n"
+                elif event_type == "final_text":
+                    text = str(data.get("text") or "")
+                    if text and not full_response:
+                        full_response = text
+                        yield f"data: {json.dumps({'delta': text})}\n\n"
+                elif event_type == "thinking_delta":
+                    delta = str(data.get("text") or "")
+                    if delta:
+                        thinking_response += delta
+                        yield f"data: {json.dumps({'delta': delta, 'thinking': True})}\n\n"
+                elif event_type == "error":
+                    yield f"event: error\ndata: {json.dumps({'status': 502, 'text': data.get('message') or 'Harness request failed'})}\n\n"
+                    return
+                elif event_type == "done":
+                    break
+                else:
+                    yield f"data: {json.dumps({'type': event_type, 'data': data})}\n\n"
+
+            elapsed = time.time() - started
+            metrics = {
+                "response_time": round(elapsed, 2),
+                "input_tokens": estimate_tokens(ctx.messages),
+                "output_tokens": len(full_response) // 4,
+                "tokens_per_second": round((len(full_response) // 4) / elapsed, 2) if elapsed > 0 else 0,
+                "model": str(getattr(sess, "model", "") or ""),
+                "harness": adapter.id,
+                "harness_session_id": ref.harness_session_id,
+                "usage_source": "estimated",
+            }
+            if thinking_response.strip():
+                metrics["thinking"] = thinking_response.strip()
+            yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
+            if full_response:
+                saved_id = save_assistant_response(
+                    sess,
+                    session_manager,
+                    session_id,
+                    full_response,
+                    metrics,
+                    character_name=ctx.preset.character_name or "",
+                    rag_sources=ctx.rag_sources,
+                    used_memories=ctx.used_memories,
+                )
+                if saved_id:
+                    yield f"data: {json.dumps({'type': 'message_saved', 'id': saved_id})}\n\n"
+            yield "data: [DONE]\n\n"
+        except (GeneratorExit, asyncio.CancelledError):
+            if ref is not None:
+                await adapter.close(ref)
+            raise
+
+    return _stream()
+
+
 def _ambiguous_run_error(session_id: str, exc: ValueError) -> HTTPException:
     choices = [
         terminal_client_runs.run_summary(run)
@@ -365,16 +490,41 @@ def setup_terminal_client_routes(
     @router.post("/runs")
     async def start_run(request: Request, payload: RunStartRequest) -> dict[str, Any]:
         require_terminal_scope(request, RUN_START_SCOPES)
-        if payload.kind not in {"chat", "agent"}:
-            raise HTTPException(400, "Terminal Client run start currently supports kind=chat or kind=agent")
-        if payload.kind == "agent":
+        if payload.kind not in {"chat", "agent", "harness"}:
+            raise HTTPException(400, "Terminal Client run start supports kind=chat, kind=agent, or kind=harness")
+        if payload.kind in {"agent", "harness"}:
             _require_agent_runtime(session_manager, chat_handler, chat_processor)
         else:
             _require_chat_runtime(session_manager, chat_handler)
+        if payload.kind == "harness":
+            require_terminal_scope(request, HARNESS_CONTROL_SCOPES)
         owner = effective_user(request)
-        access = resolve_agent_access(request, owner) if payload.kind == "agent" else None
+        access = resolve_agent_access(request, owner) if payload.kind in {"agent", "harness"} else None
         if access is not None and not access.agent_allowed:
             raise HTTPException(403, "Agent execution is not permitted for this user")
+        adapter = None
+        if payload.kind == "harness":
+            adapter_id = str(payload.harness_adapter_id or "").strip()
+            if not adapter_id:
+                raise HTTPException(400, {"code": "missing_harness_adapter", "supported": False})
+            try:
+                adapter = get_harness_adapter(adapter_id)
+            except KeyError:
+                raise HTTPException(
+                    400,
+                    {"code": "unknown_harness_adapter", "adapter": adapter_id, "supported": False},
+                ) from None
+            supported_modes = list(getattr(adapter.capabilities, "modes", []) or [])
+            if supported_modes and payload.harness_mode not in supported_modes:
+                raise HTTPException(
+                    409,
+                    {
+                        "code": "unsupported_harness_mode",
+                        "adapter": adapter_id,
+                        "mode": payload.harness_mode,
+                        "supported_modes": supported_modes,
+                    },
+                )
         session_id, sess = _get_or_create_chat_session(
             request=request,
             session_manager=session_manager,
@@ -382,7 +532,35 @@ def setup_terminal_client_routes(
             owner=owner,
         )
         _enforce_chat_privileges(request, sess)
-        if payload.kind == "agent":
+        if payload.kind == "harness":
+            assert access is not None and adapter is not None
+            harness_options = {
+                "id": adapter.id,
+                "mode": payload.harness_mode,
+                "requested_session_id": payload.harness_session_id,
+                "workspace": payload.workspace,
+            }
+            provider_options = dict(getattr(sess, "provider_options", None) or {})
+            provider_options["harness"] = harness_options
+            sess.provider_options = provider_options
+            session_manager.save_sessions()
+            stream = _terminal_harness_stream(
+                request=request,
+                session_manager=session_manager,
+                chat_handler=chat_handler,
+                chat_processor=chat_processor,
+                session_id=session_id,
+                sess=sess,
+                message=payload.message,
+                preset_id=payload.preset_id,
+                owner=owner,
+                access=access,
+                adapter=adapter,
+                harness_session_id=payload.harness_session_id,
+                harness_mode=payload.harness_mode,
+                workspace=payload.workspace,
+            )
+        elif payload.kind == "agent":
             assert access is not None
             stream = _terminal_agent_stream(
                 request=request,
@@ -411,6 +589,8 @@ def setup_terminal_client_routes(
             session_id=session_id,
             message=payload.message,
             stream=stream,
+            harness_adapter_id=adapter.id if adapter is not None else None,
+            harness_session_id=None,
         )
 
     @router.get("/runs")

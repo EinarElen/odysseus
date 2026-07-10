@@ -27,6 +27,7 @@ EVENT_RAW_SCOPES = frozenset({"event:raw"})
 RUN_READ_SCOPES = frozenset({"run:read"})
 RUN_START_SCOPES = frozenset({"run:start"})
 RUN_STOP_SCOPES = frozenset({"run:stop"})
+HARNESS_CONTROL_SCOPES = frozenset({"harness:control"})
 
 
 def require_terminal_scope(request: Request, allowed: frozenset[str]) -> str:
