@@ -197,3 +197,81 @@ def test_source_updates_reject_different_content_at_the_same_revision():
 
     assert manager.update_source(session, "newer", revision=1) == 1
     assert session.source == "newer"
+
+
+def test_create_reuses_document_session_and_applies_requested_configuration():
+    manager = TypstSessionManager()
+
+    original = manager.create(
+        owner="alice", owner_type="document", owner_id="doc-1", source="first",
+        backend="typst-cli", auto_refresh=False,
+    )
+    reused = manager.create(
+        owner="alice", owner_type="document", owner_id="doc-1", source="second",
+        backend="tinymist", auto_refresh=True,
+    )
+
+    assert reused is original
+    assert len(manager.sessions) == 1
+    assert reused.source == "second"
+    assert reused.source_revision == 1
+    assert reused.backend_name == "tinymist"
+    assert reused.auto_refresh is True
+
+
+def test_create_reuse_normalizes_an_invalid_requested_backend():
+    manager = TypstSessionManager()
+    original = manager.create(
+        owner="alice", owner_type="document", owner_id="doc-1", source="first", backend="typst-cli"
+    )
+
+    reused = manager.create(
+        owner="alice", owner_type="document", owner_id="doc-1", source="first", backend="unknown"
+    )
+
+    assert reused is original
+    assert reused.backend_name == "tinymist"
+
+
+def test_create_reuse_is_isolated_by_owner_and_owner_scope():
+    manager = TypstSessionManager()
+
+    alice = manager.create(owner="alice", owner_type="document", owner_id="doc-1", source="a")
+    bob = manager.create(owner="bob", owner_type="document", owner_id="doc-1", source="b")
+    note = manager.create(owner="alice", owner_type="note", owner_id="doc-1", source="c")
+    other_doc = manager.create(owner="alice", owner_type="document", owner_id="doc-2", source="d")
+
+    assert len({alice.id, bob.id, note.id, other_doc.id}) == 4
+    assert len(manager.sessions) == 4
+
+
+def test_delete_removes_owner_scope_reuse_index():
+    manager = TypstSessionManager()
+    original = manager.create(owner="alice", owner_type="document", owner_id="doc-1", source="first")
+
+    assert manager.delete(original.id, "alice") is True
+    replacement = manager.create(owner="alice", owner_type="document", owner_id="doc-1", source="second")
+
+    assert replacement.id != original.id
+    assert replacement.source == "second"
+    assert replacement.source_revision == 0
+
+
+def test_anonymous_owner_scopes_are_safe_and_reused_only_when_identical():
+    manager = TypstSessionManager()
+
+    first = manager.create(owner="", owner_type="document", owner_id="doc-1", source="first")
+    reused = manager.create(owner="", owner_type="document", owner_id="doc-1", source="first")
+    other = manager.create(owner="", owner_type="document", owner_id="doc-2", source="first")
+
+    assert reused is first
+    assert other.id != first.id
+
+
+def test_sessions_without_a_complete_owner_scope_are_not_reused():
+    manager = TypstSessionManager()
+
+    first = manager.create(owner="alice", owner_type="document", owner_id=None, source="first")
+    second = manager.create(owner="alice", owner_type="document", owner_id=None, source="first")
+
+    assert second.id != first.id

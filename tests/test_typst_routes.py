@@ -48,3 +48,31 @@ def test_source_update_reports_revision_conflict(monkeypatch):
     deleted = client.delete(f"/api/typst/sessions/{session_id}")
     assert deleted.status_code == 200
     assert deleted.json() == {"ok": True}
+
+
+def test_create_session_reuses_owner_scope_and_syncs_changed_source(monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    manager = TypstSessionManager()
+    monkeypatch.setattr(typst_routes, "typst_session_manager", manager)
+    app = FastAPI()
+    app.include_router(typst_routes.setup_typst_routes())
+    client = TestClient(app)
+
+    first = client.post(
+        "/api/typst/sessions",
+        json={"ownerType": "document", "ownerId": "doc-1", "source": "first", "autoRefresh": False},
+    )
+    second = client.post(
+        "/api/typst/sessions",
+        json={"ownerType": "document", "ownerId": "doc-1", "source": "second", "autoRefresh": False},
+    )
+    isolated = client.post(
+        "/api/typst/sessions",
+        json={"ownerType": "document", "ownerId": "doc-2", "source": "third", "autoRefresh": False},
+    )
+
+    assert first.status_code == second.status_code == isolated.status_code == 200
+    assert second.json()["session"]["id"] == first.json()["session"]["id"]
+    assert second.json()["session"]["sourceRevision"] == 1
+    assert manager.sessions[first.json()["session"]["id"]].source == "second"
+    assert isolated.json()["session"]["id"] != first.json()["session"]["id"]

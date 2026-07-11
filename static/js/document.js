@@ -10025,9 +10025,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     _typstEventSource.addEventListener('compile-error', onDone);
   }
 
-  async function _syncAndCompileTypst({ force = false, conflictRetry = false } = {}) {
+  async function _syncAndCompileTypst({ force = false, conflictRetry = false, sessionRecovery = false } = {}) {
     const ta = document.getElementById('doc-editor-textarea');
-    if (!ta || !activeDocId || docs.get(activeDocId)?.language !== 'typst') return;
+    const doc = activeDocId && docs.get(activeDocId);
+    if (!ta || !doc || doc.language !== 'typst') return;
     if (!_typstPreviewActive && !force) return;
     try {
       const sid = await _ensureTypstSession();
@@ -10038,10 +10039,24 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         body: JSON.stringify({ source: ta.value || '', revision, compile: true }),
       });
       const data = await res.json().catch(() => ({}));
+      if (res.status === 404 && !sessionRecovery) {
+        // Preview sessions are intentionally in-memory. A server restart makes
+        // cached document IDs stale, so recreate exactly once with this source.
+        _closeTypstEvents();
+        _typstSessionId = null;
+        doc._typstSessionId = null;
+        // The replacement session starts its revision sequence from zero, so
+        // results from the stale session must not suppress its first render.
+        _typstRevision = 0;
+        _typstLatestRenderedRevision = -1;
+        // A new session has no competing revision. Reset the separate conflict
+        // retry budget so a prior 409 cannot suppress this one recovery.
+        return _syncAndCompileTypst({ force: true, conflictRetry: false, sessionRecovery: true });
+      }
       if (res.status === 409 && data.detail?.code === 'revision_conflict') {
         if (conflictRetry) throw new Error('Typst source kept changing; retry the preview');
         _typstRevision = Math.max(_typstRevision, data.detail.currentRevision || 0);
-        return _syncAndCompileTypst({ force: true, conflictRetry: true });
+        return _syncAndCompileTypst({ force: true, conflictRetry: true, sessionRecovery });
       }
       if (!res.ok) throw new Error(data.detail || data.error || `HTTP ${res.status}`);
       if (data.compile) _applyTypstResult(data.compile);

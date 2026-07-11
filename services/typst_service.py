@@ -233,17 +233,47 @@ def _preview_page_from_svg(svg: str, page: int = 1) -> TypstPreviewPage:
 class TypstSessionManager:
     def __init__(self):
         self.sessions: Dict[str, TypstSession] = {}
+        # Only document/note-like sessions with a complete owner scope are
+        # reusable. The owner is part of the key even in auth-disabled mode,
+        # where it is the stable empty string rather than an omitted value.
+        self._sessions_by_owner_scope: Dict[tuple[str, str, str], str] = {}
         self.backends = {
             "tinymist": TinymistBackend(),
             "typst-cli": CliTypstBackend("typst"),
         }
 
+    @staticmethod
+    def _owner_scope_key(
+        owner: Optional[str], owner_type: str, owner_id: Optional[str]
+    ) -> Optional[tuple[str, str, str]]:
+        if not owner_type or not owner_id:
+            return None
+        return (owner or "", owner_type, owner_id)
+
     def create(self, *, owner: Optional[str], owner_type: str, owner_id: Optional[str], source: str, backend: str = "tinymist", auto_refresh: bool = True) -> TypstSession:
-        sid = "typst_" + uuid.uuid4().hex
+        normalized_source = source or ""
+        # Normalize before looking up a reusable session so a create request has
+        # the same configuration effect whether it creates or reuses a session.
         if backend not in self.backends:
             backend = "tinymist"
-        sess = TypstSession(sid, owner, owner_type, owner_id, source or "", backend_name=backend, auto_refresh=auto_refresh)
+        scope_key = self._owner_scope_key(owner, owner_type, owner_id)
+        if scope_key:
+            existing_id = self._sessions_by_owner_scope.get(scope_key)
+            existing = self.sessions.get(existing_id) if existing_id else None
+            if existing:
+                if existing.source != normalized_source:
+                    self.update_source(existing, normalized_source, existing.source_revision + 1)
+                existing.backend_name = backend
+                existing.auto_refresh = auto_refresh
+                existing.last_accessed_at = time.time()
+                return existing
+            self._sessions_by_owner_scope.pop(scope_key, None)
+
+        sid = "typst_" + uuid.uuid4().hex
+        sess = TypstSession(sid, owner, owner_type, owner_id, normalized_source, backend_name=backend, auto_refresh=auto_refresh)
         self.sessions[sid] = sess
+        if scope_key:
+            self._sessions_by_owner_scope[scope_key] = sid
         self._publish(sess, {"type": "session-created", "sessionId": sid, "revision": sess.source_revision, "backend": backend})
         return sess
 
@@ -257,8 +287,12 @@ class TypstSessionManager:
         return sess
 
     def delete(self, sid: str, owner: Optional[str]) -> bool:
-        self.get(sid, owner)
-        return self.sessions.pop(sid, None) is not None
+        sess = self.get(sid, owner)
+        deleted = self.sessions.pop(sid, None) is not None
+        scope_key = self._owner_scope_key(sess.owner, sess.owner_type, sess.owner_id)
+        if scope_key and self._sessions_by_owner_scope.get(scope_key) == sid:
+            self._sessions_by_owner_scope.pop(scope_key, None)
+        return deleted
 
     def update_source(self, sess: TypstSession, source: str, revision: Optional[int]) -> int:
         if revision is None:
