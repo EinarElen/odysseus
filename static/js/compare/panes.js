@@ -36,7 +36,10 @@ function _slotChar(i) { return state._parallel ? String.fromCharCode(65 + i) : S
 // ── Stop / reroll ──
 
 function stopAll() {
-  state._abortControllers.forEach(ac => { if (ac) ac.abort(); });
+  state._abortControllers.forEach((ac, idx) => {
+    if (ac) ac.abort();
+    _stopBackendRun(idx);
+  });
   state._abortControllers = [];
   state._streaming = false;
   if (_setSendBtn) _setSendBtn('send');
@@ -52,6 +55,7 @@ function stopPane(paneIdx) {
     ac.abort();
     state._abortControllers[paneIdx] = null;
   }
+  _stopBackendRun(paneIdx);
   // Hide stop button, show reroll
   const pane = document.querySelector(`.compare-pane[data-pane="${paneIdx}"]`);
   if (pane) {
@@ -69,6 +73,16 @@ function stopPane(paneIdx) {
       body.innerHTML = '<span style="opacity:0.4;font-style:italic;">Stopped</span>';
     }
   }
+}
+
+function _stopBackendRun(paneIdx) {
+  const runId = state._runIds[paneIdx];
+  const sessionId = state._paneSessionIds[paneIdx];
+  state._runIds[paneIdx] = null;
+  if (!runId || !sessionId) return;
+  fetch(`${state.API_BASE}/api/chat/compare/stop/${encodeURIComponent(sessionId)}/${encodeURIComponent(runId)}`, {
+    method: 'POST', credentials: 'same-origin'
+  }).catch(() => {});
 }
 
 async function rerollPane(paneIdx, overrideTimeout) {

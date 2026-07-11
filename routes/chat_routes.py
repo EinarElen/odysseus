@@ -488,6 +488,9 @@ def setup_chat_routes(
     # ------------------------------------------------------------------ #
     @router.post("/api/chat", response_model=Dict[str, str])
     async def chat_endpoint(request: Request, chat_request: ChatRequest) -> Dict[str, str]:
+        from src import execution_service
+        if execution_service.should_proxy():
+            return await execution_service.proxy(request, "/api/chat", streaming=False)
         _set_user_time_from_request(request)
 
         message = chat_request.message
@@ -723,7 +726,9 @@ def setup_chat_routes(
     # ------------------------------------------------------------------ #
     @router.post("/api/chat_stream")
     async def chat_stream(request: Request) -> StreamingResponse:
-        from src import agent_runs
+        from src import agent_runs, execution_service
+        if execution_service.should_proxy():
+            return await execution_service.proxy(request, "/api/chat_stream", streaming=True)
         if agent_runs.is_draining():
             raise HTTPException(
                 503,
@@ -2132,18 +2137,10 @@ def setup_chat_routes(
 
         # Compare panes are short-lived, single-shot generations whose sessions
         # exist only to drive that one pane — there's nothing to "resume" and
-        # the user expects the pane's Stop button (which aborts the fetch,
-        # closing this SSE) to promptly cancel the upstream LLM call. Detaching
-        # them would keep burning upstream tokens/compute after the pane is
-        # stopped or the comparison is abandoned, and would surface a stale
-        # "still streaming" /resume target for a session nobody will revisit.
-        #
-        # So: stream them directly (no agent_runs wrapping). Starlette cancels
-        # the underlying async generator (raising CancelledError/GeneratorExit
-        # inside it) as soon as it notices the client disconnected — which the
-        # mode-specific except blocks above already handle by saving the
-        # partial response exactly once. This stops the upstream call promptly
-        # without waiting on the next streamed chunk.
+        # Compare panes also detach so a browser/frontend restart cannot cancel
+        # their provider calls. The response exposes a run ID; explicit pane
+        # Stop sends that ID to the compare-stop endpoint, preserving prompt
+        # cancellation without coupling execution lifetime to the SSE socket.
         #
         # Normal chat/agent streams keep the DETACHED behavior below: they
         # survive the client closing the tab / navigating away. The SSE response just subscribes (replay
@@ -2151,20 +2148,22 @@ def setup_chat_routes(
         # the run keeps going and saves the assistant message on completion
         # regardless. Reconnect via /api/chat/resume.
         if compare_mode:
-            compare_run_id = f"compare:{session}:{id(request)}"
+            compare_run_id = f"compare:{uuid.uuid4().hex}"
+            stream = _safe_stream()
             try:
-                agent_runs.register_external_run(compare_run_id)
+                agent_runs.start(
+                    compare_run_id,
+                    stream,
+                    metadata={"session_id": session, "owner": effective_user(request)},
+                )
             except agent_runs.RunDrainingError as exc:
+                await stream.aclose()
                 raise HTTPException(503, str(exc), headers={"Retry-After": "2"})
-
-            async def _tracked_compare_stream():
-                try:
-                    async for event in _safe_stream():
-                        yield event
-                finally:
-                    agent_runs.unregister_external_run(compare_run_id)
-
-            return StreamingResponse(_tracked_compare_stream(), media_type="text/event-stream")
+            return StreamingResponse(
+                agent_runs.subscribe(compare_run_id),
+                media_type="text/event-stream",
+                headers={"X-Odysseus-Run-ID": compare_run_id},
+            )
 
         stream = _safe_stream()
         try:
@@ -2180,6 +2179,11 @@ def setup_chat_routes(
     # ------------------------------------------------------------------ #
     @router.get("/api/chat/resume/{session_id}")
     async def chat_resume(request: Request, session_id: str) -> StreamingResponse:
+        from src import execution_service
+        if execution_service.should_proxy():
+            return await execution_service.proxy(
+                request, f"/api/chat/resume/{session_id}", streaming=True
+            )
         _verify_session_owner(request, session_id)
         if not agent_runs.is_active(session_id):
             raise HTTPException(404, "No active run for this session")
@@ -2191,15 +2195,38 @@ def setup_chat_routes(
     # ------------------------------------------------------------------ #
     @router.post("/api/chat/stop/{session_id}")
     async def chat_stop(request: Request, session_id: str) -> Dict[str, Any]:
+        from src import execution_service
+        if execution_service.should_proxy():
+            return await execution_service.proxy(
+                request, f"/api/chat/stop/{session_id}", streaming=False
+            )
         _verify_session_owner(request, session_id)
         stopped = agent_runs.stop(session_id)
         return {"stopped": stopped}
+
+    @router.post("/api/chat/compare/stop/{session_id}/{run_id:path}")
+    async def compare_stop(request: Request, session_id: str, run_id: str) -> Dict[str, Any]:
+        from src import execution_service
+        if execution_service.should_proxy():
+            return await execution_service.proxy(request, request.url.path, streaming=False)
+        _verify_session_owner(request, session_id)
+        if not run_id.startswith("compare:"):
+            raise HTTPException(400, "Invalid compare run id")
+        metadata = agent_runs.get_metadata(run_id)
+        if metadata.get("session_id") != session_id or metadata.get("owner") != effective_user(request):
+            raise HTTPException(404, "Compare run not found")
+        return {"stopped": agent_runs.stop(run_id)}
 
     # ------------------------------------------------------------------ #
     # GET /api/chat/stream_status — check if a stream is active for a session
     # ------------------------------------------------------------------ #
     @router.get("/api/chat/stream_status/{session_id}")
     async def chat_stream_status(request: Request, session_id: str) -> Dict[str, Any]:
+        from src import execution_service
+        if execution_service.should_proxy():
+            return await execution_service.proxy(
+                request, f"/api/chat/stream_status/{session_id}", streaming=False
+            )
         _verify_session_owner(request, session_id)
         # A detached run can still be going even if _active_streams was popped;
         # report it as active so the client knows to reconnect via /resume.

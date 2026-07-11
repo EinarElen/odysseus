@@ -259,6 +259,7 @@ async function streamToPane(paneIdx, sessionId, message, aiMsgEl, opts) {
       method: 'POST', body: fd, signal: ac.signal
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    state._runIds[paneIdx] = response.headers.get('X-Odysseus-Run-ID') || null;
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();

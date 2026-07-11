@@ -266,25 +266,18 @@ async def test_cancellation_contract_holds_for_chat_and_agent_shaped_streams(mod
 
 
 # --------------------------------------------------------------------------- #
-# chat_stream wiring: compare-mode requests must skip agent_runs.start (stream
-# directly, cancellable promptly); normal requests must still go through it
-# (detached, survives client disconnect). This pins the actual branch added to
-# routes/chat_routes.py rather than re-deriving it from source text.
+# chat_stream wiring: compare and normal requests are both detached so frontend
+# replacement cannot cancel provider work. Compare uses a distinct run ID so
+# explicit pane Stop can cancel precisely one model.
 # --------------------------------------------------------------------------- #
 
-def test_compare_mode_branch_skips_agent_runs_in_source():
-    """The compare_mode branch must return the raw generator as the SSE body
-    (bypassing agent_runs.start/subscribe) BEFORE the detached agent_runs.start
-    call below it — otherwise compare streams would still be detached and a
-    pane's Stop (closing the SSE) wouldn't cancel the upstream call."""
+def test_compare_mode_branch_detaches_with_explicit_run_id():
     from pathlib import Path
     src = (Path(__file__).resolve().parents[1] / "routes" / "chat_routes.py").read_text(encoding="utf-8")
 
     branch_idx = src.index("if compare_mode:")
-    direct_return_idx = src.index("return StreamingResponse(_tracked_compare_stream(), media_type=", branch_idx)
+    compare_start_idx = src.index("compare_run_id,\n                    stream,", branch_idx)
+    run_header_idx = src.index('"X-Odysseus-Run-ID": compare_run_id', branch_idx)
     detach_idx = src.index("agent_runs.start(session, stream)", branch_idx)
 
-    assert branch_idx < direct_return_idx < detach_idx, (
-        "compare_mode must short-circuit to a direct (non-detached) "
-        "StreamingResponse before normal streams are wrapped in agent_runs"
-    )
+    assert branch_idx < compare_start_idx < run_header_idx < detach_idx

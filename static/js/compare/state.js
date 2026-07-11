@@ -16,6 +16,7 @@ const state = {
   _paneSessionIds: [],             // session IDs for each pane
   _paneMetrics: [],                // metrics per pane from last round
   _abortControllers: [],           // per-pane abort controllers
+  _runIds: [],                     // detached backend run IDs for explicit Stop
   _sidebarWasHidden: false,
   _compareElements: [],            // elements we added to container (for cleanup)
   _savedToggles: null,             // tool toggle states saved before compare
@@ -43,6 +44,7 @@ export function reset() {
   state._paneElapsed = [];
   state._abortControllers.forEach(c => { if (c) c.abort(); });
   state._abortControllers = [];
+  state._runIds = [];
   state._paneSessionIds = [];
   state._paneMetrics = [];
   state._compareElements = [];

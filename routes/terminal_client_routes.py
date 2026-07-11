@@ -22,7 +22,7 @@ from routes.chat_helpers import (
     save_assistant_response,
 )
 from routes.session_routes import _verify_session_owner
-from src import agent_runs, terminal_client_runs
+from src import agent_runs, execution_service, terminal_client_runs
 from src.agent_access import AgentAccess, resolve_agent_access
 from src.agent_loop import stream_agent_loop
 from src.agent_runtime import resolve_agent_execution_limits
@@ -566,6 +566,8 @@ def setup_terminal_client_routes(
 
     @router.post("/runs")
     async def start_run(request: Request, payload: RunStartRequest) -> dict[str, Any]:
+        if execution_service.should_proxy():
+            return await execution_service.proxy(request, request.url.path, streaming=False)
         require_terminal_scope(request, RUN_START_SCOPES)
         if agent_runs.is_draining():
             raise HTTPException(
@@ -683,6 +685,8 @@ def setup_terminal_client_routes(
 
     @router.get("/runs")
     async def list_runs(request: Request, kind: str | None = None, status: str | None = None) -> dict[str, Any]:
+        if execution_service.should_proxy():
+            return await execution_service.proxy(request, request.url.path, streaming=False)
         require_terminal_scope(request, RUN_READ_SCOPES)
         visible = []
         for run in terminal_client_runs.list_runs(kind=kind, status=status):
@@ -707,6 +711,8 @@ def setup_terminal_client_routes(
         limit: int = terminal_client_runs.DEFAULT_EVENT_QUERY_LIMIT,
         include_raw: bool = False,
     ) -> dict[str, Any]:
+        if execution_service.should_proxy():
+            return await execution_service.proxy(request, request.url.path, streaming=False)
         if not run_id and not session_id:
             raise HTTPException(400, "Terminal event query requires run_id or session_id")
         try:
@@ -739,6 +745,8 @@ def setup_terminal_client_routes(
         batch_limit: int = terminal_client_runs.DEFAULT_EVENT_QUERY_LIMIT,
         include_raw: bool = False,
     ) -> StreamingResponse:
+        if execution_service.should_proxy():
+            return await execution_service.proxy(request, request.url.path, streaming=True)
         if not run_id and not session_id:
             raise HTTPException(400, "Terminal event stream requires run_id or session_id")
         try:
@@ -767,6 +775,8 @@ def setup_terminal_client_routes(
 
     @router.get("/runs/by-session/{session_id}")
     async def run_status_by_session(request: Request, session_id: str) -> dict[str, Any]:
+        if execution_service.should_proxy():
+            return await execution_service.proxy(request, request.url.path, streaming=False)
         try:
             require_terminal_scope(request, RUN_READ_SCOPES)
             run = terminal_client_runs.resolve_run(session_id=session_id)
@@ -784,6 +794,8 @@ def setup_terminal_client_routes(
         cursor: int | None = None,
         include_raw: bool = False,
     ) -> dict[str, Any]:
+        if execution_service.should_proxy():
+            return await execution_service.proxy(request, request.url.path, streaming=False)
         try:
             run = terminal_client_runs.resolve_run(session_id=session_id)
             authorize_events(request, run, include_raw=include_raw)
@@ -796,6 +808,8 @@ def setup_terminal_client_routes(
 
     @router.post("/runs/by-session/{session_id}/stop")
     async def stop_run_by_session(request: Request, session_id: str) -> dict[str, Any]:
+        if execution_service.should_proxy():
+            return await execution_service.proxy(request, request.url.path, streaming=False)
         try:
             require_terminal_scope(request, RUN_STOP_SCOPES)
             run = terminal_client_runs.resolve_run(session_id=session_id)
@@ -808,6 +822,8 @@ def setup_terminal_client_routes(
 
     @router.get("/runs/{run_id}")
     async def run_status(request: Request, run_id: str) -> dict[str, Any]:
+        if execution_service.should_proxy():
+            return await execution_service.proxy(request, request.url.path, streaming=False)
         try:
             require_terminal_scope(request, RUN_READ_SCOPES)
             run = terminal_client_runs.resolve_run(run_id=run_id)
@@ -823,6 +839,8 @@ def setup_terminal_client_routes(
         cursor: int | None = None,
         include_raw: bool = False,
     ) -> dict[str, Any]:
+        if execution_service.should_proxy():
+            return await execution_service.proxy(request, request.url.path, streaming=False)
         try:
             run = terminal_client_runs.resolve_run(run_id=run_id)
             authorize_events(request, run, include_raw=include_raw)
@@ -833,6 +851,8 @@ def setup_terminal_client_routes(
 
     @router.post("/runs/{run_id}/stop")
     async def stop_run(request: Request, run_id: str) -> dict[str, Any]:
+        if execution_service.should_proxy():
+            return await execution_service.proxy(request, request.url.path, streaming=False)
         try:
             require_terminal_scope(request, RUN_STOP_SCOPES)
             run = terminal_client_runs.resolve_run(run_id=run_id)

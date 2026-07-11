@@ -124,6 +124,20 @@ app = FastAPI(
     version="1.0.0",
 )
 
+
+class _ExecutionWorkerAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        from src import execution_service
+        if execution_service.is_worker():
+            expected = os.getenv(execution_service.SECRET_ENV, "")
+            supplied = request.headers.get(execution_service.HEADER, "")
+            if not expected or not secrets.compare_digest(supplied, expected):
+                return JSONResponse({"detail": "Not found"}, status_code=404)
+        return await call_next(request)
+
+
+app.add_middleware(_ExecutionWorkerAuthMiddleware)
+
 # ========= CORS =========
 CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"]
 allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost,http://127.0.0.1").split(",")
@@ -132,6 +146,7 @@ app.add_middleware(
     allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=CORS_ALLOW_METHODS,
+    expose_headers=["X-Odysseus-Run-ID"],
     allow_headers=[
         "Accept",
         "Authorization",
@@ -268,9 +283,14 @@ if AUTH_ENABLED:
         "/.well-known/odysseus/environment",
         "/api/health",
         "/api/version",
+        "/api/execution/health",
+        "/api/execution/drain",
+        "/api/execution/status",
         "/login",
     }
-    AUTH_EXEMPT_PREFIXES = ["/static"]
+    # Execution-service routes are loopback-only and independently protected
+    # by the per-process secret in _ExecutionWorkerAuthMiddleware.
+    AUTH_EXEMPT_PREFIXES = ["/static", "/api/execution/"]
     # Dynamic paths whose own handler proves identity via a path-embedded
     # secret instead of the session/bearer auth. The route handler at
     # routes/task_routes.py validates the per-task `webhook_token` itself
@@ -368,6 +388,26 @@ if AUTH_ENABLED:
             # header; never a credentialed request).
             if is_cors_preflight(request.method, request.headers):
                 return await call_next(request)
+            # The public server already authenticated proxied execution
+            # requests. Re-check the worker secret and loopback origin, then
+            # restore the owner/scope context without relying on the worker's
+            # potentially older in-memory browser-session cache.
+            try:
+                from src import execution_service
+                if execution_service.is_worker():
+                    supplied = request.headers.get(execution_service.HEADER, "")
+                    expected = os.getenv(execution_service.SECRET_ENV, "")
+                    if expected and secrets.compare_digest(supplied, expected) and _is_trusted_loopback(request):
+                        owner = request.headers.get(execution_service.OWNER_HEADER, "").strip()
+                        request.state.current_user = owner or None
+                        request.state.api_token = request.headers.get(execution_service.API_TOKEN_HEADER) == "1"
+                        request.state.api_token_owner = owner or None
+                        request.state.api_token_scopes = [
+                            scope for scope in request.headers.get(execution_service.SCOPES_HEADER, "").split(",") if scope
+                        ]
+                        return await call_next(request)
+            except Exception:
+                logger.warning("Execution-service authentication failed", exc_info=True)
             if _is_auth_exempt(path):
                 return await call_next(request)
             # In-process internal-tool token bypass. Used by the agent
@@ -688,6 +728,8 @@ app.include_router(setup_chat_routes(
     webhook_manager=webhook_manager,
     skills_manager=skills_manager,
 ))
+from src.execution_service import router as execution_service_router
+app.include_router(execution_service_router())
 
 # Server-side token/cache/cost and activity observability.
 from routes.usage_routes import setup_usage_routes
@@ -1068,11 +1110,18 @@ async def _startup_event():
     except Exception as e:
         logger.debug(f"Incognito purge skipped: {e}")
     try:
-        from src import agent_runs
+        from src import agent_runs, execution_service
         agent_runs.install_graceful_signal_drain()
-        agent_runs.recover_stale_runs(session_manager)
+        if execution_service.is_worker():
+            agent_runs.recover_stale_runs(session_manager)
+        elif os.getenv("PYTEST_CURRENT_TEST"):
+            agent_runs.recover_stale_runs(session_manager)
+        else:
+            await asyncio.to_thread(execution_service.ensure_running)
     except Exception as e:
-        logger.debug(f"Agent run recovery skipped: {e}")
+        logger.error("Execution service startup failed: %s", e, exc_info=True)
+        if not os.getenv("PYTEST_CURRENT_TEST"):
+            raise
     # Strong refs to fire-and-forget startup tasks. Without this, Python may
     # GC tasks created with `asyncio.create_task(...)` before they finish.
     _startup_tasks: list[asyncio.Task] = getattr(app.state, "_startup_tasks", [])
@@ -1102,6 +1151,14 @@ async def _startup_event():
             logger.warning(f"MCP startup failed (non-critical): {type(e).__name__}: {e}")
 
     _startup_tasks.append(asyncio.create_task(_startup_mcp_connections()))
+
+    # The execution worker owns model/tool runs only. Starting the scheduler,
+    # email pollers, default-task reconciliation, and other application-wide
+    # services here would duplicate the public server's side effects.
+    from src import execution_service as _execution_service
+    if _execution_service.is_worker():
+        logger.info("Execution worker startup complete (application services suppressed)")
+        return
 
     # Startup warmups are opt-in. They make later requests a little warmer, but
     # they also compete with the first seconds of real UI use on slow or busy

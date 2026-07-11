@@ -32,15 +32,17 @@ _STORE = Path(DATA_DIR) / "agent_runs.json"
 
 
 class _Run:
-    __slots__ = ("buffer", "subscribers", "status", "task", "evict_task", "on_event")
+    __slots__ = ("buffer", "subscribers", "status", "task", "evict_task", "on_event", "metadata")
 
-    def __init__(self, *, on_event: Callable[[int, str], None] | None = None) -> None:
+    def __init__(self, *, on_event: Callable[[int, str], None] | None = None,
+                 metadata: dict | None = None) -> None:
         self.buffer: list = []          # ordered SSE event strings (replay log)
         self.subscribers: set = set()   # one asyncio.Queue per connected client
         self.status: str = "running"    # running | done | error | stopped
         self.task: Optional[asyncio.Task] = None
         self.evict_task: Optional[asyncio.Task] = None
         self.on_event = on_event
+        self.metadata = dict(metadata or {})
 
 
 _RUNS: Dict[str, _Run] = {}
@@ -118,6 +120,12 @@ def install_graceful_signal_drain(*, poll_interval_s: float = 0.1) -> bool:
 
         def _handle(received: int, frame, *, _previous=previous) -> None:
             global _SIGNAL_RELAY_STARTED
+            try:
+                from src import execution_service
+                if not execution_service.is_worker():
+                    execution_service.disconnect_proxy_streams()
+            except Exception:
+                logger.debug("Failed to disconnect execution proxy streams", exc_info=True)
             # Close admission before observing the count. Otherwise a run can
             # register between a zero observation and delegation to uvicorn.
             active = begin_drain()
@@ -287,6 +295,11 @@ def buffered_event_count(session_id: str) -> int:
     return len(run.buffer) if run else 0
 
 
+def get_metadata(run_id: str) -> dict:
+    run = _RUNS.get(run_id)
+    return dict(run.metadata) if run else {}
+
+
 def reset_for_tests() -> None:
     global _DRAINING
     with _LIFECYCLE_LOCK:
@@ -356,6 +369,7 @@ def start(
     agen: AsyncGenerator[str, None],
     *,
     on_event: Callable[[int, str], None] | None = None,
+    metadata: dict | None = None,
 ) -> _Run:
     """Start a detached run draining `agen` for a session. If a run is already in
     flight for this session (e.g. a rapid double-send), it's cancelled first."""
@@ -370,7 +384,7 @@ def start(
                 prev_task = prev.task   # new run awaits this before it starts writing
             if prev.evict_task and not prev.evict_task.done():
                 prev.evict_task.cancel()
-        run = _Run(on_event=on_event)
+        run = _Run(on_event=on_event, metadata=metadata)
         _RUNS[session_id] = run
         _set_persisted_status(session_id, "running", started_at=time.time())
         run.task = asyncio.create_task(_drain(session_id, agen, prev_task))
