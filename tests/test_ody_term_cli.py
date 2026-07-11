@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import io
 import json
 import os
@@ -14,6 +15,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import ody_term  # noqa: E402
+from src.constants import SERVER_READINESS_TIMEOUT_S  # noqa: E402
 
 MODEL_ENDPOINT_URL = "http://model.local/v1/chat/completions"
 TEST_MODEL = "test-model"
@@ -292,6 +294,20 @@ def terminal_api_fake(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(ody_term, "_terminal_api_request", fake_api)
     monkeypatch.setattr(ody_term, "_terminal_api_event_stream", fake_event_stream)
     return {"calls": calls, "state": state}
+
+
+def test_server_readiness_timeout_matches_standalone_fallback() -> None:
+    assert SERVER_READINESS_TIMEOUT_S == 60.0
+    fallback_tree = ast.parse((SRC / "ody_term.py").read_text(encoding="utf-8"))
+    fallback_timeout = next(
+        node.value.value
+        for node in ast.walk(fallback_tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "SERVER_READINESS_TIMEOUT_S" for target in node.targets)
+        and isinstance(node.value, ast.Constant)
+    )
+    assert fallback_timeout == SERVER_READINESS_TIMEOUT_S
+    assert ody_term.SERVER_READINESS_TIMEOUT_S == SERVER_READINESS_TIMEOUT_S
 
 
 def test_help_exposes_terminal_client_domains() -> None:
