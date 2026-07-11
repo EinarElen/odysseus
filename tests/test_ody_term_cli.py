@@ -1087,8 +1087,64 @@ def test_chat_run_status_attach_stop_by_session_use_terminal_api(
     assert json.loads(stdout)["data"]["run"]["status"] == "stopped"
     assert [call[1] for call in terminal_api_fake["calls"][-3:]] == [
         "/api/terminal/runs/by-session/ses_api_session",
-        "/api/terminal/runs/by-session/ses_api_session/events",
+        "/api/terminal/events/stream",
         "/api/terminal/runs/by-session/ses_api_session/stop",
+    ]
+
+
+def test_run_attach_jsonl_follows_live_event_stream(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    events = [
+        {
+            "schema": "ody.event.v1",
+            "id": "evt_run_follow_1",
+            "seq": 1,
+            "run_id": "run_follow",
+            "session_id": "ses_follow",
+            "source": "agent",
+            "kind": "message.delta",
+            "level": "info",
+            "payload": {"delta": "hello"},
+        },
+        {
+            "schema": "ody.event.v1",
+            "id": "evt_run_follow_2",
+            "seq": 2,
+            "run_id": "run_follow",
+            "session_id": "ses_follow",
+            "source": "agent",
+            "kind": "run.status",
+            "level": "info",
+            "payload": {"done": True},
+        },
+    ]
+    calls = []
+
+    def fake_event_stream(request, path, *, query=None):
+        calls.append((path, query))
+        yield from events
+
+    monkeypatch.setattr(ody_term, "_terminal_api_event_stream", fake_event_stream)
+
+    exit_code, stdout, stderr = run_cli(
+        ["run", "attach", "run_follow", "--cursor", "0", "--format=jsonl"]
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert [json.loads(line) for line in stdout.splitlines()] == events
+    assert calls == [
+        (
+            "/api/terminal/events/stream",
+            {
+                "run_id": "run_follow",
+                "session_id": None,
+                "cursor": 0,
+                "include_raw": False,
+            },
+        )
     ]
 
 

@@ -1169,12 +1169,34 @@ def _run_attach(request: CommandRequest) -> CommandResponse:
         cursor = int(raw_cursor) if isinstance(raw_cursor, str) and raw_cursor else None
     except ValueError as exc:
         raise CommandError("invalid_cursor", f"--cursor must be an integer: {raw_cursor}") from exc
-    payload = _terminal_api_request(
-        request,
-        "GET",
-        _run_api_path(run_id, session_id, "/events"),
-        query={"cursor": cursor, "include_raw": request.globals.format in {"raw", "debug"}},
-    )
+    include_raw = request.globals.format in {"raw", "debug"}
+    event_stream: Iterable[dict[str, object]] | None = None
+    if request.globals.format == "jsonl":
+        event_stream = _terminal_api_event_stream(
+            request,
+            "/api/terminal/events/stream",
+            query={
+                "run_id": run_id,
+                "session_id": session_id,
+                "cursor": cursor,
+                "include_raw": include_raw,
+            },
+        )
+        payload: dict[str, object] = {
+            "events": [],
+            "cursor": {
+                "after": str(cursor) if cursor is not None else None,
+                "next": None,
+                "count": None,
+            },
+        }
+    else:
+        payload = _terminal_api_request(
+            request,
+            "GET",
+            _run_api_path(run_id, session_id, "/events"),
+            query={"cursor": cursor, "include_raw": include_raw},
+        )
     events = payload.get("events")
     return CommandResponse(
         ok=True,
@@ -1182,6 +1204,7 @@ def _run_attach(request: CommandRequest) -> CommandResponse:
         message=f"{len(events) if isinstance(events, list) else 0} Run Event Envelope(s)",
         data=payload,
         raw=[event.get("raw") for event in events if isinstance(event, dict)] if isinstance(events, list) else [],
+        event_stream=event_stream,
     )
 
 
