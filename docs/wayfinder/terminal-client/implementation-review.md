@@ -57,5 +57,3 @@ renderer are complete. The remaining repairs are:
 
 1. Extend Event Envelope inspection beyond chat, agent, harness, and local
    server logs to independent service, process, and system sources.
-2. Retire client-local Run fixtures from any remaining production success paths
-   once their compatibility-only reads are no longer needed.

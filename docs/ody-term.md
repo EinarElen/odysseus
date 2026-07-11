@@ -7,7 +7,9 @@ bootstrap, capability shapes, file/keychain auth storage, lifecycle inventory
 scaffold, API-backed chat, agent, and harness Run execution, persisted Run
 identity, bounded real Run Event Envelope query/replay, real Run and harness
 lifecycle targets, and the `ody.tui.v1` state model exist. Live JSONL tailing
-is available for API-backed Runs. On a human TTY, `ody-term tui` opens a
+is available for API-backed Runs. Production Run and harness status/control
+commands use the terminal-client API exclusively; client-local JSON Run state
+is no longer read or written. On a human TTY, `ody-term tui` opens a
 full-screen Textual renderer with Live, REPL, Browse, and Inspect views,
 keyboard navigation and controls, a command-input REPL, clickable controls,
 selectable Event Envelope rows, and a selectable Session/Run tree. Structured

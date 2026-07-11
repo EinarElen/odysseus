@@ -121,9 +121,9 @@ Review](implementation-review.md).
 - [x] Attach-by-Session fails with a structured ambiguity response when more than one active Run can match.
 - [x] Stop targets Run lifecycle rather than hiding cancellation under Session commands.
 
-Correction note: chat, agent, and harness Runs now use the real terminal-client
-API and persisted Run identity. Legacy local records remain readable for
-compatibility but are not the source of truth for new production Runs.
+Correction note: chat, agent, and harness Runs use the real terminal-client API
+and persisted Run identity. Production commands no longer read or write the
+retired client-local Run JSON format.
 
 ## Extend Run Surface To Agent And Harness Workflows
 
@@ -462,14 +462,23 @@ claim to be the source of truth for Odysseus execution.
 **Blocked by:** Extend Real Runs To Agent And Harness Workflows; Replace The
 Static TUI With An Interactive Renderer.
 
-- [ ] Production Run commands use the terminal-client API source of truth for
+- [x] Production Run commands use the terminal-client API source of truth for
       start, list, status, attach, and stop.
-- [ ] Local JSON run fixtures are removed from production success paths or
+- [x] Local JSON run fixtures are removed from production success paths or
       renamed/documented as diagnostic/test-only state.
-- [ ] Tests cover the absence of fake-success behavior when the backend/API path
+- [x] Tests cover the absence of fake-success behavior when the backend/API path
       is unavailable.
-- [ ] Docs and examples no longer demonstrate local-fixture-backed Run behavior
+- [x] Docs and examples no longer demonstrate local-fixture-backed Run behavior
       as if it were production behavior.
+
+2026-07-11 retirement evidence: local Run-state path/load/save, reference
+resolution, event synthesis, and fallback branches were removed from
+production. Run start/list/status/attach/stop and harness status/stop now use
+the terminal-client API unconditionally. Regression tests place a plausible
+legacy Run JSON file at the former environment override and prove status,
+attach, and stop return the API-unavailable error without reading or mutating
+that file. Harness status is separately verified against API-backed Run
+inventory.
 
 ## Final Contract Audit And Docs Refresh
 

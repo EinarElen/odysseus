@@ -13,7 +13,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,7 +30,6 @@ try:
         ODY_TERM_CONFIG_FILE,
         ODY_TERM_DEFAULT_HOST,
         ODY_TERM_DEFAULT_PORT,
-        ODY_TERM_RUNS_FILE,
         ODY_TERM_RUNTIME_FILE,
         ODY_TERM_SECRETS_FILE,
         ODY_TERM_SERVER_LOG_FILE,
@@ -43,7 +41,6 @@ except Exception:  # pragma: no cover - keeps standalone ody_term packaging usab
     ODY_TERM_CONFIG_FILE = ""
     ODY_TERM_DEFAULT_HOST = "127.0.0.1"
     ODY_TERM_DEFAULT_PORT = "7860"
-    ODY_TERM_RUNS_FILE = ""
     ODY_TERM_RUNTIME_FILE = ""
     ODY_TERM_SECRETS_FILE = ""
     ODY_TERM_SERVER_LOG_FILE = ""
@@ -192,15 +189,6 @@ def _runtime_state_path() -> Path:
     if ODY_TERM_RUNTIME_FILE:
         return Path(ODY_TERM_RUNTIME_FILE).expanduser()
     return Path.home() / ".local" / "state" / "odysseus" / "ody-term-runtime.json"
-
-
-def _run_state_path() -> Path:
-    override = os.getenv("ODY_TERM_RUNS", "").strip()
-    if override:
-        return Path(override).expanduser()
-    if ODY_TERM_RUNS_FILE:
-        return Path(ODY_TERM_RUNS_FILE).expanduser()
-    return _runtime_state_path().with_name("ody-term-runs.json")
 
 
 def _secrets_path() -> Path:
@@ -1013,110 +1001,12 @@ TUI_COMMANDS = (
 )
 
 
-def _empty_run_state() -> dict[str, object]:
-    return {"version": 1, "runs": {}, "events": {}}
-
-
-def _load_run_state() -> dict[str, object]:
-    state = _empty_run_state()
-    state.update(_load_json_object(_run_state_path()))
-    if not isinstance(state.get("runs"), dict):
-        raise CommandError("corrupt_run_state", "Terminal Client run state runs must be an object")
-    if not isinstance(state.get("events"), dict):
-        raise CommandError("corrupt_run_state", "Terminal Client run state events must be an object")
-    return state
-
-
-def _save_run_state(state: dict[str, object]) -> None:
-    path = _run_state_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
-
-
-def _new_identity(prefix: str) -> str:
-    return f"{prefix}_{uuid.uuid4().hex[:16]}"
-
-
-def _runs_payload(state: dict[str, object]) -> dict[str, dict[str, object]]:
-    return cast(dict[str, dict[str, object]], state["runs"])
-
-
-def _events_payload(state: dict[str, object]) -> dict[str, list[dict[str, object]]]:
-    return cast(dict[str, list[dict[str, object]]], state["events"])
-
-
-def _run_events(state: dict[str, object], run_id: str) -> list[dict[str, object]]:
-    events = _events_payload(state).get(run_id, [])
-    return [event for event in events if isinstance(event, dict)]
-
-
-def _has_local_run(run_id: str | None) -> bool:
-    if not run_id:
-        return False
-    try:
-        return run_id in _runs_payload(_load_run_state())
-    except CommandError:
-        raise
-    except Exception:
-        return False
-
-
-def _local_run_kind(run_id: str | None) -> str | None:
-    if not run_id:
-        return None
-    try:
-        run = _runs_payload(_load_run_state()).get(run_id)
-    except CommandError:
-        raise
-    except Exception:
-        return None
-    if isinstance(run, dict) and isinstance(run.get("kind"), str):
-        return str(run["kind"])
-    return None
-
-
-def _has_local_session_run(session_id: str | None) -> bool:
-    if not session_id:
-        return False
-    try:
-        return any(
-            run.get("session_id") == session_id
-            for run in _runs_payload(_load_run_state()).values()
-        )
-    except CommandError:
-        raise
-    except Exception:
-        return False
-
-
-def _run_uses_api(kind: str | None, run_id: str | None, session_id: str | None = None) -> bool:
-    return bool(
-        kind in {"chat", "agent", "harness"}
-        or (session_id and not _has_local_session_run(session_id))
-        or (
-            run_id
-            and run_id.startswith("run_")
-            and (not _has_local_run(run_id) or _local_run_kind(run_id) in {"chat", "agent", "harness"})
-        )
-    )
-
-
 def _run_api_path(run_id: str | None, session_id: str | None, suffix: str = "") -> str:
     if run_id:
         return f"/api/terminal/runs/{run_id}{suffix}"
     if session_id:
         return f"/api/terminal/runs/by-session/{session_id}{suffix}"
     raise CommandError("missing_run_target", "run command requires a run id or --session-id")
-
-
-def _all_run_events(state: dict[str, object]) -> list[dict[str, object]]:
-    events: list[dict[str, object]] = []
-    for run_id in _events_payload(state):
-        events.extend(_run_events(state, run_id))
-    events.sort(key=lambda event: (str(event.get("time") or ""), str(event.get("run_id") or ""), int(event.get("seq") or 0)))
-    return events
 
 
 def _api_run_events(request: CommandRequest, runs: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -1152,114 +1042,6 @@ def _merged_tui_events(
             pass
     events.sort(key=lambda event: (str(event.get("time") or ""), str(event.get("source") or ""), int(event.get("seq") or 0)))
     return events
-
-
-def _last_activity(state: dict[str, object], run_id: str) -> dict[str, object] | None:
-    events = _run_events(state, run_id)
-    if not events:
-        return None
-    event = events[-1]
-    return {
-        "time": event.get("time"),
-        "kind": event.get("kind"),
-        "level": event.get("level"),
-        "summary": event.get("summary"),
-    }
-
-
-def _run_summary(state: dict[str, object], run: dict[str, object]) -> dict[str, object]:
-    run_id = str(run["run_id"])
-    events = _run_events(state, run_id)
-    summary = dict(run)
-    summary["events_available"] = bool(events)
-    summary["replay_available"] = bool(events)
-    summary["cursor_available"] = bool(events)
-    summary["event_count"] = len(events)
-    summary["last_activity"] = _last_activity(state, run_id)
-    heartbeat = _last_activity(state, run_id)
-    summary["heartbeat"] = heartbeat
-    return summary
-
-
-def _append_run_event(
-    state: dict[str, object],
-    run: dict[str, object],
-    *,
-    kind: str,
-    level: str,
-    summary: str,
-    payload: dict[str, object],
-) -> dict[str, object]:
-    run_id = str(run["run_id"])
-    session_id = str(run["session_id"])
-    source = str(run.get("event_source") or run.get("kind") or "run")
-    events_by_run = _events_payload(state)
-    events = events_by_run.setdefault(run_id, [])
-    seq = len(events) + 1
-    event: dict[str, object] = {
-        "schema": "ody.event.v1",
-        "id": f"evt_{run_id}_{seq}",
-        "seq": seq,
-        "time": _utc_now(),
-        "session_id": session_id,
-        "run_id": run_id,
-        "source": source,
-        "kind": kind,
-        "level": level,
-        "summary": summary,
-        "payload": payload,
-        "raw": {
-            "transport": "compat",
-            "type": kind,
-            "body": payload,
-        },
-    }
-    harness_session_id = run.get("harness_session_id")
-    if isinstance(harness_session_id, str) and harness_session_id:
-        event["harness_session_id"] = harness_session_id
-    harness_adapter_id = run.get("harness_adapter_id")
-    if isinstance(harness_adapter_id, str) and harness_adapter_id:
-        event["harness_adapter_id"] = harness_adapter_id
-    events.append(event)
-    return event
-
-
-def _resolve_run_reference(state: dict[str, object], *, run_id: str | None, session_id: str | None) -> dict[str, object]:
-    runs = _runs_payload(state)
-    if run_id:
-        run = runs.get(run_id)
-        if not isinstance(run, dict):
-            raise CommandError("unknown_run", f"Run {run_id} was not found", exit_code=1)
-        return run
-    if not session_id:
-        raise CommandError("missing_run_target", "run command requires a run id or --session-id")
-    matches = [
-        run
-        for run in runs.values()
-        if run.get("session_id") == session_id and str(run.get("status")) in RUN_ACTIVE_STATUSES
-    ]
-    if len(matches) != 1:
-        if len(matches) > 1:
-            choices = ", ".join(str(run.get("run_id")) for run in matches)
-            raise CommandError(
-                "ambiguous_run",
-                f"Session {session_id} has multiple active Runs: {choices}",
-                details={
-                    "session_id": session_id,
-                    "choices": [
-                        {
-                            "run_id": run.get("run_id"),
-                            "kind": run.get("kind"),
-                            "status": run.get("status"),
-                            "started_at": run.get("started_at"),
-                            "updated_at": run.get("updated_at"),
-                        }
-                        for run in matches
-                    ],
-                },
-            )
-        raise CommandError("unknown_run", f"Session {session_id} has no active Run", exit_code=1)
-    return matches[0]
 
 
 def _run_start(request: CommandRequest) -> CommandResponse:
@@ -1326,23 +1108,13 @@ def _run_status(request: CommandRequest) -> CommandResponse:
         raise CommandError("unexpected_run_args", f"unexpected run status args: {' '.join(positionals[1:])}")
     run_id = positionals[0] if positionals else (str(options["run_id"]) if isinstance(options.get("run_id"), str) else None)
     session_id = str(options["session_id"]) if isinstance(options.get("session_id"), str) else None
-    kind = str(options.get("kind")) if isinstance(options.get("kind"), str) else None
-    if _run_uses_api(kind, run_id, session_id):
-        payload = _terminal_api_request(request, "GET", _run_api_path(run_id, session_id))
-        run = cast(dict[str, object], payload.get("run", {}))
-        return CommandResponse(
-            ok=True,
-            command=["run", "status"],
-            message=f"Run {run.get('run_id', run_id or session_id)} is {run.get('status', 'unknown')}",
-            data={"run": run},
-        )
-    state = _load_run_state()
-    run = _resolve_run_reference(state, run_id=run_id, session_id=session_id)
+    payload = _terminal_api_request(request, "GET", _run_api_path(run_id, session_id))
+    run = cast(dict[str, object], payload.get("run", {}))
     return CommandResponse(
         ok=True,
         command=["run", "status"],
-        message=f"Run {run['run_id']} is {run['status']}",
-        data={"run": _run_summary(state, run)},
+        message=f"Run {run.get('run_id', run_id or session_id)} is {run.get('status', 'unknown')}",
+        data={"run": run},
     )
 
 
@@ -1359,42 +1131,19 @@ def _run_attach(request: CommandRequest) -> CommandResponse:
         cursor = int(raw_cursor) if isinstance(raw_cursor, str) and raw_cursor else None
     except ValueError as exc:
         raise CommandError("invalid_cursor", f"--cursor must be an integer: {raw_cursor}") from exc
-    kind = str(options.get("kind")) if isinstance(options.get("kind"), str) else None
-    if _run_uses_api(kind, run_id, session_id):
-        payload = _terminal_api_request(
-            request,
-            "GET",
-            _run_api_path(run_id, session_id, "/events"),
-            query={"cursor": cursor, "include_raw": request.globals.format in {"raw", "debug"}},
-        )
-        events = payload.get("events")
-        return CommandResponse(
-            ok=True,
-            command=["run", "attach"],
-            message=f"{len(events) if isinstance(events, list) else 0} Run Event Envelope(s)",
-            data=payload,
-            raw=[event.get("raw") for event in events if isinstance(event, dict)] if isinstance(events, list) else [],
-        )
-    state = _load_run_state()
-    run = _resolve_run_reference(state, run_id=run_id, session_id=session_id)
-    events = []
-    for event in _run_events(state, str(run["run_id"])):
-        seq = event.get("seq")
-        if not isinstance(seq, int):
-            continue
-        if cursor is None or seq > cursor:
-            events.append(event)
-    next_cursor = str(events[-1]["seq"]) if events else (str(cursor) if cursor is not None else None)
+    payload = _terminal_api_request(
+        request,
+        "GET",
+        _run_api_path(run_id, session_id, "/events"),
+        query={"cursor": cursor, "include_raw": request.globals.format in {"raw", "debug"}},
+    )
+    events = payload.get("events")
     return CommandResponse(
         ok=True,
         command=["run", "attach"],
-        message=f"{len(events)} Run Event Envelope(s)",
-        data={
-            "run": _run_summary(state, run),
-            "events": events,
-            "cursor": {"after": str(cursor) if cursor is not None else None, "next": next_cursor, "count": len(events)},
-        },
-        raw=[event.get("raw") for event in events],
+        message=f"{len(events) if isinstance(events, list) else 0} Run Event Envelope(s)",
+        data=payload,
+        raw=[event.get("raw") for event in events if isinstance(event, dict)] if isinstance(events, list) else [],
     )
 
 
@@ -1405,37 +1154,14 @@ def _run_stop(request: CommandRequest) -> CommandResponse:
         raise CommandError("unexpected_run_args", f"unexpected run stop args: {' '.join(positionals[1:])}")
     run_id = positionals[0] if positionals else (str(options["run_id"]) if isinstance(options.get("run_id"), str) else None)
     session_id = str(options["session_id"]) if isinstance(options.get("session_id"), str) else None
-    kind = str(options.get("kind")) if isinstance(options.get("kind"), str) else None
-    if _run_uses_api(kind, run_id, session_id):
-        payload = _terminal_api_request(request, "POST", _run_api_path(run_id, session_id, "/stop"))
-        run = cast(dict[str, object], payload.get("run", {}))
-        stopped = bool(payload.get("stopped"))
-        return CommandResponse(
-            ok=stopped,
-            command=["run", "stop"],
-            message=f"Stopped Run {run.get('run_id', run_id)}" if stopped else f"Run {run.get('run_id', run_id)} was not stopped",
-            data={"run": run, "stopped": stopped, "confirmation": confirmation},
-        )
-    state = _load_run_state()
-    run = _resolve_run_reference(state, run_id=run_id, session_id=session_id)
-    now = _utc_now()
-    run["status"] = "stopped"
-    run["updated_at"] = now
-    run["finished_at"] = now
-    _append_run_event(
-        state,
-        run,
-        kind="run.status",
-        level="warn",
-        summary=f"{run.get('kind', 'Run')} Run stopped",
-        payload={"status": "stopped"},
-    )
-    _save_run_state(state)
+    payload = _terminal_api_request(request, "POST", _run_api_path(run_id, session_id, "/stop"))
+    run = cast(dict[str, object], payload.get("run", {}))
+    stopped = bool(payload.get("stopped"))
     return CommandResponse(
-        ok=True,
+        ok=stopped,
         command=["run", "stop"],
-        message=f"Stopped Run {run['run_id']}",
-        data={"run": _run_summary(state, run), "confirmation": confirmation},
+        message=f"Stopped Run {run.get('run_id', run_id)}" if stopped else f"Run {run.get('run_id', run_id)} was not stopped",
+        data={"run": run, "stopped": stopped, "confirmation": confirmation},
     )
 
 
@@ -1478,12 +1204,13 @@ def _harness_status(request: CommandRequest) -> CommandResponse:
     if not adapter_id:
         raise CommandError("missing_harness_adapter", "harness status requires an adapter id")
     capability = _harness_capability(adapter_id)
-    state = _load_run_state()
-    linked_runs = [
-        _run_summary(state, run)
-        for run in _runs_payload(state).values()
-        if run.get("harness_adapter_id") == adapter_id or (run.get("kind") == "harness" and not run.get("harness_adapter_id"))
-    ]
+    payload = _terminal_api_request(request, "GET", "/api/terminal/runs", query={"kind": "harness"})
+    runs = payload.get("runs")
+    linked_runs = (
+        [cast(dict[str, object], run) for run in runs if isinstance(run, dict) and run.get("harness_adapter_id") == adapter_id]
+        if isinstance(runs, list)
+        else []
+    )
     return CommandResponse(
         ok=True,
         command=["harness", "status"],
@@ -1499,12 +1226,8 @@ def _harness_stop(request: CommandRequest) -> CommandResponse:
         raise CommandError("unexpected_harness_args", f"unexpected harness stop args: {' '.join(positionals[1:])}")
     run_id = positionals[0] if positionals else (str(options["run_id"]) if isinstance(options.get("run_id"), str) else None)
     session_id = str(options["session_id"]) if isinstance(options.get("session_id"), str) else None
-    state = _load_run_state()
-    if (run_id and _has_local_run(run_id)) or (not run_id and session_id):
-        run = _resolve_run_reference(state, run_id=run_id, session_id=session_id)
-    else:
-        payload = _terminal_api_request(request, "GET", _run_api_path(run_id, session_id))
-        run = cast(dict[str, object], payload.get("run", {}))
+    payload = _terminal_api_request(request, "GET", _run_api_path(run_id, session_id))
+    run = cast(dict[str, object], payload.get("run", {}))
     if run.get("kind") != "harness" or not run.get("harness_adapter_id"):
         raise CommandError(
             "not_harness_run",

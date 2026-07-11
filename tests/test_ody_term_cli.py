@@ -934,7 +934,6 @@ def test_run_start_creates_distinct_chat_run_for_new_session(
     assert run["events_available"] is True
     assert data["cursor"] == {"after": None, "next": "1", "count": 1}
     assert terminal_api_fake["calls"][0][0:2] == ("POST", "/api/terminal/runs")
-    assert not Path(ody_term._run_state_path()).exists()
 
 
 def test_run_start_default_chat_uses_terminal_client_api(
@@ -950,7 +949,6 @@ def test_run_start_default_chat_uses_terminal_client_api(
     assert run["kind"] == "chat"
     assert terminal_api_fake["calls"][0][0:2] == ("POST", "/api/terminal/runs")
     assert terminal_api_fake["calls"][0][3]["message"] == "default chat"
-    assert not Path(ody_term._run_state_path()).exists()
 
 
 def test_run_start_forwards_new_session_runtime_fields(
@@ -1096,90 +1094,44 @@ def test_chat_run_stop_reports_api_not_stopped(
     assert payload["data"]["run"]["status"] == "running"
 
 
-def test_local_chat_run_state_does_not_satisfy_chat_commands(
-    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
+@pytest.mark.parametrize(
+    ("argv", "method", "path"),
+    [
+        (["run", "status", "run_local_only", "--format=json"], "GET", "/api/terminal/runs/run_local_only"),
+        (["run", "attach", "run_local_only", "--format=json"], "GET", "/api/terminal/runs/run_local_only/events"),
+        (["run", "stop", "run_local_only", "--yes", "--format=json"], "POST", "/api/terminal/runs/run_local_only/stop"),
+    ],
+)
+def test_legacy_local_run_state_does_not_fake_success_when_api_is_unavailable(
+    isolated_term_state: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    method: str,
+    path: str,
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
-    local_state = {
-        "version": 1,
-        "runs": {
-            "run_api_shadow": {
-                "run_id": "run_api_shadow",
-                "session_id": "ses_local",
-                "kind": "chat",
-                "status": "running",
-                "started_at": "2026-07-09T00:00:00+00:00",
-                "updated_at": "2026-07-09T00:00:00+00:00",
-                "finished_at": None,
-            }
-        },
-        "events": {
-            "run_api_shadow": [
-                {
-                    "schema": "ody.event.v1",
-                    "id": "evt_local_1",
-                    "seq": 1,
-                    "time": "2026-07-09T00:00:00+00:00",
-                    "session_id": "ses_local",
-                    "run_id": "run_api_shadow",
-                    "source": "chat",
-                    "kind": "message.delta",
-                    "level": "info",
-                    "summary": "local",
-                    "payload": {"message": "local"},
-                    "raw": {"transport": "local", "type": "message.delta", "body": "local"},
-                }
-            ]
-        },
-    }
-    ody_term._save_run_state(local_state)
-    api_run = {
-        "run_id": "run_api_shadow",
-        "session_id": "ses_api",
-        "kind": "chat",
-        "status": "running",
-        "started_at": "2026-07-09T00:00:00+00:00",
-        "updated_at": "2026-07-09T00:00:00+00:00",
-        "finished_at": None,
-    }
-    terminal_api_fake["state"]["runs"]["run_api_shadow"] = api_run
-    terminal_api_fake["state"]["events"]["run_api_shadow"] = [
-        {
-            "schema": "ody.event.v1",
-            "id": "evt_api_1",
-            "seq": 1,
-            "time": "2026-07-09T00:00:00+00:00",
-            "session_id": "ses_api",
-            "run_id": "run_api_shadow",
-            "source": "chat",
-            "kind": "message.delta",
-            "level": "info",
-            "summary": "api",
-            "payload": {"message": "api"},
-            "raw": {"transport": "sse", "type": "message.delta", "body": "api"},
-        }
-    ]
+    legacy_path = tmp_path / "runs.json"
+    legacy_path.write_text(
+        json.dumps({"runs": {"run_local_only": {"run_id": "run_local_only", "status": "running"}}, "events": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ODY_TERM_RUNS", str(legacy_path))
+    calls: list[tuple[str, str]] = []
 
-    exit_code, stdout, stderr = run_cli(["run", "status", "run_api_shadow", "--format=json"])
+    def unavailable_api(request, method, path, **kwargs):
+        calls.append((method, path))
+        raise ody_term.CommandError("terminal_api_unavailable", "terminal-client API unavailable", exit_code=1)
 
-    assert exit_code == 0
-    assert stderr == ""
-    assert json.loads(stdout)["data"]["run"]["session_id"] == "ses_api"
-    assert terminal_api_fake["calls"][-1][0:2] == ("GET", "/api/terminal/runs/run_api_shadow")
+    monkeypatch.setattr(ody_term, "_terminal_api_request", unavailable_api)
 
-    exit_code, stdout, stderr = run_cli(["run", "attach", "run_api_shadow", "--format=jsonl"])
+    exit_code, stdout, stderr = run_cli(argv)
 
-    assert exit_code == 0
-    assert stderr == ""
-    assert [json.loads(line)["session_id"] for line in stdout.splitlines()] == ["ses_api"]
-    assert terminal_api_fake["calls"][-1][0:2] == ("GET", "/api/terminal/runs/run_api_shadow/events")
-
-    exit_code, stdout, stderr = run_cli(["run", "stop", "run_api_shadow", "--yes", "--format=json"])
-
-    assert exit_code == 0
-    assert stderr == ""
-    assert json.loads(stdout)["data"]["run"]["status"] == "stopped"
-    assert terminal_api_fake["calls"][-1][0:2] == ("POST", "/api/terminal/runs/run_api_shadow/stop")
+    assert exit_code == 1
+    assert stdout == ""
+    assert json.loads(stderr)["error"]["code"] == "terminal_api_unavailable"
+    assert calls == [(method, path)]
+    assert json.loads(legacy_path.read_text())["runs"]["run_local_only"]["status"] == "running"
 
 
 def test_run_attach_cursor_continues_after_last_seen_event(
@@ -1270,7 +1222,6 @@ def test_agent_runs_use_same_run_lifecycle_and_heartbeat_events(
     assert events[0]["session_id"] == run["session_id"]
     assert events[0]["run_id"] == run_id
     assert events[1]["payload"] == {"activity": "started", "status": "running"}
-    assert not Path(ody_term._run_state_path()).exists()
     assert terminal_api_fake["calls"][0][0:2] == ("POST", "/api/terminal/runs")
 
     exit_code, stdout, stderr = run_cli(["run", "stop", run_id, "--yes", "--format=json"])
@@ -1327,7 +1278,6 @@ def test_harness_linked_runs_include_odysseus_and_harness_identities(
     assert all(event["harness_adapter_id"] == "pi" for event in events)
     assert events[0]["payload"]["harness_adapter_id"] == "pi"
     assert events[0]["payload"]["harness_session_id"] == "pi-session-1"
-    assert not Path(ody_term._run_state_path()).exists()
     assert terminal_api_fake["calls"][0][0:2] == ("POST", "/api/terminal/runs")
     assert terminal_api_fake["calls"][0][3]["workspace"] == "/tmp/workspace"
     assert terminal_api_fake["calls"][0][3]["harness_mode"] == "observe"
@@ -1345,6 +1295,23 @@ def test_harness_commands_report_adapter_capabilities(
     harnesses = json.loads(stdout)["data"]["harnesses"]
     assert harnesses[0]["id"] == "pi"
     assert harnesses[0]["session"]["abort"] is True
+
+
+def test_harness_status_lists_only_api_backed_adapter_runs(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    _, pi_stdout, _ = run_cli(
+        ["run", "start", "--kind", "harness", "--harness-adapter", "pi", "--format=json"]
+    )
+    pi_run_id = json.loads(pi_stdout)["data"]["run"]["run_id"]
+
+    exit_code, stdout, stderr = run_cli(["harness", "status", "pi", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert [run["run_id"] for run in json.loads(stdout)["data"]["runs"]] == [pi_run_id]
+    assert terminal_api_fake["calls"][-1][0:3] == ("GET", "/api/terminal/runs", {"kind": "harness"})
 
 
 def test_harness_stop_refuses_non_harness_runs_even_with_adapter_flag(
