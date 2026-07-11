@@ -13,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,6 +34,10 @@ try:
         ODY_TERM_RUNTIME_FILE,
         ODY_TERM_SECRETS_FILE,
         ODY_TERM_SERVER_LOG_FILE,
+        SERVER_FAILED_LAUNCH_SHUTDOWN_TIMEOUT_S,
+        SERVER_READINESS_POLL_INTERVAL_S,
+        SERVER_READINESS_REQUEST_TIMEOUT_S,
+        SERVER_READINESS_TIMEOUT_S,
         TERMINAL_API_TIMEOUT_S,
         TERMINAL_EVENT_STREAM_MEDIA_TYPE,
     )
@@ -46,6 +51,10 @@ except Exception:  # pragma: no cover - keeps standalone ody_term packaging usab
     ODY_TERM_SERVER_LOG_FILE = ""
     TERMINAL_API_TIMEOUT_S = 30
     TERMINAL_EVENT_STREAM_MEDIA_TYPE = "application/x-ndjson"
+    SERVER_READINESS_TIMEOUT_S = 30.0
+    SERVER_READINESS_POLL_INTERVAL_S = 0.2
+    SERVER_READINESS_REQUEST_TIMEOUT_S = 1.0
+    SERVER_FAILED_LAUNCH_SHUTDOWN_TIMEOUT_S = 3.0
 
 
 DOMAINS = ("auth", "config", "server", "session", "run", "harness", "service", "inspect", "tui")
@@ -1873,6 +1882,60 @@ def _service_control(request: CommandRequest) -> CommandResponse:
     raise _unsupported_lifecycle_action(target, verb)
 
 
+def _wait_for_server_readiness(*, process: subprocess.Popen[bytes], url: str) -> str | None:
+    """Wait for the owned local process to answer the unauthenticated liveness probe."""
+    deadline = time.monotonic() + SERVER_READINESS_TIMEOUT_S
+    health_url = f"{url.rstrip('/')}/api/health"
+    last_error = "connection refused"
+    while True:
+        exit_code = process.poll()
+        if exit_code is not None:
+            return f"process exited with status {exit_code} before it became ready"
+        try:
+            request = UrlRequest(health_url, headers={"Accept": "application/json"}, method="GET")
+            with urlopen(request, timeout=SERVER_READINESS_REQUEST_TIMEOUT_S) as response:  # noqa: S310 - URL is constructed from validated local start options.
+                if 200 <= response.status < 300:
+                    return None
+                last_error = f"health endpoint returned HTTP {response.status}"
+        except HTTPError as exc:
+            last_error = f"health endpoint returned HTTP {exc.code}"
+        except (OSError, URLError) as exc:
+            last_error = str(exc.reason) if isinstance(exc, URLError) else str(exc)
+        if time.monotonic() >= deadline:
+            return f"did not become ready within {SERVER_READINESS_TIMEOUT_S:g}s ({last_error})"
+        time.sleep(min(SERVER_READINESS_POLL_INTERVAL_S, max(0.0, deadline - time.monotonic())))
+
+
+def _terminate_owned_server_process(process: subprocess.Popen[bytes], *, pgid: int) -> None:
+    """Stop the captured owned process group and reap a live leader when possible."""
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    if process.poll() is None:
+        try:
+            process.wait(timeout=SERVER_FAILED_LAUNCH_SHUTDOWN_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            pass
+
+    # The leader can exit while children remain in its original process group.
+    # Keep using the PGID captured at launch; deriving it from the dead leader
+    # would skip cleanup of those surviving children.
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    if process.poll() is None:
+        try:
+            process.wait(timeout=SERVER_FAILED_LAUNCH_SHUTDOWN_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            pass
+
+
 def _start_server(*, host: str, port: str | None, dry_run: bool) -> CommandResponse:
     launcher = _launcher_command(host=host, port=port, dry_run=True)
     command = ["server", "start"]
@@ -1898,14 +1961,27 @@ def _start_server(*, host: str, port: str | None, dry_run: bool) -> CommandRespo
         )
     finally:
         log_file.close()
+    # start_new_session=True makes the spawned process the leader of its owned
+    # process group. Its PID is therefore the stable group ID, even if the
+    # launcher exits before the readiness probe or cleanup runs.
+    pgid = process.pid
     url_port = port or ODY_TERM_DEFAULT_PORT
+    url = f"http://{host}:{url_port}"
+    readiness_error = _wait_for_server_readiness(process=process, url=url)
+    if readiness_error:
+        _terminate_owned_server_process(process, pgid=pgid)
+        raise CommandError(
+            "server_start_failed",
+            f"Local server {readiness_error}; inspect {_server_log_path()} and retry.",
+            exit_code=1,
+        )
     state: dict[str, object] = {
         "kind": "ody-term-local-server",
         "pid": process.pid,
-        "pgid": os.getpgid(process.pid),
+        "pgid": pgid,
         "repo": str(_repo_root()),
         "command": _launcher_command(host=host, port=port, dry_run=False),
-        "url": f"http://{host}:{url_port}",
+        "url": url,
         "log_path": str(log_path),
         "started_at": _utc_now(),
     }
@@ -1913,8 +1989,8 @@ def _start_server(*, host: str, port: str | None, dry_run: bool) -> CommandRespo
     return CommandResponse(
         ok=True,
         command=command,
-        message="Local server start delegated",
-        data={"server": {"status": "starting", "runtime_state": state}},
+        message="Local server ready",
+        data={"server": {"status": "running", "runtime_state": state}},
     )
 
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import signal
 import sys
 from pathlib import Path
 
@@ -515,7 +517,7 @@ def test_target_resolution_bootstraps_for_start_flags(
         pid = 4242
 
     monkeypatch.setattr(ody_term.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
-    monkeypatch.setattr(ody_term.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(ody_term, "_wait_for_server_readiness", lambda **kwargs: None)
 
     exit_code, stdout, stderr = run_cli(["config", "resolve-target", flag, "--format=json"])
 
@@ -525,7 +527,7 @@ def test_target_resolution_bootstraps_for_start_flags(
     assert target["ok"] is True
     assert target["source"] == "local-bootstrap"
     assert target["url"] == "http://127.0.0.1:7860"
-    assert target["server"]["status"] == "starting"
+    assert target["server"]["status"] == "running"
 
 
 def test_human_target_resolution_uses_localhost_fallback(isolated_term_state: None) -> None:
@@ -588,6 +590,142 @@ def test_server_status_reports_absent_before_api_auth(isolated_term_state: None)
     server = json.loads(stdout)["data"]["server"]
     assert server["status"] == "absent"
     assert server["runtime_state"] is None
+
+
+def test_server_start_waits_for_unauthenticated_health_before_reporting_success(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeProcess:
+        pid = 4242
+
+        def poll(self) -> None:
+            return None
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    requested_urls: list[str] = []
+    monkeypatch.setattr(ody_term.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+
+    def fake_urlopen(request, *, timeout: float):
+        requested_urls.append(request.full_url)
+        assert request.get_header("Authorization") is None
+        return FakeResponse()
+
+    monkeypatch.setattr(ody_term, "urlopen", fake_urlopen)
+
+    exit_code, stdout, stderr = run_cli(["server", "start", "--port", "7861", "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    payload = json.loads(stdout)
+    assert payload["data"]["server"]["status"] == "running"
+    assert requested_urls == ["http://127.0.0.1:7861/api/health"]
+
+
+def test_server_start_cleans_up_owned_process_when_readiness_never_arrives(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeProcess:
+        pid = 4242
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self, *, timeout: float) -> int:
+            assert timeout == ody_term.SERVER_FAILED_LAUNCH_SHUTDOWN_TIMEOUT_S
+            return 0
+
+    monkeypatch.setattr(ody_term.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+    monkeypatch.setattr(ody_term, "SERVER_READINESS_TIMEOUT_S", 0)
+    monkeypatch.setattr(ody_term, "urlopen", lambda *args, **kwargs: (_ for _ in ()).throw(ody_term.URLError("refused")))
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(ody_term.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+
+    exit_code, stdout, stderr = run_cli(["server", "start", "--format=json"])
+
+    assert exit_code == 1
+    assert stdout == ""
+    error = json.loads(stderr)["error"]
+    assert error["code"] == "server_start_failed"
+    assert "did not become ready" in error["message"]
+    assert killed == [
+        (4242, signal.SIGTERM),
+        (4242, 0),
+        (4242, signal.SIGKILL),
+    ]
+    assert not Path(os.environ["ODY_TERM_RUNTIME"]).exists()
+
+
+def test_terminate_owned_server_process_kills_remaining_group_after_leader_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        pid = 4242
+
+        def __init__(self) -> None:
+            self.exited = False
+
+        def poll(self) -> int | None:
+            return 0 if self.exited else None
+
+        def wait(self, *, timeout: float) -> int:
+            assert timeout == ody_term.SERVER_FAILED_LAUNCH_SHUTDOWN_TIMEOUT_S
+            self.exited = True
+            return 0
+
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(ody_term.os, "killpg", lambda pgid, sig: signals.append((pgid, sig)))
+
+    ody_term._terminate_owned_server_process(FakeProcess(), pgid=4242)
+
+    assert signals == [
+        (4242, signal.SIGTERM),
+        (4242, 0),
+        (4242, signal.SIGKILL),
+    ]
+
+
+def test_server_start_cleans_up_surviving_group_when_leader_exits_early(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeProcess:
+        pid = 4242
+
+        def poll(self) -> int:
+            return 23
+
+        def wait(self, *, timeout: float) -> int:
+            raise AssertionError("an already-exited leader must not be waited on")
+
+    monkeypatch.setattr(ody_term.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+    monkeypatch.setattr(
+        ody_term.os,
+        "getpgid",
+        lambda pid: (_ for _ in ()).throw(AssertionError("start must use process.pid as the owned PGID")),
+    )
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(ody_term.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+
+    exit_code, stdout, stderr = run_cli(["server", "start", "--format=json"])
+
+    assert exit_code == 1
+    assert stdout == ""
+    error = json.loads(stderr)["error"]
+    assert error["code"] == "server_start_failed"
+    assert "exited with status 23" in error["message"]
+    assert killed == [
+        (4242, signal.SIGTERM),
+        (4242, 0),
+        (4242, signal.SIGKILL),
+    ]
+    assert not Path(os.environ["ODY_TERM_RUNTIME"]).exists()
 
 
 def test_server_start_dry_run_delegates_to_existing_launcher(isolated_term_state: None) -> None:
