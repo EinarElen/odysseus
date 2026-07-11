@@ -179,6 +179,25 @@ async def test_terminal_run_event_source_matches_agent_run_kind():
 
 
 @pytest.mark.asyncio
+async def test_terminal_run_error_remains_terminal_after_done_marker():
+    async def failed_stream():
+        yield 'event: error\ndata: {"status": 404, "text": "model unavailable"}\n\n'
+        yield "data: [DONE]\n\n"
+
+    created = terminal_client_runs.create_run(
+        kind="agent",
+        session_id="ses-failed",
+        message="work",
+        stream=failed_stream(),
+    )
+
+    attached = await terminal_client_runs.attach_run(run_id=created["run"]["run_id"])
+
+    assert attached["run"]["status"] == "error"
+    assert [event["kind"] for event in attached["events"]] == ["error", "run.status"]
+
+
+@pytest.mark.asyncio
 async def test_harness_run_persists_adapter_and_harness_session_identity_from_stream():
     async def harness_stream():
         yield (
@@ -234,6 +253,10 @@ def test_terminal_client_agent_run_uses_shared_context_policy_and_real_run_api(m
     monkeypatch.setattr("routes.terminal_client_routes.build_chat_context", fake_build_chat_context)
     monkeypatch.setattr("routes.terminal_client_routes.stream_agent_loop", fake_stream_agent_loop)
     monkeypatch.setattr(
+        "routes.terminal_client_routes.resolve_chat_fallback_candidates",
+        lambda owner: [("http://fallback.local/v1/chat/completions", "gpt-5.6-terra", {})],
+    )
+    monkeypatch.setattr(
         "routes.terminal_client_routes.resolve_agent_access",
         lambda request, user: SimpleNamespace(
             agent_allowed=True,
@@ -254,7 +277,7 @@ def test_terminal_client_agent_run_uses_shared_context_policy_and_real_run_api(m
 
     started = client.post(
         "/api/terminal/runs",
-        json={"kind": "agent", "session_id": "ses-real", "message": "inspect it"},
+        json={"kind": "agent", "session_id": "ses-real", "message": "inspect it", "workspace": "/tmp/workspace"},
     )
     assert started.status_code == 200
     run = started.json()["run"]
@@ -265,6 +288,10 @@ def test_terminal_client_agent_run_uses_shared_context_policy_and_real_run_api(m
     assert context_calls[0]["agent_mode"] is True
     assert stream_calls[0]["kwargs"]["owner"] == "alice"
     assert stream_calls[0]["kwargs"]["disabled_tools"] == {"send_email"}
+    assert stream_calls[0]["kwargs"]["workspace"] == "/tmp/workspace"
+    assert stream_calls[0]["kwargs"]["fallbacks"] == [
+        ("http://fallback.local/v1/chat/completions", "gpt-5.6-terra", {})
+    ]
     assert [message.role for message in manager.sessions["ses-real"].history] == ["user", "assistant"]
     assert manager.sessions["ses-real"].history[-1].content == "agent result"
 

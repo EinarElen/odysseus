@@ -28,6 +28,7 @@ from src.agent_loop import stream_agent_loop
 from src.agent_runtime import resolve_agent_execution_limits
 from src.auth_helpers import effective_user
 from src.constants import TERMINAL_EVENT_STREAM_MEDIA_TYPE
+from src.endpoint_resolver import resolve_chat_fallback_candidates
 from src.harness import get_harness_adapter
 from src.llm_core import stream_llm_with_fallback
 from src.model_context import estimate_tokens
@@ -245,6 +246,7 @@ def _terminal_agent_stream(
     preset_id: str | None,
     owner: str | None,
     access: AgentAccess,
+    workspace: str | None,
 ) -> AsyncGenerator[str, None]:
     async def _stream() -> AsyncGenerator[str, None]:
         resolve_session_auth(sess, session_id, owner=owner)
@@ -287,6 +289,8 @@ def _terminal_agent_stream(
                 tool_policy=tool_policy,
                 owner=owner,
                 uploaded_files=ctx.uploaded_files,
+                fallbacks=resolve_chat_fallback_candidates(owner=owner),
+                workspace=workspace,
                 provider_options=getattr(sess, "provider_options", None) or {},
             ):
                 if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
@@ -640,6 +644,7 @@ def setup_terminal_client_routes(
                 preset_id=payload.preset_id,
                 owner=owner,
                 access=access,
+                workspace=payload.workspace,
             )
         else:
             stream = _terminal_chat_stream(

@@ -148,7 +148,9 @@ def _sync_run_status(run: TerminalRun) -> None:
     live = agent_runs.get_status(run.session_id)
     persisted = agent_runs.get_persisted_status(run.session_id)
     original = (run.status, run.finished_at)
-    if live in {"running", "done", "error", "stopped"}:
+    if run.status in {"error", "stopped"}:
+        pass
+    elif live in {"running", "done", "error", "stopped"}:
         run.status = live
     elif run.status in RUN_ACTIVE_STATUSES and persisted:
         run.status = str(persisted)
@@ -252,7 +254,7 @@ def _persist_raw_event(run: TerminalRun, seq: int, raw: str) -> None:
             run.harness_session_id = harness_session_id
     event = _event_envelope(run, seq=seq, raw=raw)
     event_type = str(event["raw"]["type"])
-    if event_type == "done":
+    if event_type == "done" and run.status != "error":
         run.status = "done"
         run.finished_at = _utc_now()
     elif event_type == "error":
