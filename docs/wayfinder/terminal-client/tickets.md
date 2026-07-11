@@ -156,16 +156,16 @@ compatibility but are not the source of truth for new production Runs.
 
 **Blocked by:** Create Run Identity Compatibility Layer For Chat Runs; Expose Managed Lifecycle Targets.
 
-- [ ] The TUI has focused Live, REPL, Browse/tree, and Inspect views in a full-screen interactive renderer.
+- [x] The TUI has focused Live, REPL, Browse/tree, and Inspect views in a full-screen interactive renderer.
 - [x] TUI panes consume the same Event Envelope, Session, Run, Lifecycle Target, and capability state as CLI commands.
 - [x] Live view shows merged runtime events with selected-event detail and a local control log.
 - [x] REPL view can perform status, tail, filter, stop, harness, and lifecycle control attempts within capability limits.
 - [x] Browse/tree and Inspect views expose structure and current model state without depending on private internals.
-- [ ] Keyboard and mouse interaction paths are both covered against an interactive terminal renderer.
+- [x] Keyboard and mouse interaction paths are both covered against an interactive terminal renderer.
 
-Implementation note: the dependency-free, harnessable `ody.tui.v1` state model
-and human terminal fallback renderer exist. That is useful substrate, but it is
-not the full-screen interactive TUI promised by the v1 spec.
+Implementation note: the harnessable `ody.tui.v1` state model feeds the
+production Textual renderer. Human TTYs open the full-screen renderer;
+structured and non-interactive output retain the deterministic text fallback.
 
 ## Harden Automation, Replay Primitives, And Final Docs
 
@@ -430,16 +430,27 @@ ticket.
 **Blocked by:** Promote Event Inspection To Real Odysseus Activity; Make
 Lifecycle Logs And Controls Consume Real Run/Event State.
 
-- [ ] The TUI renders focused Live, REPL, Browse/tree, and Inspect views in a
+- [x] The TUI renders focused Live, REPL, Browse/tree, and Inspect views in a
       full-screen terminal renderer.
-- [ ] Live view consumes the same real Event Envelope, Session, Run, Lifecycle
+- [x] Live view consumes the same real Event Envelope, Session, Run, Lifecycle
       Target, and capability state as CLI commands.
-- [ ] Keyboard navigation and control paths are verified in an interactive
+- [x] Keyboard navigation and control paths are verified in an interactive
       terminal harness.
-- [ ] Mouse selection/control paths are verified where the terminal backend
+- [x] Mouse selection/control paths are verified where the terminal backend
       supports mouse input.
-- [ ] The existing text renderer is documented and tested only as fallback, not
+- [x] The existing text renderer is documented and tested only as fallback, not
       as the primary interactive TUI.
+
+2026-07-11 interactive renderer: production `ody-term tui` now runs a Textual
+full-screen application over the shared `ody.tui.v1` snapshot when stdout is a
+human TTY. Textual pilot tests exercise F-key navigation, keyboard control
+attempts, REPL submission and filtering, clickable view/control buttons, and
+mouse selection of Event Envelope rows and Browse nodes. REPL and control
+events delegate to the shared capability-aware attempt seam rather than
+reimplementing policy in the renderer. A PTY run against the live dev server
+rendered the persisted Run/Event inventory, switched to Browse with the `3`
+binding, and exited cleanly through `q`. JSON, JSONL, and non-interactive human
+output continue to use the deterministic fallback.
 
 ## Retire Local Run-State Fixtures From Production Commands
 

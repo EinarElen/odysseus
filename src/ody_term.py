@@ -23,6 +23,8 @@ from urllib.parse import urlencode
 from urllib.request import Request as UrlRequest
 from urllib.request import urlopen
 
+from ody_term_tui import run_tui as run_interactive_tui
+
 try:
     from src.constants import (
         COOKBOOK_STATE_FILE,
@@ -2316,6 +2318,22 @@ def _build_tui_model(request: CommandRequest) -> dict[str, object]:
     }
 
 
+def _tui_model_attempt(model: dict[str, object], command: str) -> dict[str, object]:
+    views = cast(dict[str, object], model.get("views", {}))
+    live = cast(dict[str, object], views.get("Live", {}))
+    inspect = cast(dict[str, object], views.get("Inspect", {}))
+    state = cast(dict[str, object], model.get("state", {}))
+    capability_payload = cast(dict[str, object], inspect.get("capabilities", {}))
+    return _tui_repl_attempt(
+        command,
+        runs=cast(list[dict[str, object]], state.get("runs", [])),
+        events=cast(list[dict[str, object]], state.get("events", [])),
+        lifecycle_targets=cast(list[dict[str, object]], state.get("lifecycle_targets", [])),
+        capabilities=cast(dict[str, object], capability_payload.get("capabilities", {})),
+        selected_event=cast(dict[str, object] | None, live.get("selected_event")),
+    )
+
+
 def _render_tui_screen(model: dict[str, object]) -> str:
     views = cast(dict[str, object], model["views"])
     live = cast(dict[str, object], views["Live"])
@@ -3006,6 +3024,15 @@ def main(argv: list[str] | None = None, *, stdout: TextIO | None = None, stderr:
             return 0
         assert request is not None
         response = execute(request)
+        if (
+            request.domain == "tui"
+            and request.globals.format == "text"
+            and request.output_profile == "human"
+            and stdout_is_tty
+        ):
+            model = cast(dict[str, object], response.data["tui"])
+            run_interactive_tui(model, lambda command: _tui_model_attempt(model, command))
+            return 0 if response.ok else 1
         render(response, request, stdout)
         return 0 if response.ok else 1
     except CommandError as exc:

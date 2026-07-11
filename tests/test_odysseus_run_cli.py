@@ -176,4 +176,5 @@ def test_pyproject_exposes_uv_console_scripts() -> None:
     assert pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["only-include"] == [
         "src/odysseus_run_cli.py",
         "src/ody_term.py",
+        "src/ody_term_tui.py",
     ]

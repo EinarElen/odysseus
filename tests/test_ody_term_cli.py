@@ -2289,7 +2289,7 @@ def test_tui_browse_and_inspect_views_expose_shared_model_state(
     ]
 
 
-def test_tui_human_screen_has_focused_live_repl_browse_and_inspect_views(
+def test_tui_text_fallback_has_focused_live_repl_browse_and_inspect_views(
     isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
@@ -2309,7 +2309,7 @@ def test_tui_human_screen_has_focused_live_repl_browse_and_inspect_views(
         ]
     )
 
-    exit_code, stdout, stderr = run_cli(["tui"], is_tty=True)
+    exit_code, stdout, stderr = run_cli(["--output", "human", "tui"], is_tty=False)
 
     assert exit_code == 0
     assert stderr == ""
@@ -2320,3 +2320,21 @@ def test_tui_human_screen_has_focused_live_repl_browse_and_inspect_views(
     assert "Session ses_screen" in stdout
     assert "sessions=1 runs=1 events=2" in stdout
     assert "keyboard: F1-F4, 1-4, Tab; mouse: tabs, event rows, tree nodes, controls" in stdout
+
+
+def test_tui_human_tty_opens_full_screen_renderer(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    opened: list[tuple[dict[str, object], object]] = []
+    monkeypatch.setattr(ody_term, "run_interactive_tui", lambda model, attempt: opened.append((model, attempt)))
+
+    exit_code, stdout, stderr = run_cli(["tui"], is_tty=True)
+
+    assert exit_code == 0
+    assert stdout == ""
+    assert stderr == ""
+    model, attempt = opened[0]
+    assert model["schema"] == "ody.tui.v1"
+    assert model["views"].keys() == {"Live", "REPL", "Browse", "Inspect"}
+    assert callable(attempt)

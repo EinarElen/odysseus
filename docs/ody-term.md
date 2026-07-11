@@ -7,9 +7,12 @@ bootstrap, capability shapes, file/keychain auth storage, lifecycle inventory
 scaffold, API-backed chat, agent, and harness Run execution, persisted Run
 identity, bounded real Run Event Envelope query/replay, real Run and harness
 lifecycle targets, and the `ody.tui.v1` state model exist. Live JSONL tailing
-is available for API-backed Runs. The TUI model and text fallback consume the
-same server-owned Run/Event state as the CLI; a full-screen interactive TUI is
-still open work tracked in
+is available for API-backed Runs. On a human TTY, `ody-term tui` opens a
+full-screen Textual renderer with Live, REPL, Browse, and Inspect views,
+keyboard navigation and controls, a command-input REPL, clickable controls,
+selectable Event Envelope rows, and a selectable Session/Run tree. Structured
+output and non-interactive human output retain the text/model fallback.
+Remaining production-recovery work is tracked in
 `docs/wayfinder/terminal-client/implementation-review.md`.
 
 ## Command Shape

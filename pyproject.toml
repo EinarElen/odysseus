@@ -7,7 +7,9 @@ name = "odysseus"
 version = "0.0.0"
 description = "Local Odysseus development task and launch runner"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "textual>=5,<6",
+]
 
 [project.scripts]
 ody = "odysseus_run_cli:main"
@@ -16,7 +18,7 @@ odysseus-run = "odysseus_run_cli:main"
 ody-term = "ody_term:main"
 
 [tool.hatch.build.targets.wheel]
-only-include = ["src/odysseus_run_cli.py", "src/ody_term.py"]
+only-include = ["src/odysseus_run_cli.py", "src/ody_term.py", "src/ody_term_tui.py"]
 sources = ["src"]
 
 [tool.ruff]
