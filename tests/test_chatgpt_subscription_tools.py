@@ -77,7 +77,6 @@ def test_responses_input_preserves_function_call_round_trip():
         "call_id": "call_1",
         "name": "bash",
         "arguments": '{"command":"pwd"}',
-        "id": "call_1",
     }
     assert items[2] == {
         "type": "function_call_output",

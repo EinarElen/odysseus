@@ -55,6 +55,31 @@ def test_no_fallback_event_when_primary_succeeds(monkeypatch):
     assert not any('"fallback"' in c for c in chunks)
 
 
+def test_unavailable_luna_falls_back_to_terra_with_usage(monkeypatch):
+    """The configured backup must answer and retain its provider usage facts."""
+    async def fake_stream(url, model, messages, **kw):
+        if model == "luna":
+            yield 'event: error\ndata: {"status": 503, "text": "model unavailable"}\n\n'
+            return
+        yield 'data: {"delta": "answered by terra"}\n\n'
+        yield 'data: {"type": "usage", "data": {"model": "terra", "input_tokens": 12, "output_tokens": 4}}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(llm_core, "stream_llm", fake_stream)
+
+    async def run():
+        return [chunk async for chunk in llm_core.stream_llm_with_fallback(
+            [("http://luna", "luna", {}), ("http://terra", "terra", {})],
+            [{"role": "user", "content": "hi"}],
+        )]
+
+    chunks = asyncio.run(run())
+    events = [json.loads(chunk[6:]) for chunk in chunks if chunk.startswith("data: ") and chunk != "data: [DONE]\n\n"]
+    assert any(event.get("type") == "fallback" and event["answered_by"] == "terra" for event in events)
+    assert any(event.get("delta") == "answered by terra" for event in events)
+    assert any(event.get("type") == "usage" and event["data"]["model"] == "terra" for event in events)
+
+
 def test_dedupe_candidates_keeps_first_of_each_route():
     """(url, model) is the route key; later repeats are dropped, order preserved,
     the first tuple (with its headers) kept, malformed entries filtered."""
