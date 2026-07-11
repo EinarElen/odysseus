@@ -700,6 +700,7 @@ class UsageStore:
             joined = self._filtered_joined(db, owner=owner, start=start, end=end, **filters)
             rows = [item[0] for item in joined]
         points: dict[datetime, list[Any]] = {}
+        joined_by_observation = {item[0].id: item for item in joined}
         for row in rows:
             dt = row.observed_at.replace(tzinfo=timezone.utc).astimezone(timezone_value)
             if bucket == "hour":
@@ -710,15 +711,22 @@ class UsageStore:
             else:
                 key = dt.replace(hour=0, minute=0, second=0, microsecond=0)
             points.setdefault(key, []).append(row)
-        return {"bucket": bucket, "timezone": timezone_name, "points": [{
-            "time": key.isoformat(),
-            "input_tokens": sum(row.input_tokens or 0 for row in group),
-            "output_tokens": sum(row.output_tokens or 0 for row in group),
-            "cache_read_tokens": self._sum_nullable(group, "cache_read_tokens"),
-            "cache_write_tokens": self._sum_nullable(group, "cache_write_tokens"),
-            "fresh_input_tokens": self._sum_nullable(group, "fresh_input_tokens"),
-            "total_cost_micros": self._sum_nullable(group, "total_cost_micros"),
-        } for key, group in sorted(points.items())]}
+        rendered = []
+        for key, group in sorted(points.items()):
+            runs = {joined_by_observation[row.id][2].id: joined_by_observation[row.id][2] for row in group}
+            durations = [run.duration_ms for run in runs.values() if run.duration_ms is not None]
+            rendered.append({
+                "time": key.isoformat(),
+                "input_tokens": sum(row.input_tokens or 0 for row in group),
+                "output_tokens": sum(row.output_tokens or 0 for row in group),
+                "cache_read_tokens": self._sum_nullable(group, "cache_read_tokens"),
+                "cache_write_tokens": self._sum_nullable(group, "cache_write_tokens"),
+                "fresh_input_tokens": self._sum_nullable(group, "fresh_input_tokens"),
+                "total_cost_micros": self._sum_nullable(group, "total_cost_micros"),
+                "runs": len(runs),
+                "duration_p95_ms": self._percentile(durations, 0.95),
+            })
+        return {"bucket": bucket, "timezone": timezone_name, "points": rendered}
 
     def query_breakdown(self, *, owner: str, group_by: str = "model", start: datetime | None = None, end: datetime | None = None, **filters) -> dict[str, Any]:
         dimensions = {

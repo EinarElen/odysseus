@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, TextIO, TypedDict, cast
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request as UrlRequest
 from urllib.request import urlopen
 
@@ -57,9 +57,9 @@ except Exception:  # pragma: no cover - keeps standalone ody_term packaging usab
     SERVER_FAILED_LAUNCH_SHUTDOWN_TIMEOUT_S = 3.0
 
 
-DOMAINS = ("auth", "config", "server", "session", "run", "harness", "service", "inspect", "tui")
+DOMAINS = ("auth", "config", "server", "session", "run", "harness", "service", "usage", "inspect", "tui")
 OUTPUT_PROFILES = ("human", "grug", "clanker")
-FORMATS = ("text", "json", "jsonl", "raw", "debug")
+FORMATS = ("text", "json", "jsonl", "csv", "raw", "debug")
 COLOR_MODES = ("auto", "always", "never")
 TERMINAL_CAPABILITIES = (
     "session:read",
@@ -75,6 +75,8 @@ TERMINAL_CAPABILITIES = (
     "service:restart",
     "service:kill",
     "auth:capabilities",
+    "usage:read",
+    "usage:export",
 )
 CONFIRMATION_CAPABILITIES = {"run:stop", "harness:control", "service:restart"}
 ELEVATED_CAPABILITIES = {"service:kill"}
@@ -103,6 +105,7 @@ COMMANDS: dict[str, tuple[str, ...]] = {
     "run": ("start", "list", "status", "attach", "stop"),
     "harness": ("list", "status", "attach", "stop"),
     "service": ("list", "status", "logs", "stop", "restart"),
+    "usage": ("summary", "top", "timeline", "runs", "show", "cache", "subscription", "live", "export"),
     "inspect": ("domains", "aliases", "contracts", "globals", "events"),
     "tui": (),
 }
@@ -156,6 +159,7 @@ class CommandResponse:
     data: dict[str, object] = field(default_factory=dict)
     raw: object | None = None
     event_stream: Iterable[dict[str, object]] | None = None
+    text_stream: Iterable[str] | None = None
 
 
 class EventFilters(TypedDict):
@@ -284,6 +288,19 @@ def _parse_command_options(args: list[str]) -> tuple[dict[str, str | bool], list
         "--select-event",
         "--repl",
         "--export-format",
+        "--from",
+        "--to",
+        "--bucket",
+        "--metric",
+        "--by",
+        "--group-by",
+        "--provider",
+        "--tool",
+        "--usage-source",
+        "--cache-status",
+        "--timezone",
+        "--limit",
+        "--offset",
     }
     bool_flags = {"--default", "--dry-run", "--force"}
     while index < len(args):
@@ -784,6 +801,24 @@ def _terminal_api_event_stream(
         raise
     except (OSError, URLError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CommandError("terminal_api_unavailable", f"terminal event stream failed: {exc}", exit_code=1) from exc
+
+
+def _terminal_api_text_stream(
+    request: CommandRequest,
+    path: str,
+    *,
+    query: dict[str, object] | None = None,
+) -> Iterator[str]:
+    url, headers = _terminal_api_url_and_headers(request, path, query=query, accept="application/octet-stream")
+    req = UrlRequest(url, headers=headers, method="GET")
+    try:
+        with urlopen(req, timeout=TERMINAL_API_TIMEOUT_S) as response:  # noqa: S310 - user-selected target.
+            while chunk := response.read(64 * 1024):
+                yield chunk.decode("utf-8")
+    except HTTPError as exc:
+        raise _terminal_api_http_error(exc) from exc
+    except (OSError, URLError, UnicodeDecodeError) as exc:
+        raise CommandError("terminal_api_unavailable", f"terminal usage export failed: {exc}", exit_code=1) from exc
 
 
 def _utc_now() -> str:
@@ -2439,6 +2474,8 @@ def parse_request(argv: list[str], *, stdout_is_tty: bool) -> tuple[CommandReque
     verb = positionals[1]
     if verb not in COMMANDS[domain]:
         raise CommandError("unknown_verb", f"unknown {domain} verb: {verb}")
+    if options.format == "csv" and (domain, verb) != ("usage", "export"):
+        raise CommandError("invalid_format", "csv format is available only for usage export")
     return (
         CommandRequest(
             domain=domain,
@@ -2820,6 +2857,189 @@ def _tui_command(request: CommandRequest) -> CommandResponse:
     )
 
 
+def _usage_options(request: CommandRequest) -> tuple[dict[str, str | bool], list[str], dict[str, object]]:
+    options, positionals = _parse_command_options(request.args)
+    query = {
+        key: options.get(key)
+        for key in ("from", "to", "timezone", "provider", "model", "kind", "status", "tool", "usage_source", "cache_status")
+        if options.get(key) is not None
+    }
+    return options, positionals, query
+
+
+def _sparkline(values: list[object]) -> str:
+    blocks = "▁▂▃▄▅▆▇█"
+    numbers = [float(value or 0) for value in values]
+    if not numbers:
+        return ""
+    high = max(numbers)
+    return "".join(blocks[round((len(blocks) - 1) * value / high)] if high else blocks[0] for value in numbers)
+
+
+def _text_table(headers: list[str], rows: list[list[object]]) -> str:
+    rendered = [["—" if value is None else str(value) for value in row] for row in rows]
+    widths = [max(len(headers[index]), *(len(row[index]) for row in rendered)) for index in range(len(headers))]
+    lines = ["  ".join(value.ljust(widths[index]) for index, value in enumerate(headers))]
+    lines.extend("  ".join(value.ljust(widths[index]) for index, value in enumerate(row)) for row in rendered)
+    return "\n".join(lines)
+
+
+def _usage_summary(request: CommandRequest) -> CommandResponse:
+    _require_capability("usage:read", request)
+    _, positionals, query = _usage_options(request)
+    if positionals:
+        raise CommandError("unexpected_usage_args", f"unexpected usage summary args: {' '.join(positionals)}")
+    payload = _terminal_api_request(request, "GET", "/api/terminal/usage/summary", query=query)
+    totals = cast(dict[str, object], payload.get("totals") or {})
+    message = (
+        f"Usage: {totals.get('runs', 0)} Runs · {totals.get('input_tokens', 0)} in · "
+        f"{totals.get('output_tokens', 0)} out · {totals.get('cache_read_tokens')} cached · "
+        f"${float(totals.get('total_cost_micros') or 0) / 1_000_000:.4f} USD"
+    )
+    return CommandResponse(True, ["usage", "summary"], message, payload)
+
+
+def _usage_top(request: CommandRequest) -> CommandResponse:
+    _require_capability("usage:read", request)
+    options, positionals, query = _usage_options(request)
+    group = str(positionals[0] if positionals else options.get("group_by") or "model")
+    aliases = {"models": "model", "providers": "provider", "sessions": "session", "tools": "tool", "runs": "kind"}
+    group = aliases.get(group, group)
+    query["group_by"] = group
+    payload = _terminal_api_request(request, "GET", "/api/terminal/usage/breakdown", query=query)
+    items = cast(list[dict[str, object]], payload.get("items") or [])
+    by = str(options.get("by") or "tokens")
+    if by not in {"tokens", "cost", "duration"}:
+        raise CommandError("invalid_usage_measure", f"usage top --by must be tokens, cost, or duration, not {by}")
+    if by == "duration" and group != "tool":
+        raise CommandError("unsupported_usage_measure", "duration ranking is available only for usage top tools")
+    def score(item: dict[str, object]) -> float:
+        if by == "cost": return float(item.get("total_cost_micros") or 0)
+        if by == "duration": return float(item.get("duration_ms") or 0)
+        return float(item.get("input_tokens") or 0) + float(item.get("output_tokens") or 0)
+    items.sort(key=score, reverse=True)
+    try:
+        limit = int(str(options.get("limit") or 10))
+    except ValueError as exc:
+        raise CommandError("invalid_usage_limit", "usage --limit must be an integer") from exc
+    if not 1 <= limit <= 100:
+        raise CommandError("invalid_usage_limit", "usage --limit must be between 1 and 100")
+    items = items[:limit]
+    table = _text_table([group.title(), by.title()], [[item.get("key"), f"{score(item):g}"] for item in items]) if items else "No usage data"
+    return CommandResponse(True, ["usage", "top"], table, {**payload, "items": items, "by": by})
+
+
+def _usage_timeline(request: CommandRequest) -> CommandResponse:
+    _require_capability("usage:read", request)
+    options, positionals, query = _usage_options(request)
+    if positionals:
+        raise CommandError("unexpected_usage_args", f"unexpected usage timeline args: {' '.join(positionals)}")
+    query["bucket"] = str(options.get("bucket") or "day")
+    if query["bucket"] not in {"hour", "day", "week"}:
+        raise CommandError("invalid_usage_bucket", "usage timeline --bucket must be hour, day, or week")
+    payload = _terminal_api_request(request, "GET", "/api/terminal/usage/timeseries", query=query)
+    metric = str(options.get("metric") or "tokens")
+    if metric not in {"tokens", "cost", "cache", "runs", "latency"}:
+        raise CommandError("invalid_usage_metric", "usage timeline --metric must be tokens, cost, cache, runs, or latency")
+    points = cast(list[dict[str, object]], payload.get("points") or [])
+    values = []
+    for point in points:
+        if metric == "cost": values.append(point.get("total_cost_micros"))
+        elif metric == "cache": values.append(point.get("cache_read_tokens"))
+        elif metric == "runs": values.append(point.get("runs"))
+        elif metric == "latency": values.append(point.get("duration_p95_ms"))
+        else: values.append((int(point.get("input_tokens") or 0) + int(point.get("output_tokens") or 0)))
+    return CommandResponse(True, ["usage", "timeline"], f"{metric}: {_sparkline(values)}", {**payload, "metric": metric, "values": values})
+
+
+def _usage_runs(request: CommandRequest) -> CommandResponse:
+    _require_capability("usage:read", request)
+    options, positionals, query = _usage_options(request)
+    if positionals:
+        raise CommandError("unexpected_usage_args", f"unexpected usage runs args: {' '.join(positionals)}")
+    try:
+        limit = int(str(options.get("limit") or 100))
+    except ValueError as exc:
+        raise CommandError("invalid_usage_limit", "usage --limit must be an integer") from exc
+    if not 1 <= limit <= 500:
+        raise CommandError("invalid_usage_limit", "usage runs --limit must be between 1 and 500")
+    try:
+        offset = int(str(options.get("offset") or 0))
+    except ValueError as exc:
+        raise CommandError("invalid_usage_offset", "usage runs --offset must be an integer") from exc
+    if offset < 0:
+        raise CommandError("invalid_usage_offset", "usage runs --offset must be non-negative")
+    query.update({"limit": str(limit), "offset": str(offset)})
+    payload = _terminal_api_request(request, "GET", "/api/terminal/usage/runs", query=query)
+    runs = cast(list[dict[str, object]], payload.get("runs") or [])
+    table = _text_table(["Run", "Status", "Kind", "Input", "Output", "Cost μUSD"], [[run.get("id"), run.get("status"), run.get("kind"), run.get("input_tokens"), run.get("output_tokens"), run.get("total_cost_micros")] for run in runs]) if runs else "No usage Runs"
+    return CommandResponse(True, ["usage", "runs"], table, {**payload, "offset": offset, "limit": limit})
+
+
+def _usage_show(request: CommandRequest) -> CommandResponse:
+    _require_capability("usage:read", request)
+    _, positionals, _ = _usage_options(request)
+    if len(positionals) != 1:
+        raise CommandError("missing_usage_run", "usage show requires one Run id")
+    payload = _terminal_api_request(request, "GET", f"/api/terminal/usage/runs/{quote(positionals[0], safe='')}")
+    spans = cast(list[dict[str, object]], payload.get("spans") or [])
+    by_id = {str(span.get("id")): span for span in spans}
+    def depth(span: dict[str, object]) -> int:
+        parent = span.get("parent_span_id")
+        return 0 if not parent or str(parent) not in by_id else 1 + depth(by_id[str(parent)])
+    lines = [f"{'  ' * depth(span)}{span.get('name')} {span.get('status')} {span.get('duration_ms')}ms" for span in spans]
+    return CommandResponse(True, ["usage", "show"], "\n".join(lines), payload)
+
+
+def _usage_cache(request: CommandRequest) -> CommandResponse:
+    _require_capability("usage:read", request)
+    _, positionals, query = _usage_options(request)
+    if positionals:
+        raise CommandError("unexpected_usage_args", f"unexpected usage cache args: {' '.join(positionals)}")
+    payload = _terminal_api_request(request, "GET", "/api/terminal/usage/cache", query=query)
+    totals = cast(dict[str, object], payload.get("totals") or {})
+    return CommandResponse(True, ["usage", "cache"], f"Cache: {totals.get('cache_read_tokens')} read · {totals.get('cache_write_tokens')} written · {totals.get('cache_unknown_runs')} unknown Runs", payload)
+
+
+def _usage_subscription(request: CommandRequest) -> CommandResponse:
+    _require_capability("usage:read", request)
+    payload = _terminal_api_request(request, "GET", "/api/terminal/usage/subscription")
+    accounts = cast(list[dict[str, object]], payload.get("accounts") or [])
+    lines = []
+    for account in accounts:
+        for window in cast(list[dict[str, object]], account.get("windows") or []):
+            lines.append(f"{account.get('plan') or account.get('provider')} {window.get('key')}: {window.get('remaining_percent')}% left · resets {window.get('resets_at')}")
+    intervals = cast(list[dict[str, object]], payload.get("intervals") or [])
+    if intervals:
+        lines.append("Attribution intervals:")
+        for item in intervals[-10:]:
+            measured = int(item.get("odysseus_input_tokens") or 0) + int(item.get("odysseus_output_tokens") or 0)
+            delta = item.get("account_delta_basis_points")
+            delta_text = "new epoch" if delta is None else f"{float(delta) / 100:g} points"
+            lines.append(f"  {item.get('window_key')}: account {delta_text} · Odysseus {item.get('odysseus_runs')} Runs/{measured} tokens · {item.get('attribution')} ({item.get('confidence')})")
+    return CommandResponse(True, ["usage", "subscription"], "\n".join(lines) or "No subscription snapshots", payload)
+
+
+def _usage_live(request: CommandRequest) -> CommandResponse:
+    _require_capability("usage:read", request)
+    _, positionals, query = _usage_options(request)
+    if positionals:
+        raise CommandError("unexpected_usage_args", f"unexpected usage live args: {' '.join(positionals)}")
+    stream = _terminal_api_event_stream(request, "/api/terminal/usage/live", query=query)
+    return CommandResponse(True, ["usage", "live"], "Following usage events", {}, event_stream=stream)
+
+
+def _usage_export(request: CommandRequest) -> CommandResponse:
+    _require_capability("usage:export", request)
+    options, positionals, query = _usage_options(request)
+    if positionals:
+        raise CommandError("unexpected_usage_args", f"unexpected usage export args: {' '.join(positionals)}")
+    export_format = str(options.get("export_format") or (request.globals.format if request.globals.format in {"jsonl", "csv"} else "jsonl"))
+    query["format"] = export_format
+    stream = _terminal_api_text_stream(request, "/api/terminal/usage/export", query=query)
+    return CommandResponse(True, ["usage", "export"], f"Streaming {export_format} export", {"schema_version": 1, "format": export_format}, text_stream=stream)
+
+
 CommandHandler = Callable[[CommandRequest], CommandResponse]
 
 
@@ -2846,6 +3066,15 @@ HANDLERS: dict[tuple[str, str | None], CommandHandler] = {
     ("service", "logs"): _service_logs,
     ("service", "stop"): _service_control,
     ("service", "restart"): _service_control,
+    ("usage", "summary"): _usage_summary,
+    ("usage", "top"): _usage_top,
+    ("usage", "timeline"): _usage_timeline,
+    ("usage", "runs"): _usage_runs,
+    ("usage", "show"): _usage_show,
+    ("usage", "cache"): _usage_cache,
+    ("usage", "subscription"): _usage_subscription,
+    ("usage", "live"): _usage_live,
+    ("usage", "export"): _usage_export,
     ("server", "status"): _server_status,
     ("server", "start"): _server_start,
     ("server", "stop"): _server_stop,
@@ -2877,6 +3106,8 @@ def execute(request: CommandRequest) -> CommandResponse:
 
 def _response_payload(response: CommandResponse, request: CommandRequest) -> dict[str, object]:
     return {
+        "schema": "ody.command.v1",
+        "schema_version": 1,
         "ok": response.ok,
         "command": response.command,
         "message": response.message,
@@ -2901,6 +3132,12 @@ def render(response: CommandResponse, request: CommandRequest, stdout: TextIO) -
     payload = _response_payload(response, request)
     output_format = request.globals.format
     events = _event_payload(response)
+
+    if response.command == ["usage", "export"] and response.text_stream is not None:
+        for chunk in response.text_stream:
+            stdout.write(chunk)
+            stdout.flush()
+        return
 
     if output_format == "json":
         _write_json(payload, stdout)
@@ -2930,6 +3167,18 @@ def render(response: CommandResponse, request: CommandRequest, stdout: TextIO) -
             },
             stdout,
         )
+    elif response.event_stream is not None:
+        for event in response.event_stream:
+            if request.output_profile == "clanker":
+                _write_json(event, stdout)
+            else:
+                data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                run = cast(dict[str, object], data)
+                if request.output_profile == "grug":
+                    stdout.write(f"{run.get('status')} {run.get('kind')} {run.get('id')}\n")
+                else:
+                    stdout.write(f"[{run.get('status')}] {run.get('kind')} {run.get('id')} · {run.get('input_tokens', 0)} in / {run.get('output_tokens', 0)} out\n")
+            stdout.flush()
     elif request.output_profile == "clanker":
         _write_json(payload, stdout)
     elif request.output_profile == "grug":

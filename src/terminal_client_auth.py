@@ -20,6 +20,8 @@ TERMINAL_CLIENT_SCOPES = frozenset(
         "service:restart",
         "service:kill",
         "auth:capabilities",
+        "usage:read",
+        "usage:export",
     }
 )
 EVENT_READ_SCOPES = frozenset({"event:read", "event:raw"})
@@ -29,6 +31,8 @@ RUN_START_SCOPES = frozenset({"run:start"})
 RUN_STOP_SCOPES = frozenset({"run:stop"})
 SESSION_READ_SCOPES = frozenset({"session:read"})
 HARNESS_CONTROL_SCOPES = frozenset({"harness:control"})
+USAGE_READ_SCOPES = frozenset({"usage:read", "usage:export"})
+USAGE_EXPORT_SCOPES = frozenset({"usage:export"})
 
 
 def require_terminal_scope(request: Request, allowed: frozenset[str]) -> str:

@@ -92,6 +92,23 @@ def install_terminal_route_fakes(monkeypatch, *, patch_owner=True):
     monkeypatch.setattr("routes.terminal_client_routes.save_assistant_response", fake_save_assistant_response)
 
 
+def test_terminal_usage_routes_enforce_owner_and_export_scope(monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    install_terminal_route_fakes(monkeypatch)
+    monkeypatch.setattr("routes.terminal_client_routes.effective_user", lambda request: "local")
+
+    class Store:
+        def query_summary(self, **kwargs): return {"owner": kwargs["owner"], "totals": {"runs": 1}}
+        def export(self, **kwargs): return iter([b'{"run":"r1"}\n'])
+
+    monkeypatch.setattr("routes.terminal_client_routes.usage_store", Store())
+    app = FastAPI()
+    app.include_router(setup_terminal_client_routes(session_manager=FakeSessionManager(), chat_handler=FakeChatHandler()))
+    client = TestClient(app)
+    assert client.get("/api/terminal/usage/summary").json()["owner"] == "local"
+    assert client.get("/api/terminal/usage/export?format=jsonl").text == '{"run":"r1"}\n'
+
+
 def test_terminal_session_read_api_keeps_history_and_run_identity_separate(monkeypatch):
     monkeypatch.setenv("AUTH_ENABLED", "false")
     manager = FakeSessionManager()

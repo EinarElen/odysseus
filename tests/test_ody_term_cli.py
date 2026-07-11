@@ -38,6 +38,76 @@ def run_cli(argv: list[str], *, is_tty: bool = False) -> tuple[int, str, str]:
     return exit_code, stdout.getvalue(), stderr.getvalue()
 
 
+def test_usage_summary_and_timeline_profiles(isolated_term_state, monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+
+    def fake_api(request, method, path, *, query=None, body=None):
+        if path.endswith("/summary"):
+            return {"schema_version": 1, "quality": "exact", "currency": "USD", "totals": {"runs": 2, "input_tokens": 120, "output_tokens": 30, "cache_read_tokens": 40, "total_cost_micros": 2500}}
+        return {"schema_version": 1, "points": [{"time": "2026-07-12T00:00:00Z", "input_tokens": 10, "output_tokens": 5}, {"time": "2026-07-13T00:00:00Z", "input_tokens": 20, "output_tokens": 10}]}
+
+    monkeypatch.setattr(ody_term, "_terminal_api_request", fake_api)
+    code, stdout, stderr = run_cli(["--output", "human", "usage", "summary", "--from", "24h"], is_tty=True)
+    assert code == 0 and not stderr
+    assert "2 Runs" in stdout and "$0.0025 USD" in stdout
+
+    code, stdout, _ = run_cli(["--output", "grug", "usage", "timeline", "--metric", "tokens"], is_tty=True)
+    assert code == 0
+    assert "tokens:" in stdout and stdout.rstrip().endswith("█")
+
+
+def test_usage_clanker_and_export_contracts(isolated_term_state, monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    monkeypatch.setattr(ody_term, "_terminal_api_text_stream", lambda *args, **kwargs: iter(['{"run":"r1"}\n']))
+    code, stdout, stderr = run_cli(["usage", "export", "--export-format", "jsonl"])
+    assert code == 0 and not stderr
+    assert stdout == '{"run":"r1"}\n'
+
+
+def test_usage_capabilities_are_declared():
+    assert "usage:read" in ody_term.TERMINAL_CAPABILITIES
+    assert "usage:export" in ody_term.TERMINAL_CAPABILITIES
+    assert "usage" in ody_term.DOMAINS
+
+
+def test_usage_validation_and_versioned_clanker(isolated_term_state, monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    monkeypatch.setattr(ody_term, "_terminal_api_request", lambda *args, **kwargs: {"schema_version": 1, "totals": {"runs": 0}})
+    code, stdout, _ = run_cli(["usage", "summary"])
+    assert code == 0
+    payload = json.loads(stdout)
+    assert payload["schema"] == "ody.command.v1" and payload["schema_version"] == 1
+
+    code, _, stderr = run_cli(["usage", "runs", "--limit", "nope"])
+    assert code == 2
+    assert json.loads(stderr)["error"]["code"] == "invalid_usage_limit"
+
+
+def test_usage_export_accepts_documented_csv_format(isolated_term_state, monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    seen = {}
+    def fake_api(request, path, *, query=None):
+        seen.update(query or {})
+        return iter(["id,status\nr1,succeeded\n"])
+    monkeypatch.setattr(ody_term, "_terminal_api_text_stream", fake_api)
+    code, stdout, stderr = run_cli(["usage", "export", "--format", "csv", "--provider", "chatgpt-subscription"])
+    assert code == 0 and not stderr
+    assert stdout == "id,status\nr1,succeeded\n"
+    assert seen == {"provider": "chatgpt-subscription", "format": "csv"}
+
+
+def test_usage_subscription_human_includes_shared_account_attribution(isolated_term_state, monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    monkeypatch.setattr(ody_term, "_terminal_api_request", lambda *args, **kwargs: {
+        "accounts": [{"plan": "plus", "windows": [{"key": "secondary", "remaining_percent": 60, "resets_at": "2026-07-19T00:00:00Z"}]}],
+        "intervals": [{"window_key": "secondary", "account_delta_basis_points": 400, "odysseus_runs": 2, "odysseus_input_tokens": 100, "odysseus_output_tokens": 20, "attribution": "mixed_or_unknown", "confidence": "low"}],
+    })
+    code, stdout, _ = run_cli(["--output", "human", "usage", "subscription"], is_tty=True)
+    assert code == 0
+    assert "Odysseus 2 Runs/120 tokens" in stdout
+    assert "mixed_or_unknown (low)" in stdout
+
+
 @pytest.fixture
 def isolated_term_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ODY_TERM_CONFIG", str(tmp_path / "config.json"))

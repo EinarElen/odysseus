@@ -9,7 +9,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -40,8 +40,13 @@ from src.terminal_client_auth import (
     RUN_START_SCOPES,
     RUN_STOP_SCOPES,
     SESSION_READ_SCOPES,
+    USAGE_EXPORT_SCOPES,
+    USAGE_READ_SCOPES,
     require_terminal_scope,
 )
+from routes.usage_routes import _time
+from src.subscription_usage import subscription_usage_store
+from src.usage_observability import usage_store
 from src.tool_policy import build_effective_tool_policy
 
 
@@ -519,6 +524,127 @@ def setup_terminal_client_routes(
             return session_manager.get_session(session_id)
         except KeyError:
             raise HTTPException(404, f"Session {session_id} not found") from None
+
+    def usage_owner(request: Request, *, export: bool = False) -> str:
+        return require_terminal_scope(request, USAGE_EXPORT_SCOPES if export else USAGE_READ_SCOPES) or effective_user(request) or "local"
+
+    def usage_filters(
+        provider: str | None, model: str | None, kind: str | None, status: str | None,
+        tool: str | None, usage_source: str | None, cache_status: str | None,
+    ) -> dict[str, str]:
+        return {key: value for key, value in {
+            "provider": provider, "model": model, "kind": kind, "status": status,
+            "tool": tool, "usage_source": usage_source, "cache_status": cache_status,
+        }.items() if value is not None}
+
+    @router.get("/usage/summary")
+    async def usage_summary(
+        request: Request, from_: str | None = Query(None, alias="from"), to: str | None = None,
+        provider: str | None = None, model: str | None = None, kind: str | None = None,
+        status: str | None = None, tool: str | None = None, usage_source: str | None = None,
+        cache_status: str | None = None,
+    ) -> dict[str, Any]:
+        owner = usage_owner(request)
+        return usage_store.query_summary(owner=owner, start=_time(from_), end=_time(to), **usage_filters(provider, model, kind, status, tool, usage_source, cache_status))
+
+    @router.get("/usage/breakdown")
+    async def usage_breakdown(
+        request: Request, group_by: str = "model", from_: str | None = Query(None, alias="from"), to: str | None = None,
+        provider: str | None = None, model: str | None = None, kind: str | None = None,
+        status: str | None = None, tool: str | None = None, usage_source: str | None = None,
+        cache_status: str | None = None,
+    ) -> dict[str, Any]:
+        owner = usage_owner(request)
+        try:
+            return usage_store.query_breakdown(owner=owner, group_by=group_by, start=_time(from_), end=_time(to), **usage_filters(provider, model, kind, status, tool, usage_source, cache_status))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @router.get("/usage/timeseries")
+    async def usage_timeseries(
+        request: Request, bucket: str = "day", timezone: str = "UTC",
+        from_: str | None = Query(None, alias="from"), to: str | None = None,
+        provider: str | None = None, model: str | None = None, kind: str | None = None,
+        status: str | None = None, tool: str | None = None, usage_source: str | None = None,
+        cache_status: str | None = None,
+    ) -> dict[str, Any]:
+        owner = usage_owner(request)
+        try:
+            return usage_store.query_timeseries(owner=owner, start=_time(from_), end=_time(to), bucket=bucket, timezone_name=timezone, **usage_filters(provider, model, kind, status, tool, usage_source, cache_status))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @router.get("/usage/runs")
+    async def usage_runs(
+        request: Request, limit: int = 100, offset: int = 0, from_: str | None = Query(None, alias="from"), to: str | None = None,
+        provider: str | None = None, model: str | None = None, kind: str | None = None,
+        status: str | None = None, tool: str | None = None, usage_source: str | None = None,
+        cache_status: str | None = None,
+    ) -> dict[str, Any]:
+        owner = usage_owner(request)
+        return usage_store.list_runs(owner=owner, start=_time(from_), end=_time(to), limit=max(1, min(limit, 500)), offset=max(0, offset), **usage_filters(provider, model, kind, status, tool, usage_source, cache_status))
+
+    @router.get("/usage/runs/{run_id}")
+    async def usage_run(request: Request, run_id: str) -> dict[str, Any]:
+        result = usage_store.get_run(owner=usage_owner(request), run_id=run_id)
+        if result is None:
+            raise HTTPException(404, "Usage Run not found")
+        return result
+
+    @router.get("/usage/cache")
+    async def usage_cache(
+        request: Request, from_: str | None = Query(None, alias="from"), to: str | None = None,
+        provider: str | None = None, model: str | None = None, kind: str | None = None,
+        status: str | None = None, tool: str | None = None, usage_source: str | None = None,
+        cache_status: str | None = None,
+    ) -> dict[str, Any]:
+        owner = usage_owner(request)
+        return usage_store.query_summary(owner=owner, start=_time(from_), end=_time(to), **usage_filters(provider, model, kind, status, tool, usage_source, cache_status))
+
+    @router.get("/usage/subscription")
+    async def usage_subscription(request: Request) -> dict[str, Any]:
+        owner = usage_owner(request)
+        return await asyncio.to_thread(subscription_usage_store.refresh_if_stale, owner=owner)
+
+    @router.get("/usage/export")
+    async def usage_export(
+        request: Request, format: str = "jsonl", from_: str | None = Query(None, alias="from"), to: str | None = None,
+        provider: str | None = None, model: str | None = None, kind: str | None = None,
+        status: str | None = None, tool: str | None = None, usage_source: str | None = None,
+        cache_status: str | None = None,
+    ) -> StreamingResponse:
+        owner = usage_owner(request, export=True)
+        try:
+            chunks = usage_store.export(owner=owner, format=format, start=_time(from_), end=_time(to), **usage_filters(provider, model, kind, status, tool, usage_source, cache_status))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        media = "application/x-ndjson" if format == "jsonl" else "text/csv"
+        return StreamingResponse(chunks, media_type=media, headers={"Content-Disposition": f'attachment; filename="odysseus-usage.{format}"'})
+
+    @router.get("/usage/live")
+    async def usage_live(
+        request: Request, from_: str | None = Query(None, alias="from"), to: str | None = None,
+        provider: str | None = None, model: str | None = None, kind: str | None = None,
+        status: str | None = None, tool: str | None = None, usage_source: str | None = None,
+        cache_status: str | None = None,
+    ) -> StreamingResponse:
+        owner = usage_owner(request)
+        filters = usage_filters(provider, model, kind, status, tool, usage_source, cache_status)
+
+        async def events() -> AsyncGenerator[str, None]:
+            fingerprints: dict[str, str] = {}
+            while not await request.is_disconnected():
+                page = usage_store.list_runs(owner=owner, start=_time(from_), end=_time(to), limit=50, **filters)
+                current: dict[str, str] = {}
+                for run in reversed(page["runs"]):
+                    fingerprint = json.dumps(run, sort_keys=True, separators=(",", ":"), default=str)
+                    current[run["id"]] = fingerprint
+                    if fingerprints.get(run["id"]) != fingerprint:
+                        yield json.dumps({"schema": "ody.usage.event.v1", "schema_version": 1, "type": "usage.run", "data": run}) + "\n"
+                fingerprints = current
+                await asyncio.sleep(2)
+
+        return StreamingResponse(events(), media_type=TERMINAL_EVENT_STREAM_MEDIA_TYPE)
 
     @router.get("/sessions")
     async def list_sessions(request: Request) -> dict[str, Any]:

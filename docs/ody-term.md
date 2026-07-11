@@ -7,7 +7,9 @@ bootstrap, capability shapes, file/keychain auth storage, lifecycle inventory
 scaffold, API-backed chat, agent, and harness Run execution, persisted Run
 identity, bounded real Run Event Envelope query/replay, real Run and harness
 lifecycle targets, and the `ody.tui.v1` state model exist. Live JSONL tailing
-is available for API-backed Runs. Production Run and harness status/control
+is available for API-backed Runs. The `usage` domain exposes owner-scoped
+workload accounting, subscription quota, Run detail, live updates, and exports.
+Production Run and harness status/control
 commands use the terminal-client API exclusively; client-local JSON Run state
 is no longer read or written. Managed service, process, and system state is
 available as bounded Event Envelope snapshots through `inspect events
@@ -25,7 +27,7 @@ Final implementation evidence is tracked in
 ody-term [global-options] <domain> <verb> [command-options]
 ```
 
-Canonical domains are `auth`, `config`, `server`, `session`, `run`, `harness`, `service`, `inspect`, and `tui`.
+Canonical domains are `auth`, `config`, `server`, `session`, `run`, `harness`, `service`, `usage`, `inspect`, and `tui`.
 
 Global options include:
 
@@ -54,7 +56,7 @@ the server remains the authorization boundary.
 ```bash
 ody-term auth login \
   --token 'ody_...' \
-  --scopes 'session:read,run:start,run:read,run:stop,event:read,event:raw'
+  --scopes 'session:read,run:start,run:read,run:stop,event:read,event:raw,usage:read,usage:export'
 ody-term auth status --format=json
 ```
 
@@ -108,6 +110,27 @@ ody-term session export ses_abc --export-format md --format=json
 
 Session history responses include linked recent Run summaries separately; they
 do not merge Event Envelopes into persisted conversation history.
+
+Usage accounting is read through the same owner-attributed API token:
+
+```bash
+ody-term usage summary --from 24h
+ody-term usage top models --by cost --limit 10
+ody-term usage timeline --bucket hour --metric cache
+ody-term usage runs --provider chatgpt-subscription
+ody-term usage show run_abc
+ody-term usage cache --from 7d
+ody-term usage subscription
+ody-term usage live --format=jsonl
+ody-term usage export --export-format csv > usage.csv
+```
+
+`usage:read` covers bounded reports, Run detail, subscription snapshots, and
+live updates. `usage:export` is required for CSV/JSONL export. Subscription
+percentages and reset times are provider account facts; token and USD values
+are measured workload facts. Pi harness Codex and other clients sharing the
+same GPT account remain explicitly unattributed unless a credential-linked
+Odysseus model span exists.
 
 `inspect events` reads real chat activity through the Terminal Client API when
 given `--run-id` or `--session-id`. Without either identity it reads local
