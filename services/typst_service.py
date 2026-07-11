@@ -8,10 +8,8 @@ can get live preview semantics without depending on a specific compiler process.
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import json
-import os
 import re
 import shutil
 import tempfile
@@ -27,6 +25,14 @@ class TypstDiagnostic:
     severity: str
     message: str
     raw: str = ""
+
+
+class TypstRevisionConflict(ValueError):
+    """A source update was based on an outdated Typst session revision."""
+
+    def __init__(self, current_revision: int):
+        self.current_revision = current_revision
+        super().__init__(f"Typst source is at revision {current_revision}")
 
 
 @dataclass
@@ -59,8 +65,8 @@ class TypstSession:
     source_revision: int = 0
     asset_revision: int = 0
     last_compiled_revision: int = -1
-    pending_revision: Optional[int] = None
     compiling: bool = False
+    compile_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     backend_name: str = "tinymist"
     auto_refresh: bool = True
     pages: List[TypstPreviewPage] = field(default_factory=list)
@@ -92,11 +98,13 @@ class CliTypstBackend(TypstPreviewBackend):
     def available(self) -> bool:
         return shutil.which(self.command) is not None
 
-    async def _run_compile(self, source: str, suffix: str, timeout: float = 20.0) -> tuple[int, bytes, str, str]:
+    async def _run_compile(self, source: str, suffix: str, timeout: float = 20.0) -> tuple[int, List[bytes], str, str]:
         with tempfile.TemporaryDirectory(prefix="odysseus-typst-") as td:
             root = Path(td)
             inp = root / "main.typ"
-            out = root / f"out.{suffix}"
+            # Typst requires a page-number placeholder for multi-page SVG output.
+            # Always use one so the preview contract can expose every page.
+            out = root / (f"out-{{p}}.{suffix}" if suffix == "svg" else f"out.{suffix}")
             inp.write_text(source or "", encoding="utf-8")
             proc = await asyncio.create_subprocess_exec(
                 self.command, "compile", str(inp), str(out),
@@ -109,19 +117,22 @@ class CliTypstBackend(TypstPreviewBackend):
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.communicate()
-                return 124, b"", "", "Typst compile timed out"
-            data = out.read_bytes() if out.exists() else b""
+                return 124, [], "", "Typst compile timed out"
+            outputs = sorted(root.glob(f"out-*.{suffix}"), key=_page_output_sort_key) if suffix == "svg" else [out]
+            data = [path.read_bytes() for path in outputs if path.exists()]
             return proc.returncode or 0, data, stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace")
 
     async def compile(self, session: TypstSession, source: str, revision: int, fmt: str = "svg") -> CompileResult:
         started = time.time()
-        code, data, stdout, stderr = await self._run_compile(source, "svg")
+        code, outputs, stdout, stderr = await self._run_compile(source, "svg")
         duration = int((time.time() - started) * 1000)
-        if code != 0 or not data:
+        if code != 0 or not outputs:
             raw = (stderr or stdout or "Typst compile failed").strip()
             return CompileResult(False, revision, self.name, diagnostics=_parse_diagnostics(raw), duration_ms=duration, error=raw)
-        svg = data.decode("utf-8", "replace")
-        pages = _split_svg_pages(svg)
+        pages = [
+            _preview_page_from_svg(data.decode("utf-8", "replace"), page=number)
+            for number, data in enumerate(outputs, start=1)
+        ]
         return CompileResult(True, revision, self.name, pages=pages, duration_ms=duration)
 
     async def export(self, session: TypstSession, source: str, fmt: str) -> bytes:
@@ -129,7 +140,11 @@ class CliTypstBackend(TypstPreviewBackend):
         code, data, stdout, stderr = await self._run_compile(source, suffix, timeout=40.0)
         if code != 0 or not data:
             raise RuntimeError((stderr or stdout or "Typst export failed").strip())
-        return data
+        if suffix == "svg" and len(data) != 1:
+            raise RuntimeError(
+                "Multi-page SVG export is not supported; use PDF export or the per-page preview URLs"
+            )
+        return data[0]
 
 
 class TinymistBackend(CliTypstBackend):
@@ -152,14 +167,14 @@ class TinymistBackend(CliTypstBackend):
     def available(self) -> bool:
         return shutil.which("tinymist") is not None or self.fallback.available
 
-    async def _run_compile(self, source: str, suffix: str, timeout: float = 20.0) -> tuple[int, bytes, str, str]:
+    async def _run_compile(self, source: str, suffix: str, timeout: float = 20.0) -> tuple[int, List[bytes], str, str]:
         if shutil.which("tinymist"):
             # Try the Tinymist CLI first.  If this installation does not expose a
             # compile subcommand, gracefully fall back to typst.
             with tempfile.TemporaryDirectory(prefix="odysseus-tinymist-") as td:
                 root = Path(td)
                 inp = root / "main.typ"
-                out = root / f"out.{suffix}"
+                out = root / (f"out-{{p}}.{suffix}" if suffix == "svg" else f"out.{suffix}")
                 inp.write_text(source or "", encoding="utf-8")
                 proc = await asyncio.create_subprocess_exec(
                     "tinymist", "compile", str(inp), str(out),
@@ -168,13 +183,20 @@ class TinymistBackend(CliTypstBackend):
                 try:
                     stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
                 except asyncio.TimeoutError:
-                    proc.kill(); await proc.communicate()
-                    return 124, b"", "", "Tinymist compile timed out"
-                if (proc.returncode or 0) == 0 and out.exists():
-                    return 0, out.read_bytes(), stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace")
+                    proc.kill()
+                    await proc.communicate()
+                    return 124, [], "", "Tinymist compile timed out"
+                outputs = (
+                    sorted(root.glob(f"out-*.{suffix}"), key=_page_output_sort_key)
+                    if suffix == "svg"
+                    else [out]
+                )
+                data = [path.read_bytes() for path in outputs if path.exists()]
+                if (proc.returncode or 0) == 0 and data:
+                    return 0, data, stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace")
                 err = stderr.decode("utf-8", "replace") + stdout.decode("utf-8", "replace")
                 if "compile" not in err.lower() and "error" in err.lower():
-                    return proc.returncode or 1, b"", "", err
+                    return proc.returncode or 1, [], "", err
         return await self.fallback._run_compile(source, suffix, timeout=timeout)
 
 
@@ -193,14 +215,19 @@ def _parse_diagnostics(raw: str) -> List[TypstDiagnostic]:
     return diags or [TypstDiagnostic("error", raw.splitlines()[0], raw)]
 
 
-def _split_svg_pages(svg: str) -> List[TypstPreviewPage]:
-    # Typst may emit one SVG containing all pages or one page. Keep page-level
-    # contract even if backend output is not split yet.
+def _page_output_sort_key(path: Path) -> tuple[int, str]:
+    """Order Typst's numbered SVG outputs numerically, not lexicographically."""
+    match = re.search(r"-(\d+)\.svg$", path.name)
+    return (int(match.group(1)) if match else 0, path.name)
+
+
+def _preview_page_from_svg(svg: str, page: int = 1) -> TypstPreviewPage:
+    """Build one preview page from an SVG emitted by Typst."""
     m = re.search(r'<svg[^>]*\bwidth="([0-9.]+)[^"]*"[^>]*\bheight="([0-9.]+)[^"]*"', svg)
     width = float(m.group(1)) if m else None
     height = float(m.group(2)) if m else None
     h = hashlib.sha256(svg.encode("utf-8", "replace")).hexdigest()
-    return [TypstPreviewPage(page=1, width=width, height=height, hash=h, svg=svg)]
+    return TypstPreviewPage(page=page, width=width, height=height, hash=h, svg=svg)
 
 
 class TypstSessionManager:
@@ -236,30 +263,52 @@ class TypstSessionManager:
     def update_source(self, sess: TypstSession, source: str, revision: Optional[int]) -> int:
         if revision is None:
             revision = sess.source_revision + 1
-        if revision < sess.source_revision:
-            return sess.source_revision
-        sess.source = source or ""
+        normalized_source = source or ""
+        if revision < sess.source_revision or (
+            revision == sess.source_revision and normalized_source != sess.source
+        ):
+            raise TypstRevisionConflict(sess.source_revision)
+        if revision == sess.source_revision:
+            return revision
+        sess.source = normalized_source
         sess.source_revision = revision
         sess.last_accessed_at = time.time()
         self._publish(sess, {"type": "source-updated", "sessionId": sess.id, "revision": revision})
         return revision
 
     async def request_compile(self, sess: TypstSession, revision: Optional[int] = None) -> CompileResult:
-        sess.pending_revision = revision if revision is not None else sess.source_revision
-        if sess.compiling:
-            return CompileResult(True, sess.pending_revision, sess.backend_name, pages=sess.pages, diagnostics=sess.diagnostics)
-        result: Optional[CompileResult] = None
-        while sess.pending_revision is not None:
-            target = sess.pending_revision
-            sess.pending_revision = None
+        target = revision if revision is not None else sess.source_revision
+        if target != sess.source_revision:
+            raise TypstRevisionConflict(sess.source_revision)
+        async with sess.compile_lock:
+            if target != sess.source_revision:
+                raise TypstRevisionConflict(sess.source_revision)
+            source = sess.source
             sess.compiling = True
             self._publish(sess, {"type": "compile-started", "sessionId": sess.id, "revision": target})
             backend = self.backends.get(sess.backend_name) or self.backends["tinymist"]
-            if not getattr(backend, "available", False):
-                result = CompileResult(False, target, backend.name, error="Neither tinymist nor typst CLI is installed", diagnostics=[TypstDiagnostic("error", "Neither tinymist nor typst CLI is installed")])
-            else:
-                result = await backend.compile(sess, sess.source, target, "svg")
-            sess.compiling = False
+            try:
+                if not getattr(backend, "available", False):
+                    result = CompileResult(
+                        False,
+                        target,
+                        backend.name,
+                        error="Neither tinymist nor typst CLI is installed",
+                        diagnostics=[TypstDiagnostic("error", "Neither tinymist nor typst CLI is installed")],
+                    )
+                else:
+                    result = await backend.compile(sess, source, target, "svg")
+            except Exception as exc:
+                message = str(exc) or "Typst compile failed"
+                result = CompileResult(
+                    False,
+                    target,
+                    backend.name,
+                    error=message,
+                    diagnostics=[TypstDiagnostic("error", message)],
+                )
+            finally:
+                sess.compiling = False
             if target == sess.source_revision:
                 sess.last_compiled_revision = target if result.ok else sess.last_compiled_revision
                 sess.pages = result.pages if result.ok else sess.pages
@@ -270,7 +319,7 @@ class TypstSessionManager:
                 self._publish(sess, payload)
             else:
                 self._publish(sess, {"type": "compile-stale", "sessionId": sess.id, "revision": target, "currentRevision": sess.source_revision})
-        return result or CompileResult(True, sess.source_revision, sess.backend_name, pages=sess.pages, diagnostics=sess.diagnostics)
+            return result
 
     async def export(self, sess: TypstSession, fmt: str) -> bytes:
         if fmt == "typ":

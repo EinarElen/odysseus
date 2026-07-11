@@ -10025,7 +10025,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     _typstEventSource.addEventListener('compile-error', onDone);
   }
 
-  async function _syncAndCompileTypst({ force = false } = {}) {
+  async function _syncAndCompileTypst({ force = false, conflictRetry = false } = {}) {
     const ta = document.getElementById('doc-editor-textarea');
     if (!ta || !activeDocId || docs.get(activeDocId)?.language !== 'typst') return;
     if (!_typstPreviewActive && !force) return;
@@ -10038,6 +10038,11 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         body: JSON.stringify({ source: ta.value || '', revision, compile: true }),
       });
       const data = await res.json().catch(() => ({}));
+      if (res.status === 409 && data.detail?.code === 'revision_conflict') {
+        if (conflictRetry) throw new Error('Typst source kept changing; retry the preview');
+        _typstRevision = Math.max(_typstRevision, data.detail.currentRevision || 0);
+        return _syncAndCompileTypst({ force: true, conflictRetry: true });
+      }
       if (!res.ok) throw new Error(data.detail || data.error || `HTTP ${res.status}`);
       if (data.compile) _applyTypstResult(data.compile);
     } catch (err) {
