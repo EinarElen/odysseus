@@ -41,6 +41,14 @@ from src.agent_tools import (
 )
 from src.tools.model import ToolInvocation
 from src.tools.registry import display_action_for_invocation, native_call_to_invocation
+from src.usage_observability import (
+    RunContext as UsageRunContext,
+    RunOutcome as UsageRunOutcome,
+    SpanContext as UsageSpanContext,
+    SpanOutcome as UsageSpanOutcome,
+    UsageObservation as MeteredUsage,
+    usage_store,
+)
 
 logger = logging.getLogger(__name__)
 _DEFAULT_EXECUTE_TOOL_BLOCK = execute_tool_block
@@ -2638,6 +2646,7 @@ async def stream_agent_loop(
     workload: str = "foreground",
     provider_options: Optional[Dict] = None,
     _is_teacher_run: bool = False,
+    incognito: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
 
@@ -2803,6 +2812,7 @@ async def stream_agent_loop(
             "agent_rounds": 0,
             "tool_calls": 0,
             "direct_low_signal": True,
+            "usage_source": "real" if (real_input_tokens or real_output_tokens) else "estimated",
         }
         yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
         yield "data: [DONE]\n\n"
@@ -3300,6 +3310,11 @@ async def stream_agent_loop(
 
     full_response = ""
     total_start = time.time()
+    _usage_run = usage_store.begin_run(UsageRunContext(
+        owner=owner or "local", kind="agent", source_surface="web",
+        session_id=session_id, incognito=incognito,
+    ))
+    _usage_turn = _usage_run.begin_span(UsageSpanContext(kind="turn", name="agent.turn"))
     time_to_first_token = None
     first_token_received = False
     tool_events = []   # Persist tool executions for history reload
@@ -3312,6 +3327,7 @@ async def stream_agent_loop(
     _verifier_instruction = _extract_last_user_message(messages)
     real_input_tokens = 0   # Accumulated real usage from API
     real_output_tokens = 0
+    round_usage = []       # Exact per-model-call facts for the usage ledger
     last_round_input_tokens = 0  # Last round's input tokens (for context % peak)
     has_real_usage = False
     backend_gen_tps = 0      # backend-reported true gen speed (llama.cpp timings)
@@ -3370,6 +3386,17 @@ async def stream_agent_loop(
     _exhausted_rounds = False
 
     for round_num in range(1, max_rounds + 1):
+        _round_usage = {
+            "input_tokens": 0, "output_tokens": 0, "reasoning_tokens": None,
+            "cache_read_tokens": None, "cache_write_tokens": None,
+            "fresh_input_tokens": None,
+        }
+        _round_has_usage = False
+        _usage_model_span = _usage_run.begin_span(UsageSpanContext(
+            kind="model", name="model.generate", parent_span_id=_usage_turn.id,
+            agent_round=round_num, requested_model=requested_model,
+            actual_model=actual_model,
+        ))
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
         native_tool_calls = []  # populated if model uses function calling
@@ -3551,6 +3578,31 @@ async def stream_agent_loop(
                         real_output_tokens += u.get("output_tokens", 0)
                         last_round_input_tokens = round_input
                         has_real_usage = True
+                        _usage_model_span.record_usage(MeteredUsage(
+                            source="provider",
+                            input_tokens=u.get("input_tokens"), output_tokens=u.get("output_tokens"),
+                            reasoning_tokens=u.get("reasoning_tokens"),
+                            cache_read_tokens=u.get("cache_read_tokens"),
+                            cache_write_tokens=u.get("cache_write_tokens"),
+                            fresh_input_tokens=u.get("fresh_input_tokens"),
+                            is_final=False,
+                        ))
+                        _round_has_usage = True
+                        _round_usage["input_tokens"] += u.get("input_tokens", 0) or 0
+                        _round_usage["output_tokens"] += u.get("output_tokens", 0) or 0
+                        for _usage_key in ("reasoning_tokens", "cache_read_tokens", "cache_write_tokens", "fresh_input_tokens"):
+                            if u.get(_usage_key) is not None:
+                                _round_usage[_usage_key] = (_round_usage[_usage_key] or 0) + u[_usage_key]
+                        round_usage.append({
+                            "round": round_num,
+                            "model": u.get("model") or actual_model,
+                            "requested_model": u.get("requested_model") or requested_model,
+                            "usage_source": "provider",
+                            **{key: u.get(key) for key in (
+                                "input_tokens", "output_tokens", "reasoning_tokens",
+                                "cache_read_tokens", "cache_write_tokens", "fresh_input_tokens",
+                            )},
+                        })
                         # Backend-reported TRUE generation speed (llama.cpp
                         # timings.predicted_per_second) — pure decode, excludes
                         # prefill/network. Preferred over tokens/wall-clock, which
@@ -3563,6 +3615,15 @@ async def stream_agent_loop(
                         # The selected model failed and another answered; surface
                         # the notice so a misconfigured provider isn't masked.
                         actual_model = data.get("answered_by") or actual_model
+                        _usage_model_span.set_route(actual_model=actual_model)
+                        _fallback_span = _usage_run.begin_span(UsageSpanContext(
+                            kind="fallback", name="model.fallback", parent_span_id=_usage_turn.id,
+                            agent_round=round_num,
+                            requested_model=data.get("selected_model") or requested_model,
+                            actual_model=actual_model,
+                            attributes={"reason": str(data.get("reason") or "")[:200]},
+                        ))
+                        _fallback_span.finish(UsageSpanOutcome(status="failed", outcome_code="primary_failed", timing_known=False))
                         logger.warning(f"[agent] round {round_num} fell back: "
                                        f"{data.get('selected_model')} -> {data.get('answered_by')}")
                         yield chunk
@@ -3680,6 +3741,9 @@ async def stream_agent_loop(
             _round_first_event_logged,
             _round_first_token_logged,
         )
+        if _round_has_usage:
+            _usage_model_span.record_usage(MeteredUsage(source="provider", **_round_usage))
+        _usage_model_span.finish(UsageSpanOutcome(duration_ms=round((time.time() - _round_start) * 1000)))
         _normalized_doc_round = (
             _normalize_stream_document_fences(
                 round_response,
@@ -4092,6 +4156,12 @@ async def stream_agent_loop(
                 budget_hit = True
                 break
 
+            _usage_tool_span = _usage_run.begin_span(UsageSpanContext(
+                kind="tool", name=f"tool.{block.tool_type}", parent_span_id=_usage_turn.id,
+                agent_round=round_num, tool_name=block.tool_type,
+            ))
+            _usage_tool_started = time.time()
+
             total_tool_calls += 1
             # Build a short display string for the frontend tool bubble.
             # Document tools show a brief summary instead of dumping full content.
@@ -4161,6 +4231,11 @@ async def stream_agent_loop(
                         f'data: {json.dumps({"type": "tool_progress", "tool": block.tool_type, "round": round_num, **evt})}\n\n'
                     )
                 desc, result = await _tool_task
+
+            _usage_tool_span.finish(UsageSpanOutcome(
+                status="failed" if result.get("exit_code") not in (None, 0) or result.get("error") else "succeeded",
+                duration_ms=round((time.time() - _usage_tool_started) * 1000),
+            ))
 
             # A skill the model just loaded can prescribe tools that weren't
             # RAG-selected this turn (declared via requires_toolsets in its
@@ -4589,6 +4664,12 @@ async def stream_agent_loop(
         backend_prefill_tps=backend_prefill_tps,
     )
     metrics["requested_model"] = requested_model
+    if round_usage:
+        metrics["round_usage"] = round_usage
+    if _usage_run.id:
+        metrics["usage_run_id"] = _usage_run.id
+    _usage_turn.finish(UsageSpanOutcome(duration_ms=round(total_duration * 1000)))
+    _usage_run.finish(UsageRunOutcome())
     yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
 
     # Teacher-escalation: inline takeover visible in the chat stream.

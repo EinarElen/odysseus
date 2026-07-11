@@ -65,6 +65,7 @@ Vendored in `static/lib/` and served directly:
 | [jsPDF](https://github.com/parallax/jsPDF) (bundled in html2pdf) | PDF generation | MIT |
 | [html2canvas](https://github.com/niklasvh/html2canvas) (bundled in html2pdf) | DOM → canvas rasterization | MIT |
 | [node-qrcode](https://github.com/soldair/node-qrcode) (`qrcode.min.js`) | QR-code rendering (2FA setup) | MIT |
+| [Apache ECharts](https://github.com/apache/echarts) 5.6.0 (`echarts.min.js`) | Interactive Usage observability charts | Apache-2.0 ([license](licenses/echarts-Apache-2.0-LICENSE.txt)) |
 
 ## Front-end libraries loaded at runtime (CDN)
 

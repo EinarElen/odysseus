@@ -1053,6 +1053,23 @@ def save_assistant_response(
     if tool_events:
         md["tool_events"] = tool_events
 
+    # Persist authoritative usage/activity facts independently from message
+    # metadata. Incognito is an explicit no-op in the accounting module.
+    try:
+        from src.usage_observability import record_completed_turn
+        _usage_run_id = md.get("usage_run_id") or record_completed_turn(
+                owner=getattr(sess, "owner", None) or "local",
+                session_id=session_id,
+                kind="agent" if tool_events or md.get("agent_rounds") else "chat",
+                source_surface="web",
+                metrics=md,
+                incognito=incognito,
+            )
+        if _usage_run_id:
+            md["usage_run_id"] = _usage_run_id
+    except Exception:
+        logger.warning("Usage accounting failed for session %s", session_id, exc_info=True)
+
     # Extract thinking into metadata (don't pollute message content with <think> tags)
     _think_info = _extract_thinking_meta(full_response)
     if _think_info:

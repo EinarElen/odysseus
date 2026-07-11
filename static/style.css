@@ -41559,3 +41559,78 @@ body.theme-frosted .modal {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+/* Usage observability workspace */
+.usage-workspace {
+  position: fixed;
+  inset: 0;
+  z-index: 12000;
+  display: none;
+  flex-direction: column;
+  color: var(--fg);
+  background: var(--bg);
+}
+.usage-workspace.open { display: flex; }
+.usage-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 22px 28px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.usage-header h1 { margin: 0; font-size: 24px; letter-spacing: -.03em; }
+.usage-header p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+.usage-actions { display: flex; align-items: center; gap: 10px; }
+.usage-actions label { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
+.usage-actions select, .usage-actions button {
+  min-height: 34px;
+  padding: 6px 10px;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel-2, var(--panel));
+}
+#usage-close { width: 36px; font-size: 20px; line-height: 1; }
+.usage-tabs { display: flex; gap: 2px; padding: 0 28px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.usage-tabs button { padding: 12px 16px; color: var(--muted); border: 0; border-bottom: 2px solid transparent; background: transparent; }
+.usage-tabs button.active { color: var(--fg); border-bottom-color: var(--accent, #d66); }
+.usage-body { flex: 1; min-height: 0; padding: 22px 28px 40px; overflow: auto; }
+.usage-error:not(:empty) { margin-bottom: 14px; padding: 10px 12px; color: var(--accent-error, #e66); border: 1px solid color-mix(in srgb, var(--accent-error, #e66) 35%, transparent); border-radius: 7px; }
+.usage-kpis { display: grid; grid-template-columns: repeat(6, minmax(125px, 1fr)); gap: 10px; margin-bottom: 18px; }
+.usage-kpis article, .usage-chart-grid article, .usage-view > article {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.usage-kpis article { display: flex; flex-direction: column; min-height: 92px; padding: 14px; }
+.usage-kpis span { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+.usage-kpis strong { margin: 8px 0 4px; font-size: 22px; font-variant-numeric: tabular-nums; }
+.usage-kpis small { color: var(--muted); }
+.usage-chart-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr); gap: 14px; }
+.usage-chart-grid article, .usage-view > article { min-width: 0; padding: 16px; }
+.usage-chart-grid h2, .usage-view > article h2, .usage-run-detail h2 { margin: 0 0 12px; font-size: 14px; }
+.usage-chart { width: 100%; height: 330px; }
+.usage-chart-wide { height: 390px; }
+.usage-data-table { margin-top: 10px; color: var(--muted); font-size: 11px; }
+.usage-data-table table, .usage-table-wrap table { width: 100%; border-collapse: collapse; }
+.usage-data-table th, .usage-data-table td, .usage-table-wrap th, .usage-table-wrap td { padding: 9px 10px; border-bottom: 1px solid var(--border); text-align: left; font-variant-numeric: tabular-nums; }
+.usage-table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
+.usage-table-wrap tbody tr { cursor: pointer; }
+.usage-table-wrap tbody tr:hover, .usage-table-wrap tbody tr:focus { background: color-mix(in srgb, var(--fg) 5%, transparent); outline: none; }
+.usage-status { font-size: 11px; text-transform: capitalize; }
+.usage-status-failed { color: var(--accent-error, #e66); }
+.usage-status-running { color: #e0a84f; }
+.usage-run-detail { position: fixed; z-index: 12002; inset: 90px 28px 28px auto; width: min(560px, calc(100vw - 56px)); padding: 20px; overflow: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); box-shadow: 0 18px 70px #0008; }
+.usage-detail-close { float: right; color: var(--fg); border: 0; background: none; font-size: 20px; }
+.usage-waterfall { display: grid; gap: 6px; margin-top: 20px; }
+.usage-waterfall > div { display: flex; justify-content: space-between; gap: 12px; margin-left: calc(var(--depth) * 18px); padding: 10px; border-left: 3px solid var(--accent, #d66); background: color-mix(in srgb, var(--fg) 4%, transparent); }
+.usage-waterfall span { color: var(--muted); font-size: 11px; text-align: right; }
+@media (max-width: 900px) {
+  .usage-header { align-items: flex-start; padding: 16px; }
+  .usage-actions { flex-wrap: wrap; justify-content: flex-end; }
+  .usage-tabs { padding: 0 12px; overflow-x: auto; }
+  .usage-body { padding: 14px; }
+  .usage-kpis { grid-template-columns: repeat(2, 1fr); }
+  .usage-chart-grid { grid-template-columns: 1fr; }
+}

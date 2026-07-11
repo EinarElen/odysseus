@@ -689,6 +689,10 @@ app.include_router(setup_chat_routes(
     skills_manager=skills_manager,
 ))
 
+# Server-side token/cache/cost and activity observability.
+from routes.usage_routes import setup_usage_routes
+app.include_router(setup_usage_routes())
+
 from routes.terminal_client_routes import setup_terminal_client_routes
 app.include_router(setup_terminal_client_routes(
     session_manager=session_manager,

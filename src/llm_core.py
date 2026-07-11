@@ -2388,7 +2388,17 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                         input_tokens = usage.get("input_tokens") or usage.get("prompt_tokens") or input_tokens
                         output_tokens = usage.get("output_tokens") or usage.get("completion_tokens") or output_tokens
                         if input_tokens or output_tokens:
-                            yield f'data: {json.dumps({"type": "usage", "data": {"input_tokens": input_tokens, "output_tokens": output_tokens}})}\n\n'
+                            _input_details = usage.get("input_tokens_details") or usage.get("prompt_tokens_details") or {}
+                            _output_details = usage.get("output_tokens_details") or usage.get("completion_tokens_details") or {}
+                            _usage_data = {
+                                "input_tokens": input_tokens,
+                                "output_tokens": output_tokens,
+                                "cache_read_tokens": _input_details.get("cached_tokens"),
+                                "reasoning_tokens": _output_details.get("reasoning_tokens"),
+                            }
+                            if _usage_data["cache_read_tokens"] is not None:
+                                _usage_data["fresh_input_tokens"] = max(input_tokens - _usage_data["cache_read_tokens"], 0)
+                            yield f'data: {json.dumps({"type": "usage", "data": _usage_data})}\n\n'
                         yield "data: [DONE]\n\n"
                         return
                     elif evt in ("response.failed", "error"):
@@ -2477,6 +2487,8 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     if provider == "anthropic":
         _anth_input_tokens = 0
         _anth_output_tokens = 0
+        _c_read = 0
+        _c_write = 0
         # Track tool_use blocks: {index: {id, name, arguments_json}}
         _anth_tool_blocks: Dict[int, Dict] = {}
         _anth_block_idx = -1
@@ -2556,7 +2568,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                     })
                                 yield f'data: {json.dumps({"type": "tool_calls", "calls": calls})}\n\n'
                             if _anth_input_tokens or _anth_output_tokens:
-                                yield f'data: {json.dumps({"type": "usage", "data": {"input_tokens": _anth_input_tokens, "output_tokens": _anth_output_tokens}})}\n\n'
+                                yield f'data: {json.dumps({"type": "usage", "data": {"input_tokens": _anth_input_tokens, "output_tokens": _anth_output_tokens, "fresh_input_tokens": _anth_input_tokens, "cache_read_tokens": _c_read, "cache_write_tokens": _c_write}})}\n\n'
                             yield "data: [DONE]\n\n"
                             return
                         elif evt == "error":
@@ -2679,6 +2691,13 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                 if "usage" in j and not _delta_has_output:
                                     u = j["usage"] or {}
                                     _usage_data = {"input_tokens": u.get("prompt_tokens", 0), "output_tokens": u.get("completion_tokens", 0)}
+                                    _prompt_details = u.get("prompt_tokens_details") or {}
+                                    _completion_details = u.get("completion_tokens_details") or {}
+                                    if "cached_tokens" in _prompt_details:
+                                        _usage_data["cache_read_tokens"] = _prompt_details.get("cached_tokens")
+                                        _usage_data["fresh_input_tokens"] = max(_usage_data["input_tokens"] - (_prompt_details.get("cached_tokens") or 0), 0)
+                                    if "reasoning_tokens" in _completion_details:
+                                        _usage_data["reasoning_tokens"] = _completion_details.get("reasoning_tokens")
                                     # llama.cpp puts a `timings` block alongside `usage` with the
                                     # TRUE generation speed (predicted_per_second) — pure decode,
                                     # excluding prefill/network. Pass it through so the UI shows the

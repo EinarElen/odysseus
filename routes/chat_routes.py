@@ -46,6 +46,14 @@ from src.action_intents import ToolIntent, classify_tool_intent as _classify_too
 from src.tool_policy import build_effective_tool_policy
 from src.agent_access import resolve_agent_access
 from src.agent_runtime import resolve_agent_execution_limits
+from src.usage_observability import (
+    RunContext as UsageRunContext,
+    RunOutcome as UsageRunOutcome,
+    SpanContext as UsageSpanContext,
+    SpanOutcome as UsageSpanOutcome,
+    UsageObservation as MeteredUsage,
+    usage_store,
+)
 from src.harness import get_harness_adapter, harness_config_from_session, is_harness_session
 from src.harness.transcript import (
     finish_harness_run,
@@ -1708,6 +1716,16 @@ def setup_chat_routes(
                 _answered_by = None  # set if the selected model failed and a fallback answered
                 _requested_model = sess.model
                 _actual_model = None
+                _usage_run = usage_store.begin_run(UsageRunContext(
+                    owner=_user or "local", kind="chat", source_surface="web",
+                    session_id=session, incognito=incognito,
+                ))
+                _usage_turn = _usage_run.begin_span(UsageSpanContext(kind="turn", name="chat.turn"))
+                _usage_model = _usage_run.begin_span(UsageSpanContext(
+                    kind="model", name="model.generate", parent_span_id=_usage_turn.id,
+                    requested_model=_requested_model, actual_model=_requested_model,
+                ))
+                _usage_recorded = False
                 # ── Chat mode: call stream_llm directly, NO tools, NO document access ──
                 try:
                     _chat_candidates = [(sess.endpoint_url, sess.model, sess.headers)] + _fallback_candidates
@@ -1745,6 +1763,14 @@ def setup_chat_routes(
                                     # Forward the notice and remember the real model.
                                     _answered_by = data.get("answered_by") or _answered_by
                                     _actual_model = _actual_model or _answered_by
+                                    _usage_model.set_route(actual_model=_answered_by)
+                                    _fallback_span = _usage_run.begin_span(UsageSpanContext(
+                                        kind="fallback", name="model.fallback", parent_span_id=_usage_turn.id,
+                                        requested_model=data.get("selected_model") or _requested_model,
+                                        actual_model=_answered_by,
+                                        attributes={"reason": str(data.get("reason") or "")[:200]},
+                                    ))
+                                    _fallback_span.finish(UsageSpanOutcome(status="failed", outcome_code="primary_failed", timing_known=False))
                                     data["selected_model"] = data.get("selected_model") or _requested_model
                                     yield chunk
                                 elif data.get("type") == "model_actual":
@@ -1753,6 +1779,17 @@ def setup_chat_routes(
                                     yield f'data: {json.dumps(data)}\n\n'
                                 elif data.get("type") == "usage":
                                     last_metrics = data.get("data", {})
+                                    last_metrics.setdefault("usage_source", "real")
+                                    _usage_model.record_usage(MeteredUsage(
+                                        source="provider", input_tokens=last_metrics.get("input_tokens"),
+                                        output_tokens=last_metrics.get("output_tokens"),
+                                        reasoning_tokens=last_metrics.get("reasoning_tokens"),
+                                        cache_read_tokens=last_metrics.get("cache_read_tokens"),
+                                        cache_write_tokens=last_metrics.get("cache_write_tokens"),
+                                        fresh_input_tokens=last_metrics.get("fresh_input_tokens"),
+                                        is_final=False,
+                                    ))
+                                    _usage_recorded = True
                                     _reported_model = last_metrics.get("model")
                                     last_metrics["requested_model"] = _requested_model
                                     last_metrics["model"] = _reported_model or _actual_model or _answered_by or _requested_model
@@ -1803,6 +1840,27 @@ def setup_chat_routes(
                                     "usage_source": "estimated",
                                 }
                                 yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
+                            if not _usage_recorded and last_metrics:
+                                _usage_model.record_usage(MeteredUsage(
+                                    source="estimated", input_tokens=last_metrics.get("input_tokens"),
+                                    output_tokens=last_metrics.get("output_tokens"),
+                                ))
+                            elif _usage_recorded and last_metrics:
+                                _usage_model.record_usage(MeteredUsage(
+                                    source="provider", input_tokens=last_metrics.get("input_tokens"),
+                                    output_tokens=last_metrics.get("output_tokens"),
+                                    reasoning_tokens=last_metrics.get("reasoning_tokens"),
+                                    cache_read_tokens=last_metrics.get("cache_read_tokens"),
+                                    cache_write_tokens=last_metrics.get("cache_write_tokens"),
+                                    fresh_input_tokens=last_metrics.get("fresh_input_tokens"),
+                                ))
+                            _duration_ms = round((time.time() - _chat_start) * 1000)
+                            _usage_model.finish(UsageSpanOutcome(duration_ms=_duration_ms))
+                            _usage_turn.finish(UsageSpanOutcome(duration_ms=_duration_ms))
+                            _usage_run.finish(UsageRunOutcome())
+                            if _usage_run.id:
+                                last_metrics = dict(last_metrics or {})
+                                last_metrics["usage_run_id"] = _usage_run.id
                             if full_response:
                                 _metrics_to_save = dict(last_metrics or {})
                                 if thinking_response.strip() and not _metrics_to_save.get("thinking"):
@@ -1830,6 +1888,9 @@ def setup_chat_routes(
                             _stream_set(session, status="done")
                             yield chunk
                 except (asyncio.CancelledError, GeneratorExit):
+                    _usage_model.finish(UsageSpanOutcome(status="cancelled", duration_ms=round((time.time() - _chat_start) * 1000)))
+                    _usage_turn.finish(UsageSpanOutcome(status="cancelled", duration_ms=round((time.time() - _chat_start) * 1000)))
+                    _usage_run.finish(UsageRunOutcome(status="cancelled"))
                     if full_response:
                         logger.info("Client disconnected mid-stream (chat mode) for session %s, saving partial (%d chars)", session, len(full_response))
                         _stopped_content, _stopped_md = clean_thinking_for_save(
@@ -1888,6 +1949,7 @@ def setup_chat_routes(
                         forced_tools=_forced_tools,
                         uploaded_files=ctx.uploaded_files,
                         provider_options=getattr(sess, "provider_options", None) or {},
+                        incognito=incognito,
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:
@@ -1933,6 +1995,7 @@ def setup_chat_routes(
                                     yield f'data: {json.dumps(data)}\n\n'
                                 elif data.get("type") == "metrics":
                                     last_metrics = data.get("data", {})
+                                    last_metrics.setdefault("usage_source", "real")
                                     _reported_model = last_metrics.get("model")
                                     last_metrics["requested_model"] = last_metrics.get("requested_model") or _requested_model
                                     last_metrics["model"] = _reported_model or _actual_model or _answered_by or _requested_model
@@ -2012,6 +2075,7 @@ def setup_chat_routes(
                 async for chunk in stream_with_save():
                     yield chunk
             finally:
+                usage_store.finish_active_run(owner=_user or "local", session_id=session, status="interrupted")
                 _active_streams.pop(session, None)
 
         # Compare panes are short-lived, single-shot generations whose sessions

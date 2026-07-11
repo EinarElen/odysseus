@@ -213,6 +213,132 @@ class ChatMessage(Base):
         Index('ix_messages_session_time', 'session_id', 'timestamp'),  # Composite for efficient message retrieval
     )
 
+
+class UsageRun(Base):
+    """Root execution record for server-side usage accounting."""
+    __tablename__ = "usage_runs"
+
+    id = Column(String, primary_key=True)
+    owner = Column(String, nullable=False, index=True)
+    kind = Column(String, nullable=False, index=True)
+    status = Column(String, nullable=False, default="running", index=True)
+    source_surface = Column(String, nullable=False, default="internal")
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True, index=True)
+    task_id = Column(String, nullable=True, index=True)
+    research_session_id = Column(String, nullable=True)
+    comparison_id = Column(String, nullable=True)
+    harness_session_id = Column(String, nullable=True)
+    started_at = Column(DateTime, nullable=False, default=utcnow_naive, index=True)
+    finished_at = Column(DateTime, nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+    error_code = Column(String, nullable=True)
+    attributes_json = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
+    __table_args__ = (
+        Index("ix_usage_runs_owner_started", "owner", "started_at"),
+        Index("ix_usage_runs_owner_kind_started", "owner", "kind", "started_at"),
+        Index("ix_usage_runs_owner_session_started", "owner", "session_id", "started_at"),
+    )
+
+
+class UsageSpan(Base):
+    """Timed activity nested inside a usage Run."""
+    __tablename__ = "usage_spans"
+
+    id = Column(String, primary_key=True)
+    run_id = Column(String, ForeignKey("usage_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    parent_span_id = Column(String, ForeignKey("usage_spans.id", ondelete="CASCADE"), nullable=True, index=True)
+    owner = Column(String, nullable=False, index=True)
+    kind = Column(String, nullable=False, index=True)
+    name = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="running")
+    sequence = Column(Integer, nullable=False)
+    agent_round = Column(Integer, nullable=True)
+    started_at = Column(DateTime, nullable=False, default=utcnow_naive, index=True)
+    finished_at = Column(DateTime, nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+    provider = Column(String, nullable=True, index=True)
+    endpoint_id = Column(String, nullable=True)
+    requested_model = Column(String, nullable=True, index=True)
+    actual_model = Column(String, nullable=True, index=True)
+    tool_name = Column(String, nullable=True, index=True)
+    outcome_code = Column(String, nullable=True)
+    attributes_json = Column(JSON, nullable=False, default=dict)
+
+    __table_args__ = (
+        Index("ix_usage_spans_owner_run_sequence", "owner", "run_id", "sequence"),
+        Index("ix_usage_spans_owner_kind_started", "owner", "kind", "started_at"),
+        Index("ix_usage_spans_owner_model_started", "owner", "actual_model", "started_at"),
+        Index("ix_usage_spans_owner_tool_started", "owner", "tool_name", "started_at"),
+    )
+
+
+class UsageObservation(Base):
+    """Immutable metered-resource observation for one activity span."""
+    __tablename__ = "usage_observations"
+
+    id = Column(String, primary_key=True)
+    run_id = Column(String, ForeignKey("usage_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    span_id = Column(String, ForeignKey("usage_spans.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner = Column(String, nullable=False, index=True)
+    observed_at = Column(DateTime, nullable=False, default=utcnow_naive, index=True)
+    sequence = Column(Integer, nullable=False)
+    is_final = Column(Boolean, nullable=False, default=True, index=True)
+    reconciliation_version = Column(Integer, nullable=False, default=1)
+    source = Column(String, nullable=False)
+    input_tokens = Column(Integer, nullable=True)
+    output_tokens = Column(Integer, nullable=True)
+    reasoning_tokens = Column(Integer, nullable=True)
+    cache_read_tokens = Column(Integer, nullable=True)
+    cache_write_tokens = Column(Integer, nullable=True)
+    fresh_input_tokens = Column(Integer, nullable=True)
+    audio_input_tokens = Column(Integer, nullable=True)
+    audio_output_tokens = Column(Integer, nullable=True)
+    image_input_units = Column(Integer, nullable=True)
+    image_output_units = Column(Integer, nullable=True)
+    request_count = Column(Integer, nullable=False, default=1)
+    currency = Column(String, nullable=False, default="USD")
+    input_cost_micros = Column(Integer, nullable=True)
+    output_cost_micros = Column(Integer, nullable=True)
+    cache_read_cost_micros = Column(Integer, nullable=True)
+    cache_write_cost_micros = Column(Integer, nullable=True)
+    other_cost_micros = Column(Integer, nullable=True)
+    total_cost_micros = Column(Integer, nullable=True)
+    cost_source = Column(String, nullable=True)
+    price_snapshot_id = Column(String, ForeignKey("usage_price_snapshots.id", ondelete="SET NULL"), nullable=True)
+    raw_usage_json = Column(JSON, nullable=False, default=dict)
+
+    __table_args__ = (
+        Index("ix_usage_observations_owner_observed", "owner", "observed_at"),
+        Index("ix_usage_observations_owner_final_observed", "owner", "is_final", "observed_at"),
+        Index("ix_usage_observations_span_final", "span_id", "is_final"),
+        Index(
+            "uq_usage_observation_final_version", "span_id", "reconciliation_version",
+            unique=True, sqlite_where=text("is_final = 1"), postgresql_where=text("is_final = true"),
+        ),
+    )
+
+
+class UsagePriceSnapshot(Base):
+    """Immutable USD pricing rule used to reproduce historical costs."""
+    __tablename__ = "usage_price_snapshots"
+
+    id = Column(String, primary_key=True)
+    provider = Column(String, nullable=False, index=True)
+    model_pattern = Column(String, nullable=False)
+    currency = Column(String, nullable=False, default="USD")
+    input_per_million_micros = Column(Integer, nullable=True)
+    output_per_million_micros = Column(Integer, nullable=True)
+    cache_read_per_million_micros = Column(Integer, nullable=True)
+    cache_write_per_million_micros = Column(Integer, nullable=True)
+    reasoning_per_million_micros = Column(Integer, nullable=True)
+    unit_prices_json = Column(JSON, nullable=False, default=dict)
+    effective_from = Column(DateTime, nullable=False, index=True)
+    effective_to = Column(DateTime, nullable=True)
+    source_url = Column(String, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
 class Document(TimestampMixin, Base):
     """Living document that the AI can create and edit in-place."""
     __tablename__ = "documents"
@@ -1241,6 +1367,27 @@ def _migrate_add_token_columns():
         except Exception:
             pass
 
+
+def _migrate_usage_observation_columns():
+    """Bring pre-release usage-ledger SQLite databases up to date."""
+    if engine.dialect.name != "sqlite":
+        return
+    try:
+        with engine.begin() as conn:
+            tables = {row[0] for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))}
+            if "usage_observations" not in tables:
+                return
+            columns = {row[1] for row in conn.execute(text("PRAGMA table_info(usage_observations)"))}
+            if "reconciliation_version" not in columns:
+                conn.execute(text("ALTER TABLE usage_observations ADD COLUMN reconciliation_version INTEGER NOT NULL DEFAULT 1"))
+            conn.execute(text("DROP INDEX IF EXISTS uq_usage_observation_final_version"))
+            conn.execute(text(
+                "CREATE UNIQUE INDEX uq_usage_observation_final_version "
+                "ON usage_observations(span_id, reconciliation_version) WHERE is_final = 1"
+            ))
+    except Exception as exc:
+        logging.getLogger(__name__).warning("usage observation migration failed: %s", exc)
+
 def _migrate_add_owner_to_table(table_name: str, index_name: str):
     """Generic helper: add owner TEXT column + index to a table if missing."""
     import sqlite3
@@ -1913,6 +2060,7 @@ def init_db():
     """
     _migrate_model_endpoints()
     Base.metadata.create_all(bind=engine)
+    _migrate_usage_observation_columns()
     _migrate_add_hidden_models_column()
     _migrate_add_cached_models_column()
     _migrate_add_pinned_models_column()
