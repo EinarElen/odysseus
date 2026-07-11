@@ -342,12 +342,18 @@ def build_responses_input(messages: list[dict]) -> list[dict]:
                     "name": name,
                     "arguments": arguments,
                 }
-                if call.get("id"):
-                    item["id"] = str(call.get("id"))
+                source_id = str(call.get("id") or "")
+                if _is_responses_item_id(source_id):
+                    item["id"] = source_id
                 input_items.append(item)
             continue
         input_items.append({"role": role, "content": text})
     return input_items
+
+
+def _is_responses_item_id(value: str) -> bool:
+    """Return whether an identifier is valid as a Responses input item ID."""
+    return value.startswith("fc")
 
 
 def build_responses_tools(tools: Optional[list[dict]], *, strict: bool = True) -> list[dict]:
