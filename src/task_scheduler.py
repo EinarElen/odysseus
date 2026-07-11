@@ -1673,6 +1673,8 @@ class TaskScheduler:
                 fallback_url=endpoint_url,
                 fallback_model=model,
                 owner=task.owner,
+                usage_kind="task",
+                task_id=getattr(task, "id", None),
                 timeout=120,
             )
 
@@ -1939,6 +1941,7 @@ class TaskScheduler:
             relevant_tools=relevant_tools,
             fallbacks=_task_fallbacks,
             workload="background",
+            usage_kind="task",
         ):
             if event_str.startswith("data: ") and not event_str.startswith("data: [DONE]"):
                 try:

@@ -5,8 +5,11 @@ from src.endpoint_resolver import (
     resolve_endpoint,
     resolve_utility_fallback_candidates,
 )
-from src.llm_core import llm_call_async_with_fallback
+from src.llm_core import llm_call_async
 from src.interactive_gate import wait_for_interactive_quiet
+from src.model_context import estimate_tokens
+from src.usage_observability import RunContext, RunOutcome, SpanContext, SpanOutcome, UsageObservation, usage_store
+import time
 
 
 def resolve_task_endpoint(fallback_url=None, fallback_model=None, fallback_headers=None, owner=None):
@@ -62,6 +65,9 @@ async def task_llm_call_async(
     fallback_model=None,
     fallback_headers=None,
     owner=None,
+    usage_kind="task",
+    task_id=None,
+    session_id=None,
     **kwargs,
 ):
     """Call the shared background-task LLM candidate chain."""
@@ -75,4 +81,40 @@ async def task_llm_call_async(
         raise RuntimeError("No LLM endpoint available for background task")
     await wait_for_interactive_quiet("background task LLM")
     kwargs.setdefault("workload", "background")
-    return await llm_call_async_with_fallback(candidates, messages=messages, **kwargs)
+    run = usage_store.begin_run(RunContext(
+        owner=owner or "local", kind=usage_kind, source_surface="scheduler",
+        task_id=task_id, session_id=session_id,
+    ))
+    turn = run.begin_span(SpanContext(kind="turn", name=f"{usage_kind}.operation"))
+    started = time.monotonic()
+    last_error = None
+    for index, (url, model, headers) in enumerate(candidates):
+        attempt = run.begin_span(SpanContext(
+            kind="model", name="model.generate", parent_span_id=turn.id,
+            requested_model=candidates[0][1], actual_model=model,
+            attributes={"attempt": index + 1},
+        ))
+        attempt_started = time.monotonic()
+        try:
+            result = await llm_call_async(url, model, messages, headers=headers, **kwargs)
+            attempt.record_usage(UsageObservation(
+                source="estimated", input_tokens=estimate_tokens(messages),
+                output_tokens=max(len(result or "") // 4, 0),
+            ))
+            attempt.finish(SpanOutcome(duration_ms=round((time.monotonic() - attempt_started) * 1000)))
+            duration = round((time.monotonic() - started) * 1000)
+            turn.finish(SpanOutcome(duration_ms=duration))
+            run.finish(RunOutcome(duration_ms=duration))
+            return result
+        except Exception as exc:
+            last_error = exc
+            attempt.finish(SpanOutcome(
+                status="failed", outcome_code=type(exc).__name__,
+                duration_ms=round((time.monotonic() - attempt_started) * 1000),
+            ))
+    duration = round((time.monotonic() - started) * 1000)
+    turn.finish(SpanOutcome(status="failed", duration_ms=duration))
+    run.finish(RunOutcome(status="failed", error_code=type(last_error).__name__ if last_error else "no_candidates", duration_ms=duration))
+    if last_error:
+        raise last_error
+    raise RuntimeError("All background-task LLM candidates failed")

@@ -2851,9 +2851,19 @@
       <button data-usage-tab="runs">Runs</button>
       <button data-usage-tab="cache">Cache</button>
       <button data-usage-tab="activity">Activity</button>
+      <button data-usage-tab="cost">Cost &amp; capacity</button>
+      <button data-usage-tab="anomalies">Anomalies</button>
     </nav>
     <main class="usage-body">
       <div id="usage-error" class="usage-error" role="alert"></div>
+      <div class="usage-filters" aria-label="Usage filters">
+        <label>Kind <input id="usage-filter-kind" placeholder="all"></label>
+        <label>Provider <input id="usage-filter-provider" placeholder="all"></label>
+        <label>Model <input id="usage-filter-model" placeholder="all"></label>
+        <label>Status <select id="usage-filter-status"><option value="">all</option><option>running</option><option>succeeded</option><option>failed</option><option>cancelled</option><option>interrupted</option></select></label>
+        <label>Cache <select id="usage-filter-cache"><option value="">all</option><option value="hit">hit</option><option value="miss">miss</option><option value="unknown">unknown</option></select></label>
+        <button id="usage-filter-clear" type="button">Clear</button>
+      </div>
       <section id="usage-overview" class="usage-view">
         <div id="usage-kpis" class="usage-kpis"></div>
         <div class="usage-chart-grid">
@@ -2874,6 +2884,16 @@
           <article><h2>Workload contribution</h2><div id="usage-kind-chart" class="usage-chart"></div><div id="usage-kind-table"></div></article>
           <article><h2>Tool activity</h2><div id="usage-tool-chart" class="usage-chart"></div><div id="usage-tool-table"></div></article>
         </div>
+      </section>
+      <section id="usage-cost" class="usage-view" hidden>
+        <div id="usage-capacity-kpis" class="usage-kpis"></div>
+        <div class="usage-chart-grid">
+          <article><h2>USD cost over time</h2><div id="usage-cost-chart" class="usage-chart"></div><div id="usage-cost-table"></div></article>
+          <article><h2>Run latency distribution</h2><div id="usage-latency-chart" class="usage-chart"></div><div id="usage-latency-table"></div></article>
+        </div>
+      </section>
+      <section id="usage-anomalies" class="usage-view" hidden>
+        <div class="usage-table-wrap"><table><thead><tr><th>Started</th><th>Run</th><th>Reason</th><th>Duration</th><th>Cost</th></tr></thead><tbody id="usage-anomalies-body"></tbody></table></div>
       </section>
     </main>
   </section>

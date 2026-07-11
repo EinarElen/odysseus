@@ -337,10 +337,22 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
         finally:
             db.close()
 
+        # The usage ledger is authoritative. Legacy session token columns are
+        # retained for one-release compatibility but no longer drive the UI.
+        try:
+            from src.usage_observability import usage_store
+            _usage_by_session = usage_store.session_totals(owner=user or "local")
+            token_map = {sid: values["total_tokens"] for sid, values in _usage_by_session.items()}
+            cost_map = {sid: values["total_cost_micros"] for sid, values in _usage_by_session.items()}
+        except Exception:
+            logger.warning("Session usage projection unavailable; using legacy counters", exc_info=True)
+            cost_map = {}
+
         sessions = [{"id": s.id, "name": s.name, "model": _public_model(s.name, s.model),
                      "endpoint_url": s.endpoint_url, "rag": s.rag,
                      "archived": s.archived, "folder": folder_map.get(s.id),
                      "total_tokens": token_map.get(s.id, 0),
+                     "total_cost_micros": cost_map.get(s.id),
                      "is_important": important_map.get(s.id, False),
                      "created_at": created_map.get(s.id),
                      "updated_at": updated_map.get(s.id),
@@ -1049,6 +1061,9 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
                 max_tokens=1024,
                 headers=headers,
                 timeout=60,
+                usage_owner=owner or "local",
+                usage_kind="chat",
+                usage_session_id=session_id,
             )
         except Exception as e:
             logger.error("Manual compaction failed: %s", e)

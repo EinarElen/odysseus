@@ -41594,9 +41594,12 @@ body.theme-frosted .modal {
 #usage-close { width: 36px; font-size: 20px; line-height: 1; }
 .usage-tabs { display: flex; gap: 2px; padding: 0 28px; border-bottom: 1px solid var(--border); background: var(--panel); }
 .usage-tabs button { padding: 12px 16px; color: var(--muted); border: 0; border-bottom: 2px solid transparent; background: transparent; }
-.usage-tabs button.active { color: var(--fg); border-bottom-color: var(--accent, #d66); }
+.usage-tabs button.active { color: var(--fg); border-bottom-color: var(--accent, var(--red)); }
 .usage-body { flex: 1; min-height: 0; padding: 22px 28px 40px; overflow: auto; }
-.usage-error:not(:empty) { margin-bottom: 14px; padding: 10px 12px; color: var(--accent-error, #e66); border: 1px solid color-mix(in srgb, var(--accent-error, #e66) 35%, transparent); border-radius: 7px; }
+.usage-error:not(:empty) { margin-bottom: 14px; padding: 10px 12px; color: var(--accent-error, var(--red)); border: 1px solid color-mix(in srgb, var(--accent-error, var(--red)) 35%, transparent); border-radius: 7px; }
+.usage-filters { display: flex; align-items: end; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; padding: 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel); }
+.usage-filters label { display: grid; gap: 4px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
+.usage-filters input, .usage-filters select, .usage-filters button { min-height: 32px; padding: 5px 8px; color: var(--fg); border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
 .usage-kpis { display: grid; grid-template-columns: repeat(6, minmax(125px, 1fr)); gap: 10px; margin-bottom: 18px; }
 .usage-kpis article, .usage-chart-grid article, .usage-view > article {
   border: 1px solid var(--border);
@@ -41619,13 +41622,17 @@ body.theme-frosted .modal {
 .usage-table-wrap tbody tr { cursor: pointer; }
 .usage-table-wrap tbody tr:hover, .usage-table-wrap tbody tr:focus { background: color-mix(in srgb, var(--fg) 5%, transparent); outline: none; }
 .usage-status { font-size: 11px; text-transform: capitalize; }
-.usage-status-failed { color: var(--accent-error, #e66); }
-.usage-status-running { color: #e0a84f; }
-.usage-run-detail { position: fixed; z-index: 12002; inset: 90px 28px 28px auto; width: min(560px, calc(100vw - 56px)); padding: 20px; overflow: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); box-shadow: 0 18px 70px #0008; }
+.usage-status-failed { color: var(--accent-error, var(--red)); }
+.usage-status-running { color: var(--muted); }
+.usage-run-detail { position: fixed; z-index: 12002; inset: 90px 28px 28px auto; width: min(560px, calc(100vw - 56px)); padding: 20px; overflow: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); box-shadow: 0 18px 70px color-mix(in srgb, var(--bg) 55%, transparent); }
 .usage-detail-close { float: right; color: var(--fg); border: 0; background: none; font-size: 20px; }
 .usage-waterfall { display: grid; gap: 6px; margin-top: 20px; }
-.usage-waterfall > div { display: flex; justify-content: space-between; gap: 12px; margin-left: calc(var(--depth) * 18px); padding: 10px; border-left: 3px solid var(--accent, #d66); background: color-mix(in srgb, var(--fg) 4%, transparent); }
+.usage-waterfall > div { display: grid; grid-template-columns: minmax(110px, .7fr) minmax(140px, 1fr) minmax(180px, 1.4fr); align-items: center; gap: 12px; margin-left: calc(var(--depth) * 18px); padding: 10px; border-left: 3px solid var(--accent, var(--red)); background: color-mix(in srgb, var(--fg) 4%, transparent); }
 .usage-waterfall span { color: var(--muted); font-size: 11px; text-align: right; }
+.usage-waterfall-track { position: relative; height: 9px; overflow: hidden; border-radius: 5px; background: color-mix(in srgb, var(--fg) 7%, transparent); }
+.usage-waterfall-track i { position: absolute; top: 0; bottom: 0; min-width: 2px; border-radius: inherit; background: var(--accent, var(--red)); }
+.usage-growth { width: 100%; border-collapse: collapse; font-size: 11px; }
+.usage-growth th, .usage-growth td { padding: 7px; border-bottom: 1px solid var(--border); text-align: left; }
 @media (max-width: 900px) {
   .usage-header { align-items: flex-start; padding: 16px; }
   .usage-actions { flex-wrap: wrap; justify-content: flex-end; }

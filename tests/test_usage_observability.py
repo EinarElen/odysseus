@@ -5,8 +5,8 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from core.database import Base, Session
-from src.usage_observability import RunContext, SpanContext, UsageObservation, UsageStore
+from core.database import Base, Session, ChatMessage, UsageDailyRollup
+from src.usage_observability import RunContext, SpanContext, UsageObservation, UsageStore, create_in_memory_usage_store
 
 
 def _store():
@@ -38,7 +38,7 @@ def test_owner_summary_is_built_from_final_usage_observations():
     other.finish()
 
     report = store.query_summary(owner="alice")
-    assert report["totals"] == {
+    expected = {
         "input_tokens": 100,
         "output_tokens": 20,
         "reasoning_tokens": None,
@@ -49,6 +49,7 @@ def test_owner_summary_is_built_from_final_usage_observations():
         "runs": 1,
         "failed_runs": 0,
     }
+    assert {key: report["totals"][key] for key in expected} == expected
     assert report["quality"] == "exact"
     assert report["currency"] == "USD"
 
@@ -145,3 +146,62 @@ def test_multiple_partial_observations_do_not_enter_totals():
     span.record_usage(UsageObservation(source="provider", input_tokens=5, is_final=False))
     span.record_usage(UsageObservation(source="provider", input_tokens=6, is_final=False))
     assert store.query_summary(owner="alice")["totals"]["input_tokens"] == 0
+
+
+def test_legacy_backfill_is_idempotent_and_projects_session_totals():
+    store = _store()
+    with store._session_factory() as db:
+        db.add(Session(id="legacy-s", name="Old", endpoint_url="http://local", model="old-model", owner="alice"))
+        db.add(ChatMessage(
+            id="legacy-m", session_id="legacy-s", role="assistant", content="answer",
+            meta_data='{"input_tokens": 40, "output_tokens": 10, "usage_source": "real"}',
+        ))
+        db.commit()
+
+    assert store.backfill_legacy_messages()["created"] == 1
+    assert store.backfill_legacy_messages()["created"] == 0
+    assert store.session_totals(owner="alice")["legacy-s"]["total_tokens"] == 50
+
+
+def test_rollups_rebuild_and_explicit_deletion_are_owner_scoped():
+    store = _store()
+    run = store.begin_run(RunContext(owner="alice", kind="chat"))
+    span = run.begin_span(SpanContext(kind="model", name="model.generate", actual_model="gpt-4o-mini"))
+    span.record_usage(UsageObservation(source="provider", input_tokens=10, output_tokens=2))
+    span.finish()
+    run.finish()
+
+    assert store.rebuild_daily_rollups(owner="alice") == 1
+    with store._session_factory() as db:
+        assert db.query(UsageDailyRollup).filter(UsageDailyRollup.owner == "alice").count() == 1
+    assert store.delete_usage(owner="bob", run_id=run.id) == 0
+    assert store.delete_usage(owner="alice", run_id=run.id) == 1
+    assert store.query_summary(owner="alice")["totals"]["runs"] == 0
+
+
+def test_public_in_memory_adapter_and_session_deletion_retention():
+    store = create_in_memory_usage_store()
+    with store._session_factory() as db:
+        db.add(Session(id="delete-s", name="Delete", endpoint_url="http://local", model="m", owner="alice"))
+        db.commit()
+    run = store.begin_run(RunContext(owner="alice", kind="chat", session_id="delete-s"))
+    span = run.begin_span(SpanContext(kind="model", name="model.generate"))
+    span.record_usage(UsageObservation(source="provider", input_tokens=1, output_tokens=1))
+    span.finish(); run.finish()
+    with store._session_factory() as db:
+        db.query(Session).filter(Session.id == "delete-s").delete()
+        db.commit()
+    detail = store.get_run(owner="alice", run_id=run.id)
+    assert detail is not None
+    assert detail["session_id"] is None
+
+
+def test_timezone_buckets_preserve_dst_offsets():
+    store = _store()
+    for observed in (datetime(2026, 3, 29, 0, 30), datetime(2026, 3, 29, 1, 30)):
+        run = store.begin_run(RunContext(owner="alice", kind="chat", started_at=observed))
+        span = run.begin_span(SpanContext(kind="model", name="model.generate", started_at=observed))
+        span.record_usage(UsageObservation(source="provider", input_tokens=1, observed_at=observed))
+        span.finish(); run.finish()
+    points = store.query_timeseries(owner="alice", bucket="hour", timezone_name="Europe/Stockholm")["points"]
+    assert [point["time"][-6:] for point in points] == ["+01:00", "+02:00"]

@@ -475,6 +475,7 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                             ],
                             fallback_url=url, fallback_model=model, fallback_headers=headers,
                             owner=account_owner or None,
+                            usage_kind="email",
                             temperature=0.3, max_tokens=16384, timeout=240,
                         )
                         summary = _extract_reply((summary or "").strip())
@@ -518,6 +519,7 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                             ],
                             fallback_url=url, fallback_model=model, fallback_headers=headers,
                             owner=account_owner or None,
+                            usage_kind="email",
                             temperature=0.7, max_tokens=1024, timeout=90,
                         )
                         reply = _apply_email_style_mechanics(_extract_reply(reply or ""))
@@ -608,6 +610,7 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                             ],
                             fallback_url=url, fallback_model=model, fallback_headers=headers,
                             owner=account_owner or None,
+                            usage_kind="email",
                             temperature=0.1, max_tokens=16384, timeout=75,
                         )
                         _raw_original = cal_extract or ""
@@ -805,6 +808,7 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                             messages=payload["messages"],
                             fallback_url=url, fallback_model=model, fallback_headers=headers,
                             owner=account_owner or None,
+                            usage_kind="email",
                             temperature=0, max_tokens=200, timeout=60,
                         )
                         urg_raw = _strip_think(urg_raw or "")
@@ -936,6 +940,7 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                             ],
                             fallback_url=url, fallback_model=model, fallback_headers=headers,
                             owner=account_owner or None,
+                            usage_kind="email",
                             temperature=0.1, max_tokens=512, timeout=120,
                         )
                         raw_out = _strip_think((raw_out or "").strip())

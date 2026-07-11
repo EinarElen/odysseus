@@ -40,3 +40,21 @@ def test_usage_routes_reject_invalid_query_contracts(monkeypatch):
     assert client.get("/api/usage/timeseries?bucket=minute").status_code == 400
     assert client.get("/api/usage/breakdown?group_by=owner").status_code == 400
     assert client.get("/api/usage/summary?from=not-a-time").status_code == 400
+    assert client.get("/api/usage/timeseries?timezone=Not/AZone").status_code == 400
+
+
+def test_usage_filters_anomalies_rollups_and_deletion(monkeypatch):
+    client, store = _client(monkeypatch)
+    run = store.begin_run(RunContext(owner="local", kind="research", source_surface="web"))
+    span = run.begin_span(SpanContext(kind="model", name="model.generate", provider="openai", actual_model="gpt-x"))
+    span.record_usage(UsageObservation(source="provider", input_tokens=20, output_tokens=5, cache_read_tokens=0))
+    span.finish()
+    run.finish()
+
+    assert client.get("/api/usage/summary?kind=research&provider=openai").json()["totals"]["runs"] == 1
+    assert client.get("/api/usage/summary?kind=chat").json()["totals"]["runs"] == 0
+    assert client.get("/api/usage/timeseries?timezone=Europe/Stockholm").json()["timezone"] == "Europe/Stockholm"
+    assert client.get("/api/usage/anomalies").status_code == 200
+    assert client.post("/api/usage/rollups/rebuild").json()["rebuilt"] == 1
+    assert client.delete(f"/api/usage/runs/{run.id}").json()["deleted"] == 1
+    assert client.get("/api/usage/summary").json()["totals"]["runs"] == 0

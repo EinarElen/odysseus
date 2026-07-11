@@ -161,6 +161,9 @@ class ResearchHandler:
                 headers=llm_headers,
                 timeout=15,
                 max_retries=1,
+                usage_owner=getattr(sess, "owner", None),
+                usage_kind="research",
+                usage_session_id=getattr(sess, "id", None),
             )
             query = strip_thinking(response).strip().strip('"\'')
             if query and len(query) > 5:
@@ -172,6 +175,7 @@ class ResearchHandler:
 
     async def generate_plan(
         self, query: str, llm_endpoint: str, llm_model: str, llm_headers: dict = None,
+        owner: str = None, session_id: str = None,
     ) -> Optional[dict]:
         """Generate a research plan for user review before starting research."""
         try:
@@ -188,6 +192,9 @@ class ResearchHandler:
                 headers=llm_headers,
                 timeout=30,
                 max_retries=1,
+                usage_owner=owner,
+                usage_kind="research",
+                usage_session_id=session_id,
             )
             response = strip_thinking(response)
 
@@ -304,6 +311,7 @@ class ResearchHandler:
             "category": category,
             # SECURITY: track ownership so all reads / saves can filter by user.
             "owner": owner or "",
+            "session_id": session_id,
         }
         self._active_tasks[session_id] = entry
 
@@ -339,6 +347,8 @@ class ResearchHandler:
                         category=category,
                         extraction_timeout=extraction_timeout,
                         extraction_concurrency=extraction_concurrency,
+                        owner=owner,
+                        session_id=session_id,
                     ),
                     timeout=hard_timeout,
                 )
@@ -754,6 +764,8 @@ class ResearchHandler:
         category: str = None,
         extraction_timeout: int = None,
         extraction_concurrency: int = None,
+        owner: str = None,
+        session_id: str = None,
     ) -> str:
         """
         Run iterative deep research using the LLM-in-the-loop DeepResearcher.
@@ -829,6 +841,8 @@ class ResearchHandler:
                 progress_callback=progress_callback,
                 search_provider=search_provider,
                 category=category,
+                owner=owner or ((_task_entry or {}).get("owner") or None),
+                session_id=session_id or ((_task_entry or {}).get("session_id") or None),
             )
             if _task_entry is not None:
                 _task_entry["researcher"] = researcher

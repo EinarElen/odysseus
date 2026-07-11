@@ -255,7 +255,8 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
             ]
 
             response = await llm_call_async(
-                url, model, messages, headers=headers, timeout=AI_CHAT_TIMEOUT
+                url, model, messages, headers=headers, timeout=AI_CHAT_TIMEOUT,
+                usage_owner=owner or "local", usage_kind="other", usage_session_id=session_id,
             )
 
             step_outputs.append({

@@ -555,7 +555,8 @@ def setup_chat_routes(
             try:
                 _r_ep, _r_model, _r_headers = _resolve_research_endpoint(sess)
                 research_ctx = await research_handler.call_research_service(
-                    message, _r_ep, _r_model, llm_headers=_r_headers
+                    message, _r_ep, _r_model, llm_headers=_r_headers,
+                    owner=_user, session_id=session,
                 )
                 ctx.messages.insert(
                     len(ctx.preface),
@@ -574,6 +575,9 @@ def setup_chat_routes(
             prompt_type=preset_id,
             session_id=session,
             provider_options=getattr(sess, "provider_options", None) or {},
+            usage_owner=_user or "local",
+            usage_kind="research" if use_research else "chat",
+            usage_session_id=session,
         )
         _clean_reply, _clean_md = clean_thinking_for_save(reply, {"model": sess.model})
         sess.add_message(ChatMessage("assistant", _clean_reply, metadata=_clean_md))
@@ -1207,6 +1211,8 @@ def setup_chat_routes(
         if _effective_mode in ('agent', 'research', 'chat'):
             set_session_mode(session, _effective_mode)
 
+        _usage_stream_state: dict[str, str | None] = {"run_id": None}
+
         async def stream_with_save() -> AsyncGenerator[str, None]:
             # _effective_mode is read-only here; closure captures it from
             # the outer scope. (Was `nonlocal` but never reassigned.)
@@ -1687,6 +1693,7 @@ def setup_chat_routes(
                     return
                 from src.ai_interaction import do_generate_image
                 _user_msg = message or ""
+                _image_started = time.monotonic()
                 yield f'data: {json.dumps({"type": "tool_start", "tool": "generate_image", "command": _user_msg[:100]})}\n\n'
                 yield ": heartbeat\n\n"
                 _img_result = await do_generate_image(f"{_user_msg}\n{sess.model}", session, owner=_user)
@@ -1697,6 +1704,18 @@ def setup_chat_routes(
                         _img_tool_data[_k] = _img_result[_k]
                 yield f'data: {json.dumps(_img_tool_data)}\n\n'
                 _desc = _img_result.get("results", _img_result.get("error", "Image generation complete"))
+                try:
+                    from src.usage_observability import record_image_generation
+                    record_image_generation(
+                        owner=_user or "local", session_id=session,
+                        model=_img_result.get("image_model") or sess.model,
+                        quality=_img_result.get("image_quality"), size=_img_result.get("image_size"),
+                        succeeded="error" not in _img_result,
+                        duration_ms=round((time.monotonic() - _image_started) * 1000),
+                        incognito=incognito,
+                    )
+                except Exception:
+                    logger.warning("Image usage accounting failed", exc_info=True)
                 full_response = _desc
                 yield f'data: {json.dumps({"delta": _desc})}\n\n'
                 # Save to session history
@@ -1716,11 +1735,13 @@ def setup_chat_routes(
                 _answered_by = None  # set if the selected model failed and a fallback answered
                 _requested_model = sess.model
                 _actual_model = None
+                _usage_kind = "compare" if compare_mode else ("research" if effective_do_research else "chat")
                 _usage_run = usage_store.begin_run(UsageRunContext(
-                    owner=_user or "local", kind="chat", source_surface="web",
+                    owner=_user or "local", kind=_usage_kind, source_surface="web",
                     session_id=session, incognito=incognito,
                 ))
-                _usage_turn = _usage_run.begin_span(UsageSpanContext(kind="turn", name="chat.turn"))
+                _usage_stream_state["run_id"] = _usage_run.id
+                _usage_turn = _usage_run.begin_span(UsageSpanContext(kind="turn", name=f"{_usage_kind}.turn"))
                 _usage_model = _usage_run.begin_span(UsageSpanContext(
                     kind="model", name="model.generate", parent_span_id=_usage_turn.id,
                     requested_model=_requested_model, actual_model=_requested_model,
@@ -1763,18 +1784,25 @@ def setup_chat_routes(
                                     # Forward the notice and remember the real model.
                                     _answered_by = data.get("answered_by") or _answered_by
                                     _actual_model = _actual_model or _answered_by
-                                    _usage_model.set_route(actual_model=_answered_by)
+                                    _failed_model = data.get("selected_model") or _actual_model or _requested_model
+                                    _usage_model.set_route(actual_model=_failed_model)
+                                    _usage_model.finish(UsageSpanOutcome(status="failed", outcome_code="fallback"))
                                     _fallback_span = _usage_run.begin_span(UsageSpanContext(
                                         kind="fallback", name="model.fallback", parent_span_id=_usage_turn.id,
                                         requested_model=data.get("selected_model") or _requested_model,
-                                        actual_model=_answered_by,
+                                        actual_model=_failed_model,
                                         attributes={"reason": str(data.get("reason") or "")[:200]},
                                     ))
                                     _fallback_span.finish(UsageSpanOutcome(status="failed", outcome_code="primary_failed", timing_known=False))
+                                    _usage_model = _usage_run.begin_span(UsageSpanContext(
+                                        kind="model", name="model.generate", parent_span_id=_usage_turn.id,
+                                        requested_model=_answered_by, actual_model=_answered_by,
+                                    ))
                                     data["selected_model"] = data.get("selected_model") or _requested_model
                                     yield chunk
                                 elif data.get("type") == "model_actual":
                                     _actual_model = data.get("model") or _actual_model
+                                    _usage_model.set_route(actual_model=_actual_model)
                                     data["requested_model"] = _requested_model
                                     yield f'data: {json.dumps(data)}\n\n'
                                 elif data.get("type") == "usage":
@@ -1844,6 +1872,9 @@ def setup_chat_routes(
                                 _usage_model.record_usage(MeteredUsage(
                                     source="estimated", input_tokens=last_metrics.get("input_tokens"),
                                     output_tokens=last_metrics.get("output_tokens"),
+                                    context_tokens=last_metrics.get("input_tokens"),
+                                    context_length=last_metrics.get("context_length") or ctx.context_length,
+                                    generation_tps_milli=round(float(last_metrics["tokens_per_second"]) * 1000) if last_metrics.get("tokens_per_second") is not None else None,
                                 ))
                             elif _usage_recorded and last_metrics:
                                 _usage_model.record_usage(MeteredUsage(
@@ -1853,6 +1884,11 @@ def setup_chat_routes(
                                     cache_read_tokens=last_metrics.get("cache_read_tokens"),
                                     cache_write_tokens=last_metrics.get("cache_write_tokens"),
                                     fresh_input_tokens=last_metrics.get("fresh_input_tokens"),
+                                    context_tokens=last_metrics.get("input_tokens"),
+                                    context_length=last_metrics.get("context_length") or ctx.context_length,
+                                    time_to_first_token_ms=round(float(last_metrics["time_to_first_token"]) * 1000) if last_metrics.get("time_to_first_token") is not None else None,
+                                    generation_tps_milli=round(float(last_metrics.get("gen_tps") or last_metrics.get("tokens_per_second")) * 1000) if (last_metrics.get("gen_tps") is not None or last_metrics.get("tokens_per_second") is not None) else None,
+                                    prefill_tps_milli=round(float(last_metrics["prefill_tps"]) * 1000) if last_metrics.get("prefill_tps") is not None else None,
                                 ))
                             _duration_ms = round((time.time() - _chat_start) * 1000)
                             _usage_model.finish(UsageSpanOutcome(duration_ms=_duration_ms))
@@ -2075,7 +2111,11 @@ def setup_chat_routes(
                 async for chunk in stream_with_save():
                     yield chunk
             finally:
-                usage_store.finish_active_run(owner=_user or "local", session_id=session, status="interrupted")
+                usage_store.finish_active_run(
+                    owner=_user or "local",
+                    run_id=_usage_stream_state["run_id"],
+                    status="interrupted",
+                )
                 _active_streams.pop(session, None)
 
         # Compare panes are short-lived, single-shot generations whose sessions

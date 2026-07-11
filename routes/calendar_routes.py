@@ -1558,6 +1558,8 @@ def setup_calendar_routes() -> APIRouter:
                 temperature=0.0,
                 max_tokens=512,
                 timeout=20,
+                usage_owner=owner or "local",
+                usage_kind="other",
             )
         except Exception as e:
             return {"ok": False, "error": f"LLM call failed: {e}"}

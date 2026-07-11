@@ -27,7 +27,6 @@ import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
 import adminModule from './js/admin.js';
 import settingsModule from './js/settings.js';
-import usageDashboard from './js/usageDashboard.js';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
 import './js/modalManager.js';
 // Desktop window tiling — drag a modal near an edge/corner to snap.
@@ -1058,7 +1057,11 @@ function initializeEventListeners() {
 
   const toolUsageBtn = el('tool-usage-btn');
   if (toolUsageBtn) {
-    toolUsageBtn.addEventListener('click', () => usageDashboard.open());
+    toolUsageBtn.addEventListener('click', async () => {
+      const { default: usageDashboard } = await import('./js/usageDashboard.js');
+      usageDashboard.init();
+      usageDashboard.open();
+    });
   }
 
   // Tasks tool button
@@ -3606,7 +3609,6 @@ function initializeEventListeners() {
 // INITIALIZATION ON PAGE LOAD
 // ============================================
 function startOdysseusApp() {
-  usageDashboard.init();
   if (window.__odysseusAppStarted) return;
   window.__odysseusAppStarted = true;
   const _bumpChatPriority = (ms = 10000) => {

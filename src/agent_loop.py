@@ -2647,6 +2647,7 @@ async def stream_agent_loop(
     provider_options: Optional[Dict] = None,
     _is_teacher_run: bool = False,
     incognito: bool = False,
+    usage_kind: str = "agent",
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
 
@@ -3311,7 +3312,8 @@ async def stream_agent_loop(
     full_response = ""
     total_start = time.time()
     _usage_run = usage_store.begin_run(UsageRunContext(
-        owner=owner or "local", kind="agent", source_surface="web",
+        owner=owner or "local", kind=usage_kind,
+        source_surface="scheduler" if workload == "background" else "web",
         session_id=session_id, incognito=incognito,
     ))
     _usage_turn = _usage_run.begin_span(UsageSpanContext(kind="turn", name="agent.turn"))
@@ -3573,9 +3575,15 @@ async def stream_agent_loop(
                     elif data.get("type") == "usage":
                         u = data.get("data", {})
                         actual_model = u.get("model") or actual_model
-                        round_input = u.get("input_tokens", 0)
-                        real_input_tokens += round_input
-                        real_output_tokens += u.get("output_tokens", 0)
+                        # Streaming providers commonly repeat cumulative usage
+                        # snapshots. Account only the increase while retaining
+                        # each raw snapshot for reconciliation/debugging.
+                        round_input = u.get("input_tokens", 0) or 0
+                        input_delta = max(0, round_input - (_round_usage["input_tokens"] or 0))
+                        output_value = u.get("output_tokens", 0) or 0
+                        output_delta = max(0, output_value - (_round_usage["output_tokens"] or 0))
+                        real_input_tokens += input_delta
+                        real_output_tokens += output_delta
                         last_round_input_tokens = round_input
                         has_real_usage = True
                         _usage_model_span.record_usage(MeteredUsage(
@@ -3588,11 +3596,11 @@ async def stream_agent_loop(
                             is_final=False,
                         ))
                         _round_has_usage = True
-                        _round_usage["input_tokens"] += u.get("input_tokens", 0) or 0
-                        _round_usage["output_tokens"] += u.get("output_tokens", 0) or 0
+                        _round_usage["input_tokens"] = round_input
+                        _round_usage["output_tokens"] = output_value
                         for _usage_key in ("reasoning_tokens", "cache_read_tokens", "cache_write_tokens", "fresh_input_tokens"):
                             if u.get(_usage_key) is not None:
-                                _round_usage[_usage_key] = (_round_usage[_usage_key] or 0) + u[_usage_key]
+                                _round_usage[_usage_key] = u[_usage_key]
                         round_usage.append({
                             "round": round_num,
                             "model": u.get("model") or actual_model,
@@ -3614,21 +3622,29 @@ async def stream_agent_loop(
                     elif data.get("type") == "fallback":
                         # The selected model failed and another answered; surface
                         # the notice so a misconfigured provider isn't masked.
+                        failed_model = data.get("selected_model") or actual_model or requested_model
+                        _usage_model_span.set_route(actual_model=failed_model)
+                        _usage_model_span.finish(UsageSpanOutcome(status="failed", outcome_code="fallback"))
                         actual_model = data.get("answered_by") or actual_model
-                        _usage_model_span.set_route(actual_model=actual_model)
                         _fallback_span = _usage_run.begin_span(UsageSpanContext(
                             kind="fallback", name="model.fallback", parent_span_id=_usage_turn.id,
                             agent_round=round_num,
                             requested_model=data.get("selected_model") or requested_model,
-                            actual_model=actual_model,
+                            actual_model=failed_model,
                             attributes={"reason": str(data.get("reason") or "")[:200]},
                         ))
                         _fallback_span.finish(UsageSpanOutcome(status="failed", outcome_code="primary_failed", timing_known=False))
+                        _usage_model_span = _usage_run.begin_span(UsageSpanContext(
+                            kind="model", name="model.generate", parent_span_id=_usage_turn.id,
+                            agent_round=round_num, requested_model=actual_model,
+                            actual_model=actual_model,
+                        ))
                         logger.warning(f"[agent] round {round_num} fell back: "
                                        f"{data.get('selected_model')} -> {data.get('answered_by')}")
                         yield chunk
                     elif data.get("type") == "model_actual":
                         actual_model = data.get("model") or actual_model
+                        _usage_model_span.set_route(actual_model=actual_model)
                         data["requested_model"] = requested_model
                         yield f"data: {json.dumps(data)}\n\n"
                     elif "delta" in data:
@@ -3742,7 +3758,13 @@ async def stream_agent_loop(
             _round_first_token_logged,
         )
         if _round_has_usage:
-            _usage_model_span.record_usage(MeteredUsage(source="provider", **_round_usage))
+            _usage_model_span.record_usage(MeteredUsage(
+                source="provider", **_round_usage,
+                context_tokens=_round_usage["input_tokens"], context_length=context_length or None,
+                time_to_first_token_ms=round(time_to_first_token * 1000) if round_num == 1 and time_to_first_token is not None else None,
+                generation_tps_milli=round(backend_gen_tps * 1000) if backend_gen_tps else None,
+                prefill_tps_milli=round(backend_prefill_tps * 1000) if backend_prefill_tps else None,
+            ))
         _usage_model_span.finish(UsageSpanOutcome(duration_ms=round((time.time() - _round_start) * 1000)))
         _normalized_doc_round = (
             _normalize_stream_document_fences(

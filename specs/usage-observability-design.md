@@ -1,10 +1,14 @@
 # Usage Observability: Design
 
-Status: proposed
+Status: implemented except for the intentionally deferred `ody-term usage` domain
 
 Scope: persistent model/cache/cost/activity observability, web dashboard, and Terminal Client interface
 
 Non-goal: implementation in this document
+
+Implementation note (2026-07): the persistent ledger, owner-scoped query API,
+migration/backfill jobs, retention/deletion, web dashboard suite, workload
+instrumentation, and local maintenance CLI (`scripts/usage.py`) are complete.
 
 ## 1. Outcome
 

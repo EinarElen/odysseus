@@ -293,6 +293,11 @@ class UsageObservation(Base):
     cache_read_tokens = Column(Integer, nullable=True)
     cache_write_tokens = Column(Integer, nullable=True)
     fresh_input_tokens = Column(Integer, nullable=True)
+    context_tokens = Column(Integer, nullable=True)
+    context_length = Column(Integer, nullable=True)
+    time_to_first_token_ms = Column(Integer, nullable=True)
+    generation_tps_milli = Column(Integer, nullable=True)
+    prefill_tps_milli = Column(Integer, nullable=True)
     audio_input_tokens = Column(Integer, nullable=True)
     audio_output_tokens = Column(Integer, nullable=True)
     image_input_units = Column(Integer, nullable=True)
@@ -338,6 +343,39 @@ class UsagePriceSnapshot(Base):
     effective_to = Column(DateTime, nullable=True)
     source_url = Column(String, nullable=True)
     created_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
+
+class UsageDailyRollup(Base):
+    """Rebuildable daily projection for long-range Usage queries."""
+    __tablename__ = "usage_daily_rollups"
+
+    id = Column(String, primary_key=True)
+    owner = Column(String, nullable=False, index=True)
+    date = Column(DateTime, nullable=False, index=True)
+    kind = Column(String, nullable=False, default="unknown")
+    provider = Column(String, nullable=False, default="unknown")
+    actual_model = Column(String, nullable=False, default="unknown")
+    source_surface = Column(String, nullable=False, default="unknown")
+    input_tokens = Column(Integer, nullable=False, default=0)
+    output_tokens = Column(Integer, nullable=False, default=0)
+    reasoning_tokens = Column(Integer, nullable=True)
+    cache_read_tokens = Column(Integer, nullable=True)
+    cache_write_tokens = Column(Integer, nullable=True)
+    fresh_input_tokens = Column(Integer, nullable=True)
+    total_cost_micros = Column(Integer, nullable=True)
+    run_count = Column(Integer, nullable=False, default=0)
+    failed_run_count = Column(Integer, nullable=False, default=0)
+    duration_total_ms = Column(Integer, nullable=False, default=0)
+    duration_max_ms = Column(Integer, nullable=False, default=0)
+    rebuilt_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
+    __table_args__ = (
+        Index(
+            "uq_usage_daily_rollup_grain", "owner", "date", "kind", "provider",
+            "actual_model", "source_surface", unique=True,
+        ),
+        Index("ix_usage_daily_rollup_owner_date", "owner", "date"),
+    )
 
 class Document(TimestampMixin, Base):
     """Living document that the AI can create and edit in-place."""
@@ -1380,6 +1418,9 @@ def _migrate_usage_observation_columns():
             columns = {row[1] for row in conn.execute(text("PRAGMA table_info(usage_observations)"))}
             if "reconciliation_version" not in columns:
                 conn.execute(text("ALTER TABLE usage_observations ADD COLUMN reconciliation_version INTEGER NOT NULL DEFAULT 1"))
+            for name in ("context_tokens", "context_length", "time_to_first_token_ms", "generation_tps_milli", "prefill_tps_milli"):
+                if name not in columns:
+                    conn.execute(text(f"ALTER TABLE usage_observations ADD COLUMN {name} INTEGER"))
             conn.execute(text("DROP INDEX IF EXISTS uq_usage_observation_final_version"))
             conn.execute(text(
                 "CREATE UNIQUE INDEX uq_usage_observation_final_version "

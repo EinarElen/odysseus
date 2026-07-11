@@ -4099,7 +4099,10 @@ def setup_email_routes():
                 },
             ]
 
-            style = await llm_call_async(url, model, messages, headers=headers, max_tokens=2048)
+            style = await llm_call_async(
+                url, model, messages, headers=headers, max_tokens=2048,
+                usage_owner=owner or "local", usage_kind="email",
+            )
             style = _strip_think(style or "")
             if not style:
                 return {"success": False, "error": "LLM failed to generate style description"}
@@ -4335,6 +4338,8 @@ def setup_email_routes():
                 temperature=0.2,
                 max_tokens=8192,
                 timeout=180,
+                usage_owner=owner or "local",
+                usage_kind="email",
             )
             model = candidates[0][1] if candidates else ""
             content = (content or "").strip()
@@ -4605,6 +4610,8 @@ def setup_email_routes():
                     temperature=0.7,
                     max_tokens=1024 if fast_reply else 6144,
                     timeout=60 if fast_reply else 180,
+                    usage_owner=owner or "local",
+                    usage_kind="email",
                 )
             except Exception as e:
                 detail = getattr(e, "detail", None) or str(e)
@@ -4640,6 +4647,8 @@ def setup_email_routes():
                             max_tokens=1536 if fast_reply else 4096,
                             timeout=45 if fast_reply else 120,
                             max_retries=1,
+                            usage_owner=owner or "local",
+                            usage_kind="email",
                         )
                         retry_reply = _apply_email_style_mechanics(_extract_reply(raw_retry or ""))
                         if retry_reply:

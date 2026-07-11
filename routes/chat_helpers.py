@@ -232,6 +232,9 @@ async def auto_name_session(session_manager, sess):
             max_tokens=4096,
             headers=t_headers,
             timeout=60,
+            usage_owner=owner or "local",
+            usage_kind="chat",
+            usage_session_id=getattr(sess, "id", None),
         )
 
         title = title.strip().strip('"\'').strip()

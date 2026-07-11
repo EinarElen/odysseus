@@ -685,6 +685,9 @@ def setup_history_routes(session_manager) -> APIRouter:
                 ],
                 temperature=0.2, max_tokens=1024,
                 headers=compact_headers, timeout=30,
+                usage_owner=owner or "local",
+                usage_kind="chat",
+                usage_session_id=session_id,
             )
 
             # Replace session history: summary as system message + recent messages

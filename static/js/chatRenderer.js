@@ -880,27 +880,17 @@ export function getImageCost(model, quality, size) {
 }
 
 /* ── Session cost helpers ─────────────────────────────────────────── */
-const _COST_KEY = 'ody-session-cost';
-
-/** Return the accumulated cost for the current (or given) session. */
+/** Return authoritative server-recorded cost for the current session. */
 export function getSessionCost(sessionId) {
   const sid = sessionId || (window.sessionModule && window.sessionModule.getCurrentSessionId());
   if (!sid) return 0;
-  try {
-    const costs = JSON.parse(localStorage.getItem(_COST_KEY) || '{}');
-    return costs[sid] || 0;
-  } catch (_e) { return 0; }
+  const sessions = window.sessionModule?.getSessions?.() || [];
+  const session = sessions.find(item => item.id === sid);
+  return session?.total_cost_micros == null ? 0 : Number(session.total_cost_micros) / 1_000_000;
 }
 
-/** Reset session cost for the given session (defaults to current). */
+/** Compatibility no-op: authoritative accounting is deleted in Usage. */
 export function resetSessionCost(sessionId) {
-  const sid = sessionId || (window.sessionModule && window.sessionModule.getCurrentSessionId());
-  if (!sid) return;
-  try {
-    const costs = JSON.parse(localStorage.getItem(_COST_KEY) || '{}');
-    delete costs[sid];
-    localStorage.setItem(_COST_KEY, JSON.stringify(costs));
-  } catch (_e) { /* ignore */ }
   updateSessionCostUI();
 }
 
@@ -908,18 +898,9 @@ export function resetSessionCost(sessionId) {
 export function updateSessionCostUI() {
   const el = document.getElementById('session-cost-display');
   if (!el) return;
-  // Non-billable endpoint? Hide the badge and clear stale cost that a previous
-  // cloud-rate calculation may have left in localStorage for this session.
+  // Non-billable endpoint? Hide the badge.
   const _url = _currentEndpointUrl();
   if (!isCostTrackedEndpoint(_url)) {
-    const sid = window.sessionModule && window.sessionModule.getCurrentSessionId();
-    if (sid && getSessionCost(sid) > 0) {
-      try {
-        const costs = JSON.parse(localStorage.getItem(_COST_KEY) || '{}');
-        delete costs[sid];
-        localStorage.setItem(_COST_KEY, JSON.stringify(costs));
-      } catch (_e) { /* ignore */ }
-    }
     el.style.display = 'none';
     return;
   }
@@ -1981,19 +1962,6 @@ export function displayMetrics(messageElement, metrics) {
 
   // Nothing useful to show — bail out (only if ALL metrics are missing)
   if (!responseTime && !inputTokens && !outputTokens && tps == null && !ctxPct) return;
-
-  // Accumulate session cost (only on fresh metrics, not history reload)
-  if (!metrics._fromHistory) {
-    const _sid = window.sessionModule && window.sessionModule.getCurrentSessionId();
-    if (_sid && cost !== null) {
-      try {
-        const _costs = JSON.parse(localStorage.getItem(_COST_KEY) || '{}');
-        _costs[_sid] = (_costs[_sid] || 0) + cost;
-        localStorage.setItem(_COST_KEY, JSON.stringify(_costs));
-      } catch (_e) { /* ignore */ }
-      updateSessionCostUI();
-    }
-  }
 
   // Keep token counts in the Message Stats popup; the footer should stay slim.
   const costStr0 = cost !== null ? `$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(3)}` : null;

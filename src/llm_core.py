@@ -11,7 +11,7 @@ import os
 from contextlib import asynccontextmanager
 from fastapi import HTTPException
 from typing import Optional, Dict, List, Tuple
-from src.model_context import get_context_length, DEFAULT_CONTEXT, is_local_endpoint
+from src.model_context import get_context_length, DEFAULT_CONTEXT, is_local_endpoint, estimate_tokens
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -1951,7 +1951,7 @@ async def llm_call_async_with_fallback(candidates, messages, **kwargs) -> str:
     raise last_err if last_err else HTTPException(503, "All fallback candidates failed")
 
 
-async def llm_call_async(
+async def _llm_call_async_impl(
     url: str,
     model: str,
     messages: List[Dict],
@@ -2124,6 +2124,64 @@ async def llm_call_async(
             if attempt >= max_retries:
                 raise HTTPException(502, f"POST {target_url} failed after {max_retries} attempts: {e}")
             await asyncio.sleep(LLMConfig.RETRY_DELAY)
+
+
+async def llm_call_async(
+    url: str,
+    model: str,
+    messages: List[Dict],
+    temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
+    max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS,
+    headers: Optional[Dict] = None,
+    timeout: int = LLMConfig.STREAM_TIMEOUT,
+    max_retries: int = LLMConfig.MAX_RETRIES,
+    prompt_type: Optional[str] = None,
+    session_id: Optional[str] = None,
+    workload: str = "foreground",
+    provider_options: Optional[Dict] = None,
+    *,
+    usage_owner: Optional[str] = None,
+    usage_kind: str = "other",
+    usage_session_id: Optional[str] = None,
+    usage_task_id: Optional[str] = None,
+) -> str:
+    """Call an LLM and optionally account for non-streaming workload usage."""
+    call_kwargs = {
+        "temperature": temperature, "max_tokens": max_tokens, "headers": headers,
+        "timeout": timeout, "max_retries": max_retries, "prompt_type": prompt_type,
+        "session_id": session_id, "workload": workload, "provider_options": provider_options,
+    }
+    if not usage_owner:
+        return await _llm_call_async_impl(url, model, messages, **call_kwargs)
+    from src.usage_observability import RunContext, RunOutcome, SpanContext, SpanOutcome, UsageObservation, usage_store
+    started = time.monotonic()
+    run = usage_store.begin_run(RunContext(
+        owner=usage_owner, kind=usage_kind, source_surface="internal",
+        session_id=usage_session_id, task_id=usage_task_id,
+    ))
+    turn = run.begin_span(SpanContext(kind="turn", name=f"{usage_kind}.operation"))
+    span = run.begin_span(SpanContext(
+        kind="model", name="model.generate", parent_span_id=turn.id,
+        requested_model=model, actual_model=model, provider=_detect_provider(url),
+    ))
+    try:
+        response = await _llm_call_async_impl(url, model, messages, **call_kwargs)
+        span.record_usage(UsageObservation(
+            source="estimated", input_tokens=estimate_tokens(messages),
+            output_tokens=max(len(response or "") // 4, 0),
+        ))
+        duration = round((time.monotonic() - started) * 1000)
+        span.finish(SpanOutcome(duration_ms=duration))
+        turn.finish(SpanOutcome(duration_ms=duration))
+        run.finish(RunOutcome(duration_ms=duration))
+        return response
+    except Exception as exc:
+        duration = round((time.monotonic() - started) * 1000)
+        span.finish(SpanOutcome(status="failed", outcome_code=type(exc).__name__, duration_ms=duration))
+        turn.finish(SpanOutcome(status="failed", duration_ms=duration))
+        run.finish(RunOutcome(status="failed", error_code=type(exc).__name__, duration_ms=duration))
+        raise
+
 
 def _stream_target_url(url: str) -> str:
     provider = _detect_provider(url)

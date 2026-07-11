@@ -2020,11 +2020,12 @@ async function _cmdUsage(args, ctx) {
   const messageCount = Number(session?.message_count || 0);
   const totalTokens = Number(session?.total_tokens || 0);
   const costTracked = chatRenderer.isCostTrackedEndpoint ? chatRenderer.isCostTrackedEndpoint(endpointUrl) : true;
-  const cost = costTracked && chatRenderer.getSessionCost ? Number(chatRenderer.getSessionCost(sid) || 0) : 0;
+  const costMicros = session?.total_cost_micros;
+  const cost = costMicros == null ? 0 : Number(costMicros) / 1_000_000;
   const costLine = costTracked
-    ? (cost > 0
-      ? `Estimated local cost: $${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(3)}`
-      : 'Estimated local cost: unavailable or zero')
+    ? (costMicros != null
+      ? `Server-recorded cost: $${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(3)}`
+      : 'Server-recorded cost: unavailable')
     : 'Estimated local cost: not tracked for this endpoint';
 
   slashReply(`<pre>${[

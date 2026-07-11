@@ -692,6 +692,13 @@ app.include_router(setup_chat_routes(
 # Server-side token/cache/cost and activity observability.
 from routes.usage_routes import setup_usage_routes
 app.include_router(setup_usage_routes())
+try:
+    from src.usage_observability import usage_store
+    _usage_retention_days = int(os.getenv("USAGE_RETENTION_DAYS", "0") or 0)
+    if _usage_retention_days > 0:
+        usage_store.apply_retention(days=_usage_retention_days)
+except Exception:
+    logging.getLogger("usage.startup").warning("Usage retention failed", exc_info=True)
 
 from routes.terminal_client_routes import setup_terminal_client_routes
 app.include_router(setup_terminal_client_routes(

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import func
 
@@ -17,6 +19,9 @@ from core.database import (
     UsageRun as DBUsageRun,
     UsageSpan as DBUsageSpan,
     UsagePriceSnapshot as DBUsagePriceSnapshot,
+    UsageDailyRollup as DBUsageDailyRollup,
+    ChatMessage as DBChatMessage,
+    Session as DBSession,
 )
 
 
@@ -44,6 +49,18 @@ DEFAULT_PRICE_CATALOG = {
     "grok-4": (3.00, 15.00, None, None),
     "qwen3": (0.30, 1.20, None, None),
     "sonar-pro": (3.00, 15.00, None, None),
+}
+
+IMAGE_PRICE_USD = {
+    ("gpt-image-1.5", "low", "1024x1024"): 0.009,
+    ("gpt-image-1.5", "medium", "1024x1024"): 0.034,
+    ("gpt-image-1.5", "high", "1024x1024"): 0.133,
+    ("gpt-image-1", "low", "1024x1024"): 0.011,
+    ("gpt-image-1", "medium", "1024x1024"): 0.042,
+    ("gpt-image-1", "high", "1024x1024"): 0.167,
+    ("gpt-image-1-mini", "low", "1024x1024"): 0.005,
+    ("gpt-image-1-mini", "medium", "1024x1024"): 0.011,
+    ("gpt-image-1-mini", "high", "1024x1024"): 0.036,
 }
 
 
@@ -98,6 +115,11 @@ class UsageObservation:
     cache_read_tokens: int | None = None
     cache_write_tokens: int | None = None
     fresh_input_tokens: int | None = None
+    context_tokens: int | None = None
+    context_length: int | None = None
+    time_to_first_token_ms: int | None = None
+    generation_tps_milli: int | None = None
+    prefill_tps_milli: int | None = None
     audio_input_tokens: int | None = None
     audio_output_tokens: int | None = None
     image_input_units: int | None = None
@@ -351,16 +373,16 @@ class UsageStore:
             )
             db.commit()
 
-    def finish_active_run(self, *, owner: str, session_id: str | None, status: str = "interrupted") -> None:
-        """Finalize the newest unfinished Run and spans after generator failure."""
-        if not session_id:
+    def finish_active_run(self, *, owner: str, run_id: str | None, status: str = "interrupted") -> None:
+        """Finalize one explicitly identified unfinished Run and its spans."""
+        if not run_id:
             return
         with self._session_factory() as db:
             run = db.query(DBUsageRun).filter(
                 DBUsageRun.owner == (owner or "local"),
-                DBUsageRun.session_id == session_id,
+                DBUsageRun.id == run_id,
                 DBUsageRun.status == "running",
-            ).order_by(DBUsageRun.started_at.desc()).first()
+            ).first()
             if not run:
                 return
             finished = _now()
@@ -374,6 +396,183 @@ class UsageStore:
             run.finished_at = finished
             run.duration_ms = _elapsed_ms(run.started_at, finished)
             db.commit()
+
+    def backfill_legacy_messages(self) -> dict[str, int]:
+        """Idempotently convert historical assistant metrics into ledger facts."""
+        created = skipped = 0
+        with self._session_factory() as db:
+            rows = db.query(DBChatMessage, DBSession).join(
+                DBSession, DBSession.id == DBChatMessage.session_id
+            ).filter(DBChatMessage.role == "assistant", DBChatMessage.meta_data.isnot(None)).all()
+            for message, session in rows:
+                run_id = f"run_legacy_{message.id}"
+                if db.query(DBUsageRun.id).filter(DBUsageRun.id == run_id).first():
+                    skipped += 1
+                    continue
+                try:
+                    metadata = json.loads(message.meta_data or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    skipped += 1
+                    continue
+                if not isinstance(metadata, dict):
+                    skipped += 1
+                    continue
+                if metadata.get("usage_run_id"):
+                    skipped += 1
+                    continue
+                input_tokens = metadata.get("input_tokens")
+                output_tokens = metadata.get("output_tokens")
+                if input_tokens is None and output_tokens is None:
+                    skipped += 1
+                    continue
+                owner = (session.owner or "local").strip() or "local"
+                started = message.timestamp or _now()
+                response_seconds = metadata.get("response_time")
+                try:
+                    duration_ms = round(float(response_seconds) * 1000) if response_seconds is not None else None
+                except (TypeError, ValueError):
+                    duration_ms = None
+                kind = "agent" if metadata.get("tool_events") or metadata.get("round_usage") else "chat"
+                db.add(DBUsageRun(
+                    id=run_id, owner=owner, kind=kind, status="succeeded",
+                    source_surface="web", session_id=session.id, started_at=started,
+                    finished_at=started + timedelta(milliseconds=duration_ms or 0),
+                    duration_ms=duration_ms, attributes_json={"legacy_message_id": message.id},
+                ))
+                db.flush()
+                turn_id = f"span_legacy_turn_{message.id}"
+                model_id = f"span_legacy_model_{message.id}"
+                db.add(DBUsageSpan(
+                    id=turn_id, run_id=run_id, owner=owner, kind="turn", name=f"{kind}.turn",
+                    status="succeeded", sequence=1, started_at=started,
+                    finished_at=started + timedelta(milliseconds=duration_ms or 0), duration_ms=duration_ms,
+                    attributes_json={"legacy": True},
+                ))
+                db.flush()
+                db.add(DBUsageSpan(
+                    id=model_id, run_id=run_id, parent_span_id=turn_id, owner=owner,
+                    kind="model", name="model.generate", status="succeeded", sequence=2,
+                    started_at=started, finished_at=started + timedelta(milliseconds=duration_ms or 0),
+                    duration_ms=duration_ms, requested_model=metadata.get("requested_model") or session.model,
+                    actual_model=metadata.get("model") or session.model, attributes_json={"legacy": True},
+                ))
+                db.flush()
+                db.add(DBUsageObservation(
+                    id=f"obs_legacy_{message.id}", run_id=run_id, span_id=model_id, owner=owner,
+                    observed_at=started, sequence=1, is_final=True, reconciliation_version=1,
+                    source="estimated", input_tokens=input_tokens, output_tokens=output_tokens,
+                    reasoning_tokens=metadata.get("reasoning_tokens"),
+                    cache_read_tokens=metadata.get("cache_read_tokens"),
+                    cache_write_tokens=metadata.get("cache_write_tokens"),
+                    fresh_input_tokens=metadata.get("fresh_input_tokens"), currency="USD",
+                    raw_usage_json={"adapter_version": "legacy-message-v1"},
+                ))
+                for index, event in enumerate(metadata.get("tool_events") or [], 3):
+                    if not isinstance(event, dict):
+                        continue
+                    db.add(DBUsageSpan(
+                        id=f"span_legacy_tool_{message.id}_{index}", run_id=run_id,
+                        parent_span_id=turn_id, owner=owner, kind="tool",
+                        name=f"tool.{event.get('tool') or 'unknown'}", status="failed" if event.get("exit_code") not in (None, 0) else "succeeded",
+                        sequence=index, agent_round=event.get("round"), started_at=started,
+                        finished_at=started, duration_ms=None, tool_name=event.get("tool"),
+                        attributes_json={"legacy": True},
+                    ))
+                metadata["usage_run_id"] = run_id
+                message.meta_data = json.dumps(metadata)
+                created += 1
+            db.commit()
+        return {"created": created, "skipped": skipped}
+
+    def rebuild_daily_rollups(self, *, owner: str | None = None) -> int:
+        """Rebuild rollups from authoritative latest final observations."""
+        with self._session_factory() as db:
+            if owner:
+                db.query(DBUsageDailyRollup).filter(DBUsageDailyRollup.owner == owner).delete()
+            else:
+                db.query(DBUsageDailyRollup).delete()
+            query = db.query(DBUsageObservation, DBUsageSpan, DBUsageRun).join(
+                DBUsageSpan, DBUsageSpan.id == DBUsageObservation.span_id
+            ).join(DBUsageRun, DBUsageRun.id == DBUsageObservation.run_id).filter(
+                DBUsageObservation.is_final.is_(True)
+            )
+            if owner:
+                query = query.filter(DBUsageObservation.owner == owner)
+            joined = query.all()
+            latest_ids = {row.id for row in self._latest_final([item[0] for item in joined])}
+            groups: dict[tuple, list[tuple[Any, Any, Any]]] = {}
+            for observation, span, run in joined:
+                if observation.id not in latest_ids:
+                    continue
+                day = observation.observed_at.replace(hour=0, minute=0, second=0, microsecond=0)
+                key = (run.owner, day, run.kind, span.provider or "unknown", span.actual_model or "unknown", run.source_surface)
+                groups.setdefault(key, []).append((observation, span, run))
+            for key, group in groups.items():
+                observations = [item[0] for item in group]
+                runs = {item[2].id: item[2] for item in group}
+                durations = [run.duration_ms for run in runs.values() if run.duration_ms is not None]
+                db.add(DBUsageDailyRollup(
+                    id=_id("rollup"), owner=key[0], date=key[1], kind=key[2], provider=key[3],
+                    actual_model=key[4], source_surface=key[5],
+                    input_tokens=sum(row.input_tokens or 0 for row in observations),
+                    output_tokens=sum(row.output_tokens or 0 for row in observations),
+                    reasoning_tokens=self._sum_nullable(observations, "reasoning_tokens"),
+                    cache_read_tokens=self._sum_nullable(observations, "cache_read_tokens"),
+                    cache_write_tokens=self._sum_nullable(observations, "cache_write_tokens"),
+                    fresh_input_tokens=self._sum_nullable(observations, "fresh_input_tokens"),
+                    total_cost_micros=self._sum_nullable(observations, "total_cost_micros"),
+                    run_count=len(runs), failed_run_count=sum(run.status == "failed" for run in runs.values()),
+                    duration_total_ms=sum(durations), duration_max_ms=max(durations, default=0),
+                ))
+            db.commit()
+            return len(groups)
+
+    def delete_usage(self, *, owner: str, run_id: str | None = None, before: datetime | None = None, all_usage: bool = False) -> int:
+        """Explicit owner-scoped deletion; session deletion never calls this."""
+        if not (run_id or before or all_usage):
+            raise ValueError("usage deletion requires run_id, before, or all_usage")
+        with self._session_factory() as db:
+            query = db.query(DBUsageRun).filter(DBUsageRun.owner == owner)
+            if run_id:
+                query = query.filter(DBUsageRun.id == run_id)
+            if before:
+                query = query.filter(DBUsageRun.started_at < before)
+            count = query.count()
+            query.delete(synchronize_session=False)
+            db.query(DBUsageDailyRollup).filter(DBUsageDailyRollup.owner == owner).delete()
+            db.commit()
+            return count
+
+    def apply_retention(self, *, days: int) -> int:
+        """Apply explicit opt-in raw-fact retention across owners."""
+        if days <= 0:
+            return 0
+        cutoff = _now() - timedelta(days=days)
+        self.rebuild_daily_rollups()
+        with self._session_factory() as db:
+            query = db.query(DBUsageRun).filter(DBUsageRun.started_at < cutoff)
+            count = query.count()
+            query.delete(synchronize_session=False)
+            db.commit()
+            return count
+
+    def session_totals(self, *, owner: str) -> dict[str, dict[str, int | None]]:
+        """Project authoritative tokens/cost by durable Session."""
+        with self._session_factory() as db:
+            rows = db.query(DBUsageObservation, DBUsageRun).join(
+                DBUsageRun, DBUsageRun.id == DBUsageObservation.run_id
+            ).filter(DBUsageObservation.owner == owner, DBUsageObservation.is_final.is_(True), DBUsageRun.session_id.isnot(None)).all()
+            latest_ids = {row.id for row in self._latest_final([item[0] for item in rows])}
+            grouped: dict[str, list[Any]] = {}
+            for observation, run in rows:
+                if observation.id in latest_ids:
+                    grouped.setdefault(run.session_id, []).append(observation)
+        return {session_id: {
+            "input_tokens": sum(row.input_tokens or 0 for row in observations),
+            "output_tokens": sum(row.output_tokens or 0 for row in observations),
+            "total_tokens": sum((row.input_tokens or 0) + (row.output_tokens or 0) for row in observations),
+            "total_cost_micros": self._sum_nullable(observations, "total_cost_micros"),
+        } for session_id, observations in grouped.items()}
 
     @staticmethod
     def _sum_nullable(rows: list[Any], name: str) -> int | None:
@@ -390,6 +589,38 @@ class UsageStore:
             query = query.filter(DBUsageObservation.observed_at < end)
         return self._latest_final(query.all())
 
+    def _filtered_joined(
+        self, db, *, owner: str, start: datetime | None = None, end: datetime | None = None,
+        session_id: str | None = None, run_id: str | None = None, kind: str | None = None,
+        surface: str | None = None, provider: str | None = None, model: str | None = None,
+        tool: str | None = None, status: str | None = None, usage_source: str | None = None,
+        cache_status: str | None = None,
+    ) -> list[tuple[Any, Any, Any]]:
+        query = db.query(DBUsageObservation, DBUsageSpan, DBUsageRun).join(
+            DBUsageSpan, DBUsageSpan.id == DBUsageObservation.span_id
+        ).join(DBUsageRun, DBUsageRun.id == DBUsageObservation.run_id).filter(
+            DBUsageObservation.owner == owner, DBUsageObservation.is_final.is_(True)
+        )
+        if start: query = query.filter(DBUsageObservation.observed_at >= start)
+        if end: query = query.filter(DBUsageObservation.observed_at < end)
+        if session_id: query = query.filter(DBUsageRun.session_id == session_id)
+        if run_id: query = query.filter(DBUsageRun.id == run_id)
+        if kind: query = query.filter(DBUsageRun.kind == kind)
+        if surface: query = query.filter(DBUsageRun.source_surface == surface)
+        if provider: query = query.filter(DBUsageSpan.provider == provider)
+        if model: query = query.filter(DBUsageSpan.actual_model == model)
+        if tool:
+            tool_runs = db.query(DBUsageSpan.run_id).filter(DBUsageSpan.tool_name == tool).subquery()
+            query = query.filter(DBUsageRun.id.in_(tool_runs))
+        if status: query = query.filter(DBUsageRun.status == status)
+        if usage_source: query = query.filter(DBUsageObservation.source == usage_source)
+        if cache_status == "hit": query = query.filter(DBUsageObservation.cache_read_tokens > 0)
+        if cache_status == "miss": query = query.filter(DBUsageObservation.cache_read_tokens == 0)
+        if cache_status == "unknown": query = query.filter(DBUsageObservation.cache_read_tokens.is_(None))
+        joined = query.all()
+        latest_ids = {row.id for row in self._latest_final([item[0] for item in joined])}
+        return [item for item in joined if item[0].id in latest_ids]
+
     @staticmethod
     def _latest_final(rows: list[Any]) -> list[Any]:
         latest: dict[str, Any] = {}
@@ -399,15 +630,33 @@ class UsageStore:
                 latest[row.span_id] = row
         return list(latest.values())
 
-    def query_summary(self, *, owner: str, start: datetime | None = None, end: datetime | None = None) -> dict[str, Any]:
+    def query_summary(self, *, owner: str, start: datetime | None = None, end: datetime | None = None, **filters) -> dict[str, Any]:
         with self._session_factory() as db:
-            rows = self._final_rows(db, owner, start, end)
+            joined = self._filtered_joined(db, owner=owner, start=start, end=end, **filters)
+            rows = [item[0] for item in joined]
             run_query = db.query(DBUsageRun).filter(DBUsageRun.owner == owner)
-            if start:
-                run_query = run_query.filter(DBUsageRun.started_at >= start)
-            if end:
-                run_query = run_query.filter(DBUsageRun.started_at < end)
-            runs = run_query.all()
+            if start: run_query = run_query.filter(DBUsageRun.started_at >= start)
+            if end: run_query = run_query.filter(DBUsageRun.started_at < end)
+            if filters.get("session_id"): run_query = run_query.filter(DBUsageRun.session_id == filters["session_id"])
+            if filters.get("run_id"): run_query = run_query.filter(DBUsageRun.id == filters["run_id"])
+            if filters.get("kind"): run_query = run_query.filter(DBUsageRun.kind == filters["kind"])
+            if filters.get("surface"): run_query = run_query.filter(DBUsageRun.source_surface == filters["surface"])
+            if filters.get("status"): run_query = run_query.filter(DBUsageRun.status == filters["status"])
+            observation_filters = any(filters.get(key) for key in ("provider", "model", "tool", "usage_source", "cache_status"))
+            if observation_filters:
+                matching_ids = {item[2].id for item in joined}
+                runs = run_query.filter(DBUsageRun.id.in_(matching_ids)).all() if matching_ids else []
+            else:
+                runs = run_query.all()
+            price_ids = {row.price_snapshot_id for row in rows if row.price_snapshot_id}
+            prices = {row.id: row for row in db.query(DBUsagePriceSnapshot).filter(DBUsagePriceSnapshot.id.in_(price_ids)).all()} if price_ids else {}
+            cache_savings = 0
+            has_savings = False
+            for row in rows:
+                price = prices.get(row.price_snapshot_id)
+                if price and row.cache_read_tokens is not None and price.input_per_million_micros is not None and price.cache_read_per_million_micros is not None:
+                    cache_savings += self._meter(row.cache_read_tokens, price.input_per_million_micros - price.cache_read_per_million_micros) or 0
+                    has_savings = True
         sources = {row.source for row in rows}
         quality = "none" if not sources else ("estimated" if sources == {"estimated"} else ("exact" if "estimated" not in sources else "mixed"))
         return {
@@ -421,18 +670,38 @@ class UsageStore:
                 "cache_write_tokens": self._sum_nullable(rows, "cache_write_tokens"),
                 "fresh_input_tokens": self._sum_nullable(rows, "fresh_input_tokens"),
                 "total_cost_micros": self._sum_nullable(rows, "total_cost_micros"),
+                "cache_savings_micros": cache_savings if has_savings else None,
+                "cache_hit_runs": len({item[2].id for item in joined if (item[0].cache_read_tokens or 0) > 0}),
+                "cache_unknown_runs": len({item[2].id for item in joined if item[0].cache_read_tokens is None}),
                 "runs": len(runs), "failed_runs": sum(run.status == "failed" for run in runs),
+                "duration_median_ms": self._percentile([run.duration_ms for run in runs if run.duration_ms is not None], 0.5),
+                "duration_p95_ms": self._percentile([run.duration_ms for run in runs if run.duration_ms is not None], 0.95),
+                "near_context_limit_runs": len({item[2].id for item in joined if item[0].context_tokens is not None and item[0].context_length and item[0].context_tokens / item[0].context_length >= 0.8}),
+                "generation_tps_median": self._percentile([row.generation_tps_milli for row in rows if row.generation_tps_milli is not None], 0.5) / 1000 if any(row.generation_tps_milli is not None for row in rows) else None,
             },
+            "filters": {key: value for key, value in {"from": start.isoformat() if start else None, "to": end.isoformat() if end else None, **filters}.items() if value is not None},
         }
 
-    def query_timeseries(self, *, owner: str, start: datetime | None = None, end: datetime | None = None, bucket: str = "day") -> dict[str, Any]:
+    @staticmethod
+    def _percentile(values: list[int], fraction: float) -> int | None:
+        if not values:
+            return None
+        ordered = sorted(values)
+        return ordered[min(round((len(ordered) - 1) * fraction), len(ordered) - 1)]
+
+    def query_timeseries(self, *, owner: str, start: datetime | None = None, end: datetime | None = None, bucket: str = "day", timezone_name: str = "UTC", **filters) -> dict[str, Any]:
         if bucket not in {"hour", "day", "week"}:
             raise ValueError("bucket must be hour, day, or week")
+        try:
+            timezone_value = ZoneInfo(timezone_name)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("unknown timezone") from exc
         with self._session_factory() as db:
-            rows = self._final_rows(db, owner, start, end)
+            joined = self._filtered_joined(db, owner=owner, start=start, end=end, **filters)
+            rows = [item[0] for item in joined]
         points: dict[datetime, list[Any]] = {}
         for row in rows:
-            dt = row.observed_at
+            dt = row.observed_at.replace(tzinfo=timezone.utc).astimezone(timezone_value)
             if bucket == "hour":
                 key = dt.replace(minute=0, second=0, microsecond=0)
             elif bucket == "week":
@@ -441,8 +710,8 @@ class UsageStore:
             else:
                 key = dt.replace(hour=0, minute=0, second=0, microsecond=0)
             points.setdefault(key, []).append(row)
-        return {"bucket": bucket, "points": [{
-            "time": key.isoformat() + "Z",
+        return {"bucket": bucket, "timezone": timezone_name, "points": [{
+            "time": key.isoformat(),
             "input_tokens": sum(row.input_tokens or 0 for row in group),
             "output_tokens": sum(row.output_tokens or 0 for row in group),
             "cache_read_tokens": self._sum_nullable(group, "cache_read_tokens"),
@@ -451,7 +720,7 @@ class UsageStore:
             "total_cost_micros": self._sum_nullable(group, "total_cost_micros"),
         } for key, group in sorted(points.items())]}
 
-    def query_breakdown(self, *, owner: str, group_by: str = "model", start: datetime | None = None, end: datetime | None = None) -> dict[str, Any]:
+    def query_breakdown(self, *, owner: str, group_by: str = "model", start: datetime | None = None, end: datetime | None = None, **filters) -> dict[str, Any]:
         dimensions = {
             "model": DBUsageSpan.actual_model, "provider": DBUsageSpan.provider,
             "kind": DBUsageRun.kind, "surface": DBUsageRun.source_surface,
@@ -461,6 +730,9 @@ class UsageStore:
             raise ValueError("unsupported breakdown dimension")
         if group_by == "tool":
             with self._session_factory() as db:
+                allowed_run_ids = None
+                if filters:
+                    allowed_run_ids = {item[2].id for item in self._filtered_joined(db, owner=owner, start=start, end=end, **{k: v for k, v in filters.items() if k != "tool"})}
                 query = db.query(DBUsageSpan).filter(
                     DBUsageSpan.owner == owner, DBUsageSpan.kind == "tool"
                 )
@@ -468,6 +740,10 @@ class UsageStore:
                     query = query.filter(DBUsageSpan.started_at >= start)
                 if end:
                     query = query.filter(DBUsageSpan.started_at < end)
+                if allowed_run_ids is not None:
+                    query = query.filter(DBUsageSpan.run_id.in_(allowed_run_ids))
+                if filters.get("tool"):
+                    query = query.filter(DBUsageSpan.tool_name == filters["tool"])
                 spans = query.all()
             groups: dict[str, list[Any]] = {}
             for span in spans:
@@ -483,18 +759,7 @@ class UsageStore:
             items.sort(key=lambda item: item["invocations"], reverse=True)
             return {"group_by": group_by, "items": items}
         with self._session_factory() as db:
-            query = db.query(DBUsageObservation, DBUsageSpan, DBUsageRun).join(
-                DBUsageSpan, DBUsageSpan.id == DBUsageObservation.span_id
-            ).join(DBUsageRun, DBUsageRun.id == DBUsageObservation.run_id).filter(
-                DBUsageObservation.owner == owner, DBUsageObservation.is_final.is_(True)
-            )
-            if start:
-                query = query.filter(DBUsageObservation.observed_at >= start)
-            if end:
-                query = query.filter(DBUsageObservation.observed_at < end)
-            joined_rows = query.all()
-            latest_ids = {row.id for row in self._latest_final([item[0] for item in joined_rows])}
-            rows = [item for item in joined_rows if item[0].id in latest_ids]
+            rows = self._filtered_joined(db, owner=owner, start=start, end=end, **filters)
         groups: dict[str, list[tuple[Any, Any, Any]]] = {}
         for observation, span, run in rows:
             source = span if group_by in {"model", "provider", "tool"} else run
@@ -514,13 +779,32 @@ class UsageStore:
         items.sort(key=lambda item: item["input_tokens"] + item["output_tokens"], reverse=True)
         return {"group_by": group_by, "items": items}
 
-    def list_runs(self, *, owner: str, start: datetime | None = None, end: datetime | None = None, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    def list_runs(self, *, owner: str, start: datetime | None = None, end: datetime | None = None, limit: int = 100, offset: int = 0, **filters) -> dict[str, Any]:
         with self._session_factory() as db:
             query = db.query(DBUsageRun).filter(DBUsageRun.owner == owner)
             if start:
                 query = query.filter(DBUsageRun.started_at >= start)
             if end:
                 query = query.filter(DBUsageRun.started_at < end)
+            if filters.get("session_id"): query = query.filter(DBUsageRun.session_id == filters["session_id"])
+            if filters.get("run_id"): query = query.filter(DBUsageRun.id == filters["run_id"])
+            if filters.get("kind"): query = query.filter(DBUsageRun.kind == filters["kind"])
+            if filters.get("surface"): query = query.filter(DBUsageRun.source_surface == filters["surface"])
+            if filters.get("status"): query = query.filter(DBUsageRun.status == filters["status"])
+            span_filters = []
+            if filters.get("provider"): span_filters.append(DBUsageSpan.provider == filters["provider"])
+            if filters.get("model"): span_filters.append(DBUsageSpan.actual_model == filters["model"])
+            if filters.get("tool"): span_filters.append(DBUsageSpan.tool_name == filters["tool"])
+            if span_filters:
+                matching_runs = db.query(DBUsageSpan.run_id).filter(*span_filters)
+                query = query.filter(DBUsageRun.id.in_(matching_runs))
+            if filters.get("usage_source") or filters.get("cache_status"):
+                obs_query = db.query(DBUsageObservation.run_id).filter(DBUsageObservation.is_final.is_(True))
+                if filters.get("usage_source"): obs_query = obs_query.filter(DBUsageObservation.source == filters["usage_source"])
+                if filters.get("cache_status") == "hit": obs_query = obs_query.filter(DBUsageObservation.cache_read_tokens > 0)
+                if filters.get("cache_status") == "miss": obs_query = obs_query.filter(DBUsageObservation.cache_read_tokens == 0)
+                if filters.get("cache_status") == "unknown": obs_query = obs_query.filter(DBUsageObservation.cache_read_tokens.is_(None))
+                query = query.filter(DBUsageRun.id.in_(obs_query))
             total = query.count()
             runs = query.order_by(DBUsageRun.started_at.desc()).offset(offset).limit(min(max(limit, 1), 500)).all()
             results = []
@@ -544,6 +828,25 @@ class UsageStore:
             result = self._serialize_run(run, [row for row in observations if row.is_final])
             result["spans"] = [self._serialize_span(span, by_span.get(span.id, [])) for span in spans]
             return result
+
+    def query_anomalies(self, *, owner: str, start: datetime | None = None, end: datetime | None = None) -> dict[str, Any]:
+        runs = self.list_runs(owner=owner, start=start, end=end, limit=500)["runs"]
+        durations = [run["duration_ms"] for run in runs if run["duration_ms"] is not None]
+        costs = [run["total_cost_micros"] for run in runs if run["total_cost_micros"] is not None]
+        duration_threshold = self._percentile(durations, 0.95)
+        cost_threshold = self._percentile(costs, 0.95)
+        anomalies = []
+        for run in runs:
+            reasons = []
+            if duration_threshold is not None and run["duration_ms"] is not None and run["duration_ms"] >= duration_threshold and len(durations) >= 5:
+                reasons.append("duration_p95")
+            if cost_threshold is not None and run["total_cost_micros"] is not None and run["total_cost_micros"] >= cost_threshold and len(costs) >= 5:
+                reasons.append("cost_p95")
+            if run["status"] in {"failed", "interrupted"}:
+                reasons.append(run["status"])
+            if reasons:
+                anomalies.append({"run_id": run["id"], "started_at": run["started_at"], "reasons": reasons, "duration_ms": run["duration_ms"], "total_cost_micros": run["total_cost_micros"]})
+        return {"thresholds": {"duration_p95_ms": duration_threshold, "cost_p95_micros": cost_threshold}, "anomalies": anomalies}
 
     def export(self, *, owner: str, format: str = "jsonl", **filters) -> Iterator[bytes]:
         import json
@@ -590,6 +893,11 @@ class UsageStore:
             "output_tokens": final.output_tokens, "reasoning_tokens": final.reasoning_tokens,
             "cache_read_tokens": final.cache_read_tokens, "cache_write_tokens": final.cache_write_tokens,
             "fresh_input_tokens": final.fresh_input_tokens, "total_cost_micros": final.total_cost_micros,
+            "cost_source": final.cost_source,
+            "context_tokens": final.context_tokens, "context_length": final.context_length,
+            "time_to_first_token_ms": final.time_to_first_token_ms,
+            "generation_tps": final.generation_tps_milli / 1000 if final.generation_tps_milli is not None else None,
+            "prefill_tps": final.prefill_tps_milli / 1000 if final.prefill_tps_milli is not None else None,
         }
         return {
             "id": span.id, "parent_span_id": span.parent_span_id, "kind": span.kind,
@@ -597,11 +905,55 @@ class UsageStore:
             "agent_round": span.agent_round, "provider": span.provider,
             "requested_model": span.requested_model, "actual_model": span.actual_model,
             "tool_name": span.tool_name, "started_at": span.started_at.isoformat() + "Z",
-            "duration_ms": span.duration_ms, "usage": usage,
+            "finished_at": span.finished_at.isoformat() + "Z" if span.finished_at else None,
+            "duration_ms": span.duration_ms, "outcome_code": span.outcome_code,
+            "attributes": span.attributes_json or {}, "usage": usage,
         }
 
 
 usage_store = UsageStore()
+
+
+def create_in_memory_usage_store() -> UsageStore:
+    """Create an isolated in-memory adapter for interface-level tests/tools."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+    from core.database import Base
+
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    return UsageStore(sessionmaker(bind=engine))
+
+
+def record_image_generation(
+    *, owner: str, session_id: str | None, model: str, quality: str | None,
+    size: str | None, succeeded: bool, duration_ms: int, incognito: bool = False,
+) -> str | None:
+    run = usage_store.begin_run(RunContext(
+        owner=owner or "local", kind="image", source_surface="web",
+        session_id=session_id, incognito=incognito,
+    ))
+    if not run.id:
+        return None
+    span = run.begin_span(SpanContext(
+        kind="model", name="image.generate", requested_model=model,
+        actual_model=model, attributes={"quality": quality or "medium", "size": size or "1024x1024"},
+    ))
+    key = (model, (quality or "medium").lower(), size or "1024x1024")
+    usd = IMAGE_PRICE_USD.get(key)
+    span.record_usage(UsageObservation(
+        source="provider", image_output_units=1,
+        other_cost_micros=round(usd * 1_000_000) if usd is not None else None,
+        total_cost_micros=round(usd * 1_000_000) if usd is not None else None,
+        cost_source="price_catalog" if usd is not None else None,
+    ))
+    status = "succeeded" if succeeded else "failed"
+    span.finish(SpanOutcome(status=status, duration_ms=duration_ms))
+    run.finish(RunOutcome(status=status, duration_ms=duration_ms))
+    return run.id
 
 
 def record_completed_turn(
@@ -660,6 +1012,11 @@ def record_completed_turn(
             cache_read_tokens=item.get("cache_read_tokens"),
             cache_write_tokens=item.get("cache_write_tokens"),
             fresh_input_tokens=item.get("fresh_input_tokens"),
+            context_tokens=item.get("context_tokens") or item.get("input_tokens"),
+            context_length=item.get("context_length") or metrics.get("context_length"),
+            time_to_first_token_ms=round(float(item.get("time_to_first_token") or metrics.get("time_to_first_token")) * 1000) if (item.get("time_to_first_token") is not None or metrics.get("time_to_first_token") is not None) else None,
+            generation_tps_milli=round(float(item.get("gen_tps") or metrics.get("tokens_per_second")) * 1000) if (item.get("gen_tps") is not None or metrics.get("tokens_per_second") is not None) else None,
+            prefill_tps_milli=round(float(item.get("prefill_tps")) * 1000) if item.get("prefill_tps") is not None else None,
             total_cost_micros=item.get("total_cost_micros"),
             cost_source=item.get("cost_source"), raw_usage=item.get("raw_usage") or {},
         ))
