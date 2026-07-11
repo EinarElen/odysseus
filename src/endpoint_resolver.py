@@ -413,6 +413,39 @@ def resolve_endpoint(
         db.close()
 
 
+def resolve_endpoint_for_model(model: str, owner: Optional[str] = None) -> Optional[Tuple[str, str, Dict]]:
+    """Resolve one visible model to its unique enabled endpoint for ``owner``.
+
+    Model names need not be globally unique, so callers that provide only a
+    model must never guess between endpoints. ``None`` means absent, hidden,
+    disabled, inaccessible, or ambiguous.
+    """
+    requested_model = (model or "").strip()
+    if not requested_model:
+        return None
+    db = SessionLocal()
+    try:
+        query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled.is_(True))
+        if owner:
+            from src.auth_helpers import owner_filter
+            query = owner_filter(query, ModelEndpoint, owner)
+        matches = [ep for ep in query.all() if requested_model in _endpoint_enabled_models(ep)]
+        if len(matches) != 1:
+            return None
+        ep = matches[0]
+        try:
+            base, api_key = resolve_endpoint_runtime(ep, owner=owner)
+        except Exception as exc:
+            logger.warning("Could not resolve endpoint runtime credentials: %s", exc)
+            return None
+        return build_chat_url(base), requested_model, build_headers(api_key, base)
+    except Exception as exc:
+        logger.debug("Could not resolve model %s to an endpoint: %s", requested_model, exc)
+        return None
+    finally:
+        db.close()
+
+
 def resolve_endpoint_by_id(
     ep_id: str, model: Optional[str] = None, owner: Optional[str] = None,
     provider_options: Optional[dict] = None,

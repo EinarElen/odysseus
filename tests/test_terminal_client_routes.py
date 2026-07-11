@@ -896,6 +896,53 @@ def test_terminal_client_chat_run_can_create_real_session(monkeypatch):
     assert events[-1]["kind"] == "run.status"
 
 
+def test_terminal_client_chat_run_resolves_model_only_with_owner_scoped_endpoint(monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    manager = FakeSessionManager()
+    resolved_for = []
+
+    def fake_resolve(model, owner=None):
+        resolved_for.append((model, owner))
+        return MODEL_ENDPOINT_URL, model, {"Authorization": "Bearer owner-scoped"}
+
+    async def fake_stream_llm_with_fallback(candidates, messages, **kwargs):
+        yield 'data: {"delta": "resolved"}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr("routes.terminal_client_routes.resolve_endpoint_for_model", fake_resolve)
+    monkeypatch.setattr("routes.terminal_client_routes.effective_user", lambda request: "alice")
+    monkeypatch.setattr("routes.terminal_client_routes.stream_llm_with_fallback", fake_stream_llm_with_fallback)
+    install_terminal_route_fakes(monkeypatch)
+    app = FastAPI()
+    app.include_router(setup_terminal_client_routes(session_manager=manager, chat_handler=FakeChatHandler()))
+
+    started = TestClient(app).post(
+        "/api/terminal/runs", json={"kind": "chat", "message": "hello", "model": "gpt-5.6-terra"}
+    )
+
+    assert started.status_code == 200
+    session = manager.sessions[started.json()["run"]["session_id"]]
+    assert resolved_for == [("gpt-5.6-terra", "alice")]
+    assert session.endpoint_url == MODEL_ENDPOINT_URL
+    assert session.model == "gpt-5.6-terra"
+    assert session.headers == {"Authorization": "Bearer owner-scoped"}
+
+
+def test_terminal_client_chat_run_rejects_endpoint_without_model(monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    manager = FakeSessionManager()
+    install_terminal_route_fakes(monkeypatch)
+    app = FastAPI()
+    app.include_router(setup_terminal_client_routes(session_manager=manager, chat_handler=FakeChatHandler()))
+
+    started = TestClient(app).post(
+        "/api/terminal/runs", json={"kind": "chat", "message": "hello", "endpoint_url": MODEL_ENDPOINT_URL}
+    )
+
+    assert started.status_code == 400
+    assert started.json()["detail"] == "Starting a new chat Run with endpoint_url requires model"
+
+
 def test_terminal_client_chat_run_resolves_owner_default_model(monkeypatch):
     monkeypatch.setenv("AUTH_ENABLED", "false")
     manager = FakeSessionManager()

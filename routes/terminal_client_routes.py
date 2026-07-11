@@ -28,7 +28,7 @@ from src.agent_loop import stream_agent_loop
 from src.agent_runtime import resolve_agent_execution_limits
 from src.auth_helpers import effective_user
 from src.constants import TERMINAL_EVENT_STREAM_MEDIA_TYPE
-from src.endpoint_resolver import resolve_chat_fallback_candidates
+from src.endpoint_resolver import resolve_chat_fallback_candidates, resolve_endpoint_for_model
 from src.harness import get_harness_adapter
 from src.llm_core import stream_llm_with_fallback
 from src.model_context import estimate_tokens
@@ -98,8 +98,14 @@ def _get_or_create_chat_session(
         resolved_headers = dict(headers or {})
         if not endpoint_url or not model:
             raise HTTPException(400, "No default chat model is configured; pass endpoint_url and model")
-    elif not endpoint_url or not model:
-        raise HTTPException(400, "Starting a new chat Run requires both endpoint_url and model")
+    elif model and not endpoint_url:
+        resolved = resolve_endpoint_for_model(model, owner=owner)
+        if resolved is None:
+            raise HTTPException(400, f"No enabled endpoint for model '{model}'; pass endpoint_url explicitly")
+        endpoint_url, model, headers = resolved
+        resolved_headers = dict(headers or {})
+    elif endpoint_url and not model:
+        raise HTTPException(400, "Starting a new chat Run with endpoint_url requires model")
 
     session_id = f"ses_{uuid.uuid4().hex[:16]}"
     try:

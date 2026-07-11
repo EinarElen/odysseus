@@ -980,6 +980,23 @@ def test_run_start_default_chat_uses_terminal_client_api(
     assert terminal_api_fake["calls"][0][3]["message"] == "default chat"
 
 
+def test_run_start_forwards_model_without_endpoint_for_server_resolution(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+
+    exit_code, stdout, stderr = run_cli(
+        ["run", "start", "--message", "new chat", "--model", "gpt-5.6-terra", "--format=json"]
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert json.loads(stdout)["data"]["run"]["session_id"].startswith("ses_")
+    body = terminal_api_fake["calls"][0][3]
+    assert body["endpoint_url"] is None
+    assert body["model"] == "gpt-5.6-terra"
+
+
 def test_run_start_forwards_new_session_runtime_fields(
     isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
 ) -> None:

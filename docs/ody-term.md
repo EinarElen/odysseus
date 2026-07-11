@@ -89,9 +89,13 @@ ody-term service logs main-server --format=jsonl
 ```
 
 Starting a new chat Run without `--session-id`, `--endpoint-url`, or `--model`
-uses the authenticated owner's configured Default Model. Pass both
-`--endpoint-url` and `--model` to override it, or pass `--session-id` to reuse
-that Session's model selection.
+uses the authenticated owner's configured Default Model. Pass `--model` alone
+to resolve that model against the owner's enabled endpoints; this succeeds only
+when exactly one visible endpoint provides it, and carries that endpoint's
+configured credentials. Pass both `--endpoint-url` and `--model` to select an
+explicit endpoint, or pass `--session-id` to reuse that Session's model
+selection. `--endpoint-url` without `--model` is an error because the server
+cannot safely infer which model to run.
 
 Durable Session reads are separate from Run lifecycle and event replay:
 
