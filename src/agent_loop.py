@@ -19,6 +19,7 @@ from src.llm_core import (
     stream_llm,
     stream_llm_with_fallback,
     _is_ollama_native_url,
+    _detect_provider,
 )
 from src.chatgpt_subscription import is_chatgpt_subscription_base
 from src.model_context import estimate_tokens
@@ -49,6 +50,7 @@ from src.usage_observability import (
     UsageObservation as MeteredUsage,
     usage_store,
 )
+from src.subscription_usage import provider_auth_id_for_endpoint
 
 logger = logging.getLogger(__name__)
 _DEFAULT_EXECUTE_TOOL_BLOCK = execute_tool_block
@@ -3397,7 +3399,8 @@ async def stream_agent_loop(
         _usage_model_span = _usage_run.begin_span(UsageSpanContext(
             kind="model", name="model.generate", parent_span_id=_usage_turn.id,
             agent_round=round_num, requested_model=requested_model,
-            actual_model=actual_model,
+            actual_model=actual_model, provider=_detect_provider(endpoint_url),
+            endpoint_id=provider_auth_id_for_endpoint(owner or "local", endpoint_url),
         ))
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
@@ -3638,6 +3641,8 @@ async def stream_agent_loop(
                             kind="model", name="model.generate", parent_span_id=_usage_turn.id,
                             agent_round=round_num, requested_model=actual_model,
                             actual_model=actual_model,
+                            provider=_detect_provider(data.get("answered_url") or endpoint_url),
+                            endpoint_id=provider_auth_id_for_endpoint(owner or "local", data.get("answered_url") or endpoint_url),
                         ))
                         logger.warning(f"[agent] round {round_num} fell back: "
                                        f"{data.get('selected_model')} -> {data.get('answered_by')}")

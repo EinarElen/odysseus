@@ -9,6 +9,8 @@ from src.llm_core import llm_call_async
 from src.interactive_gate import wait_for_interactive_quiet
 from src.model_context import estimate_tokens
 from src.usage_observability import RunContext, RunOutcome, SpanContext, SpanOutcome, UsageObservation, usage_store
+from src.subscription_usage import provider_auth_id_for_endpoint
+from src.llm_core import _detect_provider
 import time
 
 
@@ -92,6 +94,8 @@ async def task_llm_call_async(
         attempt = run.begin_span(SpanContext(
             kind="model", name="model.generate", parent_span_id=turn.id,
             requested_model=candidates[0][1], actual_model=model,
+            provider=_detect_provider(url),
+            endpoint_id=provider_auth_id_for_endpoint(owner or "local", url),
             attributes={"attempt": index + 1},
         ))
         attempt_started = time.monotonic()

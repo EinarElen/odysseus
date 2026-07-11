@@ -196,6 +196,31 @@ async function loadAnomalies() {
   el('usage-anomalies-body').querySelectorAll('[data-run-id]').forEach(row=>row.addEventListener('click',()=>loadRunDetail(row.dataset.runId)));
 }
 
+async function loadSubscription(refreshProvider = false) {
+  const response = await fetch('/api/usage/subscription' + (refreshProvider ? '/refresh' : ''), {
+    method: refreshProvider ? 'POST' : 'GET', credentials: 'same-origin',
+  });
+  if (!response.ok) throw new Error((await response.text()) || 'Subscription usage could not be loaded');
+  const data = await response.json();
+  const windows = data.accounts.flatMap(account => account.windows.map(window => ({...window, account})));
+  el('usage-subscription-windows').innerHTML = windows.map(({account, ...window}) => {
+    const stale = Date.now() - new Date(window.observed_at).getTime() > 15 * 60 * 1000;
+    const reset = window.resets_at ? new Date(window.resets_at).toLocaleString() : 'Unknown reset';
+    return `<article class="usage-quota"><div><span>${esc(account.plan || account.provider)} · ${esc(window.key)}</span><strong>${number(window.remaining_percent)}% remaining</strong><small>Resets ${esc(reset)} · ${stale ? 'stale snapshot' : 'provider snapshot'}</small></div><div class="usage-quota-meter" role="meter" aria-label="${esc(window.key)} usage" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${number(window.used_percent)}"><i style="width:${Math.max(0,Math.min(100,window.used_percent || 0))}%"></i></div></article>`;
+  }).join('') || '<p>No subscription snapshots yet. Connect ChatGPT Subscription, then refresh provider data.</p>';
+
+  const history = data.history.filter(item => item.used_percent != null);
+  const labels = history.map(item => new Date(item.observed_at).toLocaleString());
+  const keys = [...new Set(history.map(item => `${item.account_id}:${item.window_key}`))];
+  chart('usage-subscription-chart', {
+    legend:{}, xAxis:{type:'category',data:labels}, yAxis:{type:'value',min:0,max:100,axisLabel:{formatter:'{value}%'}},
+    series:keys.map(key=>({type:'line',step:'end',showSymbol:true,name:key.split(':').slice(1).join(':'),data:history.map(item=>`${item.account_id}:${item.window_key}`===key?item.used_percent:null)})),
+  });
+  accessibleTable('usage-subscription-table',['Observed','Window','Used','Reset'],history.map(item=>[new Date(item.observed_at).toLocaleString(),item.window_key,`${item.used_percent}%`,item.resets_at?new Date(item.resets_at).toLocaleString():'unknown']));
+  el('usage-attribution-body').innerHTML = data.intervals.slice().reverse().map(item=>`<tr><td>${esc(new Date(item.from).toLocaleString())} – ${esc(new Date(item.to).toLocaleTimeString())}</td><td>${esc(item.window_key)}</td><td>${item.account_delta_basis_points==null?'new epoch':`${number(item.account_delta_basis_points/100)} points`}</td><td>${number(item.odysseus_runs)}</td><td>${number(item.odysseus_input_tokens+item.odysseus_output_tokens)}</td><td title="${esc(item.reason)}">${esc(item.attribution.replaceAll('_',' '))} · ${esc(item.confidence)}</td></tr>`).join('') || '<tr><td colspan="6">Attribution begins after two provider snapshots.</td></tr>';
+  if (data.errors?.length) el('usage-error').textContent = data.errors.join(' · ');
+}
+
 async function refresh() {
   el('usage-error').textContent = '';
   try {
@@ -203,6 +228,7 @@ async function refresh() {
     if (activeTab === 'runs') await loadRuns();
     if (activeTab === 'activity') await loadActivity();
     if (activeTab === 'cost') await loadCapacity();
+    if (activeTab === 'subscription') await loadSubscription();
     if (activeTab === 'anomalies') await loadAnomalies();
   } catch (error) {
     el('usage-error').textContent = error.message || 'Usage data could not be loaded.';
@@ -216,6 +242,7 @@ function selectTab(tab) {
   if (tab === 'runs') loadRuns().catch(error => { el('usage-error').textContent = error.message; });
   if (tab === 'activity') loadActivity().catch(error => { el('usage-error').textContent = error.message; });
   if (tab === 'cost') loadCapacity().catch(error => { el('usage-error').textContent = error.message; });
+  if (tab === 'subscription') loadSubscription().catch(error => { el('usage-error').textContent = error.message; });
   if (tab === 'anomalies') loadAnomalies().catch(error => { el('usage-error').textContent = error.message; });
   persistView();
   setTimeout(() => charts.forEach(instance => instance.resize()), 0);
@@ -256,6 +283,7 @@ export function init() {
     persistView(); refresh();
   });
   el('usage-export')?.addEventListener('click', () => { window.location.href = `/api/usage/export?${query({format:'jsonl'})}`; });
+  el('usage-subscription-refresh')?.addEventListener('click', () => loadSubscription(true).catch(error => { el('usage-error').textContent = error.message; }));
   document.querySelectorAll('[data-usage-tab]').forEach(button => button.addEventListener('click', () => selectTab(button.dataset.usageTab)));
   window.addEventListener('resize', () => charts.forEach(instance => instance.resize()));
 }

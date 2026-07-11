@@ -2154,6 +2154,7 @@ async def llm_call_async(
     if not usage_owner:
         return await _llm_call_async_impl(url, model, messages, **call_kwargs)
     from src.usage_observability import RunContext, RunOutcome, SpanContext, SpanOutcome, UsageObservation, usage_store
+    from src.subscription_usage import provider_auth_id_for_endpoint
     started = time.monotonic()
     run = usage_store.begin_run(RunContext(
         owner=usage_owner, kind=usage_kind, source_surface="internal",
@@ -2163,6 +2164,7 @@ async def llm_call_async(
     span = run.begin_span(SpanContext(
         kind="model", name="model.generate", parent_span_id=turn.id,
         requested_model=model, actual_model=model, provider=_detect_provider(url),
+        endpoint_id=provider_auth_id_for_endpoint(usage_owner, url),
     ))
     try:
         response = await _llm_call_async_impl(url, model, messages, **call_kwargs)
@@ -3026,6 +3028,7 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
                         "type": "fallback",
                         "selected_model": primary_model,
                         "answered_by": model,
+                        "answered_url": url,
                         "reason": _summarize_stream_error(last_error),
                     }) + '\n\n')
                 emitted = True

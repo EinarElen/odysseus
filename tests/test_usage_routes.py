@@ -58,3 +58,14 @@ def test_usage_filters_anomalies_rollups_and_deletion(monkeypatch):
     assert client.post("/api/usage/rollups/rebuild").json()["rebuilt"] == 1
     assert client.delete(f"/api/usage/runs/{run.id}").json()["deleted"] == 1
     assert client.get("/api/usage/summary").json()["totals"]["runs"] == 0
+
+
+def test_subscription_routes_are_owner_scoped(monkeypatch):
+    class SubscriptionStore:
+        def refresh_if_stale(self, *, owner): return {"owner": owner, "accounts": []}
+        def refresh(self, *, owner): return {"owner": owner, "refreshed": 1}
+
+    monkeypatch.setattr(usage_routes, "subscription_usage_store", SubscriptionStore())
+    client, _ = _client(monkeypatch)
+    assert client.get("/api/usage/subscription").json()["owner"] == "local"
+    assert client.post("/api/usage/subscription/refresh").json()["refreshed"] == 1

@@ -2852,6 +2852,7 @@
       <button data-usage-tab="cache">Cache</button>
       <button data-usage-tab="activity">Activity</button>
       <button data-usage-tab="cost">Cost &amp; capacity</button>
+      <button data-usage-tab="subscription">Subscription</button>
       <button data-usage-tab="anomalies">Anomalies</button>
     </nav>
     <main class="usage-body">
@@ -2890,6 +2891,17 @@
         <div class="usage-chart-grid">
           <article><h2>USD cost over time</h2><div id="usage-cost-chart" class="usage-chart"></div><div id="usage-cost-table"></div></article>
           <article><h2>Run latency distribution</h2><div id="usage-latency-chart" class="usage-chart"></div><div id="usage-latency-table"></div></article>
+        </div>
+      </section>
+      <section id="usage-subscription" class="usage-view" hidden>
+        <div class="usage-subscription-toolbar">
+          <div><h2>Account quota</h2><p>Provider-reported session and weekly windows shared by Odysseus, Pi harness Codex, and other Codex clients on this GPT account.</p></div>
+          <button id="usage-subscription-refresh" type="button">Refresh provider data</button>
+        </div>
+        <div id="usage-subscription-windows" class="usage-quota-list"></div>
+        <div class="usage-chart-grid">
+          <article><h2>Quota history</h2><div id="usage-subscription-chart" class="usage-chart"></div><div id="usage-subscription-table"></div></article>
+          <article><h2>Odysseus and unattributed activity</h2><div class="usage-table-wrap"><table><thead><tr><th>Interval</th><th>Window</th><th>Account change</th><th>Odysseus Runs</th><th>Measured tokens</th><th>Attribution</th></tr></thead><tbody id="usage-attribution-body"></tbody></table></div></article>
         </div>
       </section>
       <section id="usage-anomalies" class="usage-view" hidden>

@@ -41633,6 +41633,17 @@ body.theme-frosted .modal {
 .usage-waterfall-track i { position: absolute; top: 0; bottom: 0; min-width: 2px; border-radius: inherit; background: var(--accent, var(--red)); }
 .usage-growth { width: 100%; border-collapse: collapse; font-size: 11px; }
 .usage-growth th, .usage-growth td { padding: 7px; border-bottom: 1px solid var(--border); text-align: left; }
+.usage-subscription-toolbar { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.usage-subscription-toolbar h2, .usage-subscription-toolbar p { margin: 0; }
+.usage-subscription-toolbar p { margin-top: 5px; color: var(--muted); font-size: 11px; }
+.usage-subscription-toolbar button { min-height: 34px; padding: 6px 10px; color: var(--fg); border: 1px solid var(--border); border-radius: 6px; background: var(--panel); }
+.usage-quota-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin-bottom: 16px; }
+.usage-quota { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+.usage-quota div:first-child { display: grid; gap: 5px; }
+.usage-quota span, .usage-quota small { color: var(--muted); font-size: 11px; }
+.usage-quota strong { font-size: 20px; }
+.usage-quota-meter { height: 8px; overflow: hidden; border-radius: 4px; background: color-mix(in srgb, var(--fg) 8%, transparent); }
+.usage-quota-meter i { display: block; height: 100%; background: var(--accent, var(--red)); }
 @media (max-width: 900px) {
   .usage-header { align-items: flex-start; padding: 16px; }
   .usage-actions { flex-wrap: wrap; justify-content: flex-end; }

@@ -16,12 +16,13 @@ from pydantic import ValidationError
 
 from core.models import ChatMessage
 from src.request_models import ChatRequest
-from src.llm_core import llm_call_async, stream_llm, stream_llm_with_fallback
+from src.llm_core import llm_call_async, stream_llm, stream_llm_with_fallback, _detect_provider
 from src.agent_loop import classify_agent_setup, stream_agent_loop, tools_for_agent_domains
 from src import agent_runs
 from src.model_context import estimate_tokens
 from src.chat_helpers import coerce_message_and_session
 from src.endpoint_resolver import normalize_base as _normalize_base, build_chat_url
+from src.subscription_usage import provider_auth_id_for_endpoint
 from src.session_search import search_session_messages
 from src.prompt_security import untrusted_context_message
 from core.exceptions import SessionNotFoundError
@@ -1745,6 +1746,8 @@ def setup_chat_routes(
                 _usage_model = _usage_run.begin_span(UsageSpanContext(
                     kind="model", name="model.generate", parent_span_id=_usage_turn.id,
                     requested_model=_requested_model, actual_model=_requested_model,
+                    provider=_detect_provider(sess.endpoint_url),
+                    endpoint_id=provider_auth_id_for_endpoint(_user or "local", sess.endpoint_url),
                 ))
                 _usage_recorded = False
                 # ── Chat mode: call stream_llm directly, NO tools, NO document access ──
@@ -1797,6 +1800,8 @@ def setup_chat_routes(
                                     _usage_model = _usage_run.begin_span(UsageSpanContext(
                                         kind="model", name="model.generate", parent_span_id=_usage_turn.id,
                                         requested_model=_answered_by, actual_model=_answered_by,
+                                        provider=_detect_provider(data.get("answered_url") or sess.endpoint_url),
+                                        endpoint_id=provider_auth_id_for_endpoint(_user or "local", data.get("answered_url") or sess.endpoint_url),
                                     ))
                                     data["selected_model"] = data.get("selected_model") or _requested_model
                                     yield chunk

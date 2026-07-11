@@ -377,6 +377,48 @@ class UsageDailyRollup(Base):
         Index("ix_usage_daily_rollup_owner_date", "owner", "date"),
     )
 
+
+class SubscriptionAccount(Base):
+    """Owner-scoped provider account used for authoritative quota snapshots."""
+    __tablename__ = "subscription_accounts"
+
+    id = Column(String, primary_key=True)
+    owner = Column(String, nullable=False, index=True)
+    provider = Column(String, nullable=False, index=True)
+    provider_auth_id = Column(String, nullable=False, index=True)
+    account_key_hash = Column(String, nullable=False)
+    label = Column(String, nullable=True)
+    plan = Column(String, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utcnow_naive)
+    updated_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
+    __table_args__ = (
+        Index("uq_subscription_account_owner_auth", "owner", "provider_auth_id", unique=True),
+    )
+
+
+class SubscriptionSnapshot(Base):
+    """Immutable account-wide quota-window observation from the provider."""
+    __tablename__ = "subscription_snapshots"
+
+    id = Column(String, primary_key=True)
+    account_id = Column(String, ForeignKey("subscription_accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner = Column(String, nullable=False, index=True)
+    window_key = Column(String, nullable=False, index=True)
+    window_minutes = Column(Integer, nullable=True)
+    used_basis_points = Column(Integer, nullable=True)
+    resets_at = Column(DateTime, nullable=True, index=True)
+    observed_at = Column(DateTime, nullable=False, default=utcnow_naive, index=True)
+    source = Column(String, nullable=False, default="oauth")
+    status = Column(String, nullable=False, default="ok")
+    payload_hash = Column(String, nullable=True)
+    schema_version = Column(Integer, nullable=False, default=1)
+
+    __table_args__ = (
+        Index("ix_subscription_snapshot_owner_window_time", "owner", "window_key", "observed_at"),
+        Index("uq_subscription_snapshot_account_window_time", "account_id", "window_key", "observed_at", unique=True),
+    )
+
 class Document(TimestampMixin, Base):
     """Living document that the AI can create and edit in-place."""
     __tablename__ = "documents"

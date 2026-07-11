@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 
 from src.auth_helpers import effective_user, require_user
 from src.usage_observability import usage_store
+from src.subscription_usage import subscription_usage_store
 
 
 def _owner(request: Request) -> str:
@@ -97,6 +98,14 @@ def setup_usage_routes() -> APIRouter:
     @router.get("/anomalies")
     def anomalies(request: Request, from_: str | None = Query(None, alias="from"), to: str | None = None):
         return usage_store.query_anomalies(owner=_owner(request), start=_time(from_), end=_time(to))
+
+    @router.get("/subscription")
+    def subscription(request: Request):
+        return subscription_usage_store.refresh_if_stale(owner=_owner(request))
+
+    @router.post("/subscription/refresh")
+    def refresh_subscription(request: Request):
+        return subscription_usage_store.refresh(owner=_owner(request))
 
     @router.get("/live")
     async def live(request: Request):
