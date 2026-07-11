@@ -104,8 +104,8 @@ ticket is explicitly labelled scaffold-only.
 - [x] Event filtering and cursor metadata have a stable initial behavior over real Odysseus activity streams, not only local server logs.
 
 Correction note: the current implementation normalizes local server logs and
-real API-backed chat Run events. Agent, harness, service, process, and system
-streams remain open. See [Terminal Client Implementation
+real API-backed chat, agent, and harness Run events. Independent service,
+process, and system streams remain open. See [Terminal Client Implementation
 Review](implementation-review.md).
 
 ## Create Run Identity Compatibility Layer For Chat Runs
@@ -121,9 +121,9 @@ Review](implementation-review.md).
 - [x] Attach-by-Session fails with a structured ambiguity response when more than one active Run can match.
 - [x] Stop targets Run lifecycle rather than hiding cancellation under Session commands.
 
-Correction note: chat and agent Runs now use the real terminal-client API and
-persisted Run identity. Harness Runs still use client-local JSON state and are
-tracked in the production-recovery tickets below.
+Correction note: chat, agent, and harness Runs now use the real terminal-client
+API and persisted Run identity. Legacy local records remain readable for
+compatibility but are not the source of truth for new production Runs.
 
 ## Extend Run Surface To Agent And Harness Workflows
 
@@ -132,9 +132,9 @@ tracked in the production-recovery tickets below.
 **Blocked by:** Create Run Identity Compatibility Layer For Chat Runs.
 
 - [x] Agent Runs use the same real API-backed Run list, status, attach, and stop model as chat Runs.
-- [ ] Harness-linked Runs include Odysseus Session, Run, harness adapter, and Harness Session identity where known from backend state.
+- [x] Harness-linked Runs include Odysseus Session, Run, harness adapter, and Harness Session identity where known from backend state.
 - [x] Harness operations are capability-gated by adapter support and report unsupported actions clearly.
-- [ ] Heartbeats and activity updates are visible as Event Envelopes from real execution.
+- [x] Heartbeats and activity updates are visible as Event Envelopes from real execution.
 - [x] Session history and Run events remain separate user-facing concepts.
 
 ## Expose Managed Lifecycle Targets
@@ -366,9 +366,18 @@ accepts `kind=harness`, resolves a registered `HarnessAdapter`, validates its
 mode capability, runs `start`/`send`, persists the returned Harness Session
 identity, and places Odysseus Session, Run, adapter, and Harness Session
 identity on normalized `source=harness` envelopes. Focused route tests exercise
-the Adapter seam and durable identity update. This is foundation only:
-`ody-term run start --kind harness` still uses client-local state until the CLI
-migration and live adapter evidence close the remaining criteria below.
+the Adapter seam and durable identity update.
+
+2026-07-11 harness completion: `ody-term run start --kind harness`, Run reads,
+lifecycle inventory/logs/stop, and the TUI state model now consume the same
+server-owned Run and Event APIs. Live Pi evidence used Run
+`run_a41cc2d3d5424dea`, Odysseus Session `ses_c4ca8f9304c74cfb`, adapter `pi`,
+adapter-confirmed Harness Session `ses_c4ca8f9304c74cfb`, workspace
+`/Users/einarelen/junk/odysseus`, and observe mode. The completed Run persisted
+19 `source=harness` Event Envelopes, including activity phases, deltas,
+metrics, history persistence, and terminal status. The deltas joined to
+`ODY_TERM_HARNESS_OK`; Run state and all events remained queryable after a
+server restart.
 
 ## Extend Real Runs To Agent And Harness Workflows
 
@@ -382,13 +391,13 @@ Inspection To Real Odysseus Activity.
 
 - [x] Agent Runs use the same real API-backed list, status, attach, and stop
       commands as chat Runs.
-- [ ] Harness-linked Runs include Odysseus Session identity, Run identity,
+- [x] Harness-linked Runs include Odysseus Session identity, Run identity,
       harness adapter identity, and Harness Session identity where known.
-- [ ] Harness operations are capability-gated by adapter support and report
+- [x] Harness operations are capability-gated by adapter support and report
       unsupported actions clearly in structured output.
-- [ ] Heartbeats and activity updates from real execution are visible as Event
+- [x] Heartbeats and activity updates from real execution are visible as Event
       Envelopes.
-- [ ] Session history and Run events remain separate user-facing concepts.
+- [x] Session history and Run events remain separate user-facing concepts.
 
 ## Make Lifecycle Logs And Controls Consume Real Run/Event State
 
@@ -400,15 +409,15 @@ control surfaces.
 
 **Blocked by:** Extend Real Runs To Agent And Harness Workflows.
 
-- [ ] Run lifecycle targets are populated from real terminal-client Run state,
+- [x] Run lifecycle targets are populated from real terminal-client Run state,
       not client-local fixtures.
-- [ ] Harness bridge lifecycle targets reflect adapter/runtime capability and
+- [x] Harness bridge lifecycle targets reflect adapter/runtime capability and
       linked real Runs where available.
-- [ ] Service logs expose real Event Envelopes for supported targets and return
+- [x] Service logs expose real Event Envelopes for supported targets and return
       structured unsupported/unavailable responses for targets without logs.
-- [ ] Stop and restart controls operate only on known managed targets with
+- [x] Stop and restart controls operate only on known managed targets with
       server-side ownership/capability checks.
-- [ ] Forceful or broad actions require elevated friction and still cannot
+- [x] Forceful or broad actions require elevated friction and still cannot
       bypass auth, scopes, ownership, or admin-only policy.
 
 ## Replace The Static TUI With An Interactive Renderer

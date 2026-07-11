@@ -269,6 +269,8 @@ def _parse_command_options(args: list[str]) -> tuple[dict[str, str | bool], list
         "--run-id",
         "--harness-session-id",
         "--harness-adapter",
+        "--harness-mode",
+        "--workspace",
         "--span-id",
         "--parent-id",
         "--tag",
@@ -1089,12 +1091,12 @@ def _has_local_session_run(session_id: str | None) -> bool:
 
 def _run_uses_api(kind: str | None, run_id: str | None, session_id: str | None = None) -> bool:
     return bool(
-        kind in {"chat", "agent"}
+        kind in {"chat", "agent", "harness"}
         or (session_id and not _has_local_session_run(session_id))
         or (
             run_id
             and run_id.startswith("run_")
-            and (not _has_local_run(run_id) or _local_run_kind(run_id) in {"chat", "agent"})
+            and (not _has_local_run(run_id) or _local_run_kind(run_id) in {"chat", "agent", "harness"})
         )
     )
 
@@ -1115,8 +1117,30 @@ def _all_run_events(state: dict[str, object]) -> list[dict[str, object]]:
     return events
 
 
-def _merged_tui_events(state: dict[str, object], *, lifecycle_targets: list[dict[str, object]]) -> list[dict[str, object]]:
-    events = _all_run_events(state)
+def _api_run_events(request: CommandRequest, runs: list[dict[str, object]]) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    for run in runs:
+        run_id = run.get("run_id")
+        if not isinstance(run_id, str) or not run.get("events_available"):
+            continue
+        payload = _terminal_api_request(
+            request,
+            "GET",
+            "/api/terminal/events",
+            query={"run_id": run_id, "limit": 80, "include_raw": False},
+        )
+        raw_events = payload.get("events")
+        if isinstance(raw_events, list):
+            events.extend(cast(dict[str, object], event) for event in raw_events if isinstance(event, dict))
+    return events
+
+
+def _merged_tui_events(
+    events: list[dict[str, object]],
+    *,
+    lifecycle_targets: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    events = list(events)
     main_server = next((target for target in lifecycle_targets if target.get("id") == "main-server"), None)
     if main_server is not None:
         try:
@@ -1244,79 +1268,30 @@ def _run_start(request: CommandRequest) -> CommandResponse:
     kind = str(options.get("kind") or "chat")
     if kind not in {"chat", "agent", "harness"}:
         raise CommandError("unsupported_run_kind", f"run start supports chat, agent, and harness Runs, not {kind}")
-    if kind in {"chat", "agent"}:
-        payload = _terminal_api_request(
-            request,
-            "POST",
-            "/api/terminal/runs",
-            body={
-                "kind": kind,
-                "session_id": options.get("session_id") if isinstance(options.get("session_id"), str) else None,
-                "message": str(options.get("message") or ""),
-                "endpoint_url": options.get("endpoint_url") if isinstance(options.get("endpoint_url"), str) else None,
-                "model": options.get("model") if isinstance(options.get("model"), str) else None,
-                "preset_id": options.get("preset_id") if isinstance(options.get("preset_id"), str) else None,
-            },
-        )
-        return CommandResponse(
-            ok=True,
-            command=["run", "start"],
-            message=f"Started {kind} Run {cast(dict[str, object], payload.get('run', {})).get('run_id', '')}",
-            data=payload,
-        )
     if kind == "harness" and not isinstance(options.get("harness_adapter"), str):
         raise CommandError("missing_harness_adapter", "harness Runs require --harness-adapter")
-    state = _load_run_state()
-    runs = _runs_payload(state)
-    run_id = _new_identity("run")
-    session_id = str(options.get("session_id") or _new_identity("ses"))
-    now = _utc_now()
-    run: dict[str, object] = {
-        "run_id": run_id,
-        "session_id": session_id,
-        "kind": kind,
-        "event_source": "harness" if kind == "harness" else kind,
-        "status": "running",
-        "started_at": now,
-        "updated_at": now,
-        "finished_at": None,
-    }
-    if isinstance(options.get("harness_adapter"), str):
-        run["harness_adapter_id"] = str(options["harness_adapter"])
-    if isinstance(options.get("harness_session_id"), str):
-        run["harness_session_id"] = str(options["harness_session_id"])
-    runs[run_id] = run
-    message = str(options.get("message") or "")
-    _append_run_event(
-        state,
-        run,
-        kind="run.status",
-        level="info",
-        summary=f"{kind} Run started",
-        payload={
-            "status": "running",
-            "message": message,
+    payload = _terminal_api_request(
+        request,
+        "POST",
+        "/api/terminal/runs",
+        body={
             "kind": kind,
-            "harness_adapter_id": run.get("harness_adapter_id"),
-            "harness_session_id": run.get("harness_session_id"),
+            "session_id": options.get("session_id") if isinstance(options.get("session_id"), str) else None,
+            "message": str(options.get("message") or ""),
+            "endpoint_url": options.get("endpoint_url") if isinstance(options.get("endpoint_url"), str) else None,
+            "model": options.get("model") if isinstance(options.get("model"), str) else None,
+            "preset_id": options.get("preset_id") if isinstance(options.get("preset_id"), str) else None,
+            "harness_adapter_id": options.get("harness_adapter") if isinstance(options.get("harness_adapter"), str) else None,
+            "harness_session_id": options.get("harness_session_id") if isinstance(options.get("harness_session_id"), str) else None,
+            "harness_mode": str(options.get("harness_mode") or "observe"),
+            "workspace": options.get("workspace") if isinstance(options.get("workspace"), str) else None,
         },
     )
-    if kind in {"agent", "harness"}:
-        _append_run_event(
-            state,
-            run,
-            kind="heartbeat",
-            level="info",
-            summary=f"{kind} Run heartbeat",
-            payload={"status": "running", "activity": "started"},
-        )
-    _save_run_state(state)
-    event_count = len(_run_events(state, run_id))
     return CommandResponse(
         ok=True,
         command=["run", "start"],
-        message=f"Started {kind} Run {run_id}",
-        data={"run": _run_summary(state, run), "cursor": {"after": None, "next": str(event_count), "count": event_count}},
+        message=f"Started {kind} Run {cast(dict[str, object], payload.get('run', {})).get('run_id', '')}",
+        data=payload,
     )
 
 
@@ -1327,26 +1302,19 @@ def _run_list(request: CommandRequest) -> CommandResponse:
         raise CommandError("unexpected_run_args", f"unexpected run list args: {' '.join(positionals)}")
     kind_filter = str(options.get("kind")) if isinstance(options.get("kind"), str) else None
     status_filter = str(options.get("status")) if isinstance(options.get("status"), str) else None
-    if kind_filter in {"chat", "agent"}:
-        payload = _terminal_api_request(
-            request,
-            "GET",
-            "/api/terminal/runs",
-            query={"kind": kind_filter, "status": status_filter},
-        )
-        runs = payload.get("runs")
-        return CommandResponse(
-            ok=True,
-            command=["run", "list"],
-            message=f"{len(runs) if isinstance(runs, list) else 0} Run(s)",
-            data={"runs": runs if isinstance(runs, list) else []},
-        )
-    state = _load_run_state()
-    runs = [_run_summary(state, run) for run in _runs_payload(state).values()]
-    runs.sort(key=lambda run: str(run.get("updated_at") or ""), reverse=True)
-    if status_filter:
-        runs = [run for run in runs if run.get("status") == status_filter]
-    return CommandResponse(ok=True, command=["run", "list"], message=f"{len(runs)} Run(s)", data={"runs": runs})
+    payload = _terminal_api_request(
+        request,
+        "GET",
+        "/api/terminal/runs",
+        query={"kind": kind_filter, "status": status_filter},
+    )
+    runs = payload.get("runs")
+    return CommandResponse(
+        ok=True,
+        command=["run", "list"],
+        message=f"{len(runs) if isinstance(runs, list) else 0} Run(s)",
+        data={"runs": runs if isinstance(runs, list) else []},
+    )
 
 
 def _run_status(request: CommandRequest) -> CommandResponse:
@@ -1766,10 +1734,15 @@ def _server_lifecycle_target() -> dict[str, object]:
     }
 
 
-def _run_lifecycle_targets() -> list[dict[str, object]]:
-    state = _load_run_state()
+def _api_runs(request: CommandRequest) -> list[dict[str, object]]:
+    payload = _terminal_api_request(request, "GET", "/api/terminal/runs")
+    runs = payload.get("runs")
+    return [cast(dict[str, object], run) for run in runs if isinstance(run, dict)] if isinstance(runs, list) else []
+
+
+def _run_lifecycle_targets(runs: list[dict[str, object]]) -> list[dict[str, object]]:
     targets: list[dict[str, object]] = []
-    for run in _runs_payload(state).values():
+    for run in runs:
         run_id = str(run.get("run_id") or "")
         if not run_id:
             continue
@@ -1787,31 +1760,30 @@ def _run_lifecycle_targets() -> list[dict[str, object]]:
                     "harness_session_id": run.get("harness_session_id"),
                 },
                 "source": {
-                    "type": "run-state",
+                    "type": "terminal-client-api",
                     "run_kind": run.get("kind"),
-                    "event_source": run.get("event_source"),
+                    "event_source": run.get("kind"),
                     "harness_adapter_id": run.get("harness_adapter_id"),
                 },
-                "last_activity": _last_activity(state, run_id),
+                "last_activity": run.get("last_activity"),
                 "capabilities": {
-                    "logs": bool(_run_events(state, run_id)),
+                    "logs": bool(run.get("events_available")),
                     "stop": status in RUN_ACTIVE_STATUSES,
                     "restart": False,
                     "force": False,
                 },
-                "raw": {"run": _run_summary(state, run)},
+                "raw": {"run": dict(run)},
             }
         )
     return targets
 
 
-def _harness_bridge_lifecycle_targets() -> list[dict[str, object]]:
-    state = _load_run_state()
+def _harness_bridge_lifecycle_targets(runs: list[dict[str, object]]) -> list[dict[str, object]]:
     active_runs_by_adapter: dict[str, list[dict[str, object]]] = {}
-    for run in _runs_payload(state).values():
+    for run in runs:
         adapter_id = run.get("harness_adapter_id")
         if isinstance(adapter_id, str) and adapter_id:
-            active_runs_by_adapter.setdefault(adapter_id, []).append(_run_summary(state, run))
+            active_runs_by_adapter.setdefault(adapter_id, []).append(dict(run))
     targets: list[dict[str, object]] = []
     for harness in _harness_capabilities():
         adapter_id = str(harness.get("id") or "")
@@ -1835,17 +1807,24 @@ def _harness_bridge_lifecycle_targets() -> list[dict[str, object]]:
     return targets
 
 
-def _lifecycle_targets() -> list[dict[str, object]]:
+def _lifecycle_targets(request: CommandRequest) -> list[dict[str, object]]:
+    try:
+        runs = _api_runs(request)
+    except CommandError:
+        # Local server/cookbook/static targets remain inspectable when the
+        # authenticated Run API target is unavailable. Do not resurrect
+        # client-local Run fixtures here.
+        runs = []
     targets = [_server_lifecycle_target()]
-    targets.extend(_run_lifecycle_targets())
-    targets.extend(_harness_bridge_lifecycle_targets())
+    targets.extend(_run_lifecycle_targets(runs))
+    targets.extend(_harness_bridge_lifecycle_targets(runs))
     targets.extend(_cookbook_task_lifecycle_targets())
     targets.extend(_static_lifecycle_targets())
     return targets
 
 
-def _lifecycle_target(target_id: str) -> dict[str, object]:
-    for target in _lifecycle_targets():
+def _lifecycle_target(request: CommandRequest, target_id: str) -> dict[str, object]:
+    for target in _lifecycle_targets(request):
         if target.get("id") == target_id:
             return target
     raise CommandError("unknown_lifecycle_target", f"unknown managed lifecycle target: {target_id}", exit_code=1)
@@ -1865,7 +1844,7 @@ def _service_logs(request: CommandRequest) -> CommandResponse:
     options, positionals = _parse_command_options(request.args)
     if len(positionals) != 1:
         raise CommandError("missing_lifecycle_target", "service logs requires exactly one managed target id")
-    target = _lifecycle_target(positionals[0])
+    target = _lifecycle_target(request, positionals[0])
     raw_lines = options.get("lines")
     try:
         lines = int(raw_lines) if isinstance(raw_lines, str) else 80
@@ -1883,8 +1862,16 @@ def _service_logs(request: CommandRequest) -> CommandResponse:
         )
     if str(target.get("id", "")).startswith("run:"):
         run_id = str(target["id"]).split(":", 1)[1]
-        state = _load_run_state()
-        events = _run_events(state, run_id)[-max(lines, 0) :]
+        payload = _terminal_api_request(
+            request,
+            "GET",
+            f"/api/terminal/runs/{run_id}/events",
+            query={"cursor": None, "include_raw": request.globals.format in {"raw", "debug"}},
+        )
+        raw_events = payload.get("events")
+        events = [cast(dict[str, object], event) for event in raw_events if isinstance(event, dict)] if isinstance(raw_events, list) else []
+        bounded_lines = max(lines, 0)
+        events = events[-bounded_lines:] if bounded_lines else []
         return CommandResponse(
             ok=True,
             command=["service", "logs"],
@@ -1936,24 +1923,14 @@ def _service_logs(request: CommandRequest) -> CommandResponse:
     )
 
 
-def _stop_run_lifecycle_target(target: dict[str, object], confirmation: dict[str, object]) -> CommandResponse:
+def _stop_run_lifecycle_target(
+    request: CommandRequest,
+    target: dict[str, object],
+    confirmation: dict[str, object],
+) -> CommandResponse:
     run_id = str(target["id"]).split(":", 1)[1]
-    state = _load_run_state()
-    run = _resolve_run_reference(state, run_id=run_id, session_id=None)
-    now = _utc_now()
-    run["status"] = "stopped"
-    run["updated_at"] = now
-    run["finished_at"] = now
-    _append_run_event(
-        state,
-        run,
-        kind="run.status",
-        level="warn",
-        summary=f"{run.get('kind', 'Run')} Run stopped by service lifecycle",
-        payload={"status": "stopped", "lifecycle_target": target["id"]},
-    )
-    _save_run_state(state)
-    stopped = _lifecycle_target(str(target["id"]))
+    _terminal_api_request(request, "POST", f"/api/terminal/runs/{run_id}/stop")
+    stopped = _lifecycle_target(request, str(target["id"]))
     return CommandResponse(
         ok=True,
         command=["service", "stop"],
@@ -1962,7 +1939,11 @@ def _stop_run_lifecycle_target(target: dict[str, object], confirmation: dict[str
     )
 
 
-def _stop_main_server_lifecycle_target(target: dict[str, object], confirmation: dict[str, object]) -> CommandResponse:
+def _stop_main_server_lifecycle_target(
+    request: CommandRequest,
+    target: dict[str, object],
+    confirmation: dict[str, object],
+) -> CommandResponse:
     if target.get("status") != "running":
         raise _unsupported_lifecycle_action(target, "stop")
     state = _server_state()
@@ -1975,7 +1956,7 @@ def _stop_main_server_lifecycle_target(target: dict[str, object], confirmation: 
     os.killpg(pid, signal.SIGTERM)
     state["stopped_at"] = _utc_now()
     _save_server_state(state)
-    stopped = _lifecycle_target("main-server")
+    stopped = _lifecycle_target(request, "main-server")
     return CommandResponse(
         ok=True,
         command=["service", "stop"],
@@ -1996,7 +1977,7 @@ def _service_control(request: CommandRequest) -> CommandResponse:
         )
     capability = "service:kill" if options.get("force") else "service:restart"
     confirmation = _require_capability(capability, request)
-    target = _lifecycle_target(target_id)
+    target = _lifecycle_target(request, target_id)
     capabilities = target.get("capabilities") if isinstance(target.get("capabilities"), dict) else {}
     target_capabilities = cast(dict[str, object], capabilities)
     if options.get("force") and not bool(target_capabilities.get("force")):
@@ -2005,9 +1986,9 @@ def _service_control(request: CommandRequest) -> CommandResponse:
     if not bool(target_capabilities.get("stop" if verb == "stop" else "restart")):
         raise _unsupported_lifecycle_action(target, verb)
     if verb == "stop" and target_id == "main-server":
-        return _stop_main_server_lifecycle_target(target, confirmation)
+        return _stop_main_server_lifecycle_target(request, target, confirmation)
     if verb == "stop" and target_id.startswith("run:"):
-        return _stop_run_lifecycle_target(target, confirmation)
+        return _stop_run_lifecycle_target(request, target, confirmation)
     if verb == "restart" and target_id == "main-server":
         if options.get("dry_run"):
             return CommandResponse(
@@ -2017,13 +1998,13 @@ def _service_control(request: CommandRequest) -> CommandResponse:
                 data={"target": target, "confirmation": confirmation, "delegates_to": "uv run ody launch select"},
             )
         if target.get("status") == "running":
-            _stop_main_server_lifecycle_target(target, confirmation)
+            _stop_main_server_lifecycle_target(request, target, confirmation)
         started = _start_server(host=ODY_TERM_DEFAULT_HOST, port=None, dry_run=False)
         return CommandResponse(
             ok=True,
             command=["service", "restart"],
             message="Main server restart delegated",
-            data={"target": _lifecycle_target("main-server"), "confirmation": confirmation, "server": started.data["server"]},
+            data={"target": _lifecycle_target(request, "main-server"), "confirmation": confirmation, "server": started.data["server"]},
         )
     raise _unsupported_lifecycle_action(target, verb)
 
@@ -2243,16 +2224,15 @@ def _build_tui_model(request: CommandRequest) -> dict[str, object]:
     options, positionals = _parse_command_options(request.args)
     if positionals:
         raise CommandError("unexpected_tui_args", f"unexpected tui args: {' '.join(positionals)}")
-    run_state = _load_run_state()
-    runs = [_run_summary(run_state, run) for run in _runs_payload(run_state).values()]
+    runs = _api_runs(request)
     runs.sort(key=lambda run: str(run.get("updated_at") or ""), reverse=True)
-    lifecycle_result = _safe_tui_value("lifecycle", _lifecycle_targets)
+    lifecycle_result = _safe_tui_value("lifecycle", lambda: _lifecycle_targets(request))
     lifecycle_targets = (
         cast(list[dict[str, object]], lifecycle_result["value"])
         if lifecycle_result.get("ok") and isinstance(lifecycle_result.get("value"), list)
         else []
     )
-    run_events = _merged_tui_events(run_state, lifecycle_targets=lifecycle_targets)
+    run_events = _merged_tui_events(_api_run_events(request, runs), lifecycle_targets=lifecycle_targets)
     capability_payload = _capabilities_payload()
     capabilities = cast(dict[str, object], capability_payload["capabilities"])
     target = _safe_tui_value("target", lambda: _resolve_target(request))
@@ -2311,7 +2291,7 @@ def _build_tui_model(request: CommandRequest) -> dict[str, object]:
                 "capabilities": capability_payload,
                 "event_envelope_sample": selected_event,
                 "shared_state_sources": [
-                    "run-state",
+                    "terminal-client-api",
                     "event-envelopes",
                     "lifecycle-targets",
                     "terminal-capabilities",
@@ -2601,7 +2581,7 @@ def _service_list(request: CommandRequest) -> CommandResponse:
     options, positionals = _parse_command_options(request.args)
     if positionals:
         raise CommandError("unexpected_service_args", f"unexpected service list args: {' '.join(positionals)}")
-    targets = _lifecycle_targets()
+    targets = _lifecycle_targets(request)
     return CommandResponse(
         ok=True,
         command=_command_path(request),
@@ -2615,7 +2595,7 @@ def _service_status(request: CommandRequest) -> CommandResponse:
     options, positionals = _parse_command_options(request.args)
     if len(positionals) != 1:
         raise CommandError("missing_lifecycle_target", "service status requires exactly one managed target id")
-    target = _lifecycle_target(positionals[0])
+    target = _lifecycle_target(request, positionals[0])
     return CommandResponse(
         ok=True,
         command=_command_path(request),

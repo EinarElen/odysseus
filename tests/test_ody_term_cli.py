@@ -108,6 +108,9 @@ def terminal_api_fake(monkeypatch: pytest.MonkeyPatch):
                 "updated_at": "2026-07-09T00:00:00+00:00",
                 "finished_at": None,
             }
+            if kind == "harness":
+                run["harness_adapter_id"] = str(body.get("harness_adapter_id") or "")
+                run["harness_session_id"] = str(body.get("harness_session_id") or "pi-session-live")
             runs[run_id] = run
             events_by_run[run_id] = [
                 {
@@ -121,7 +124,13 @@ def terminal_api_fake(monkeypatch: pytest.MonkeyPatch):
                     "kind": "run.status",
                     "level": "info",
                     "summary": f"{kind} Run started",
-                    "payload": {"status": "running", "message": str(body.get("message") or ""), "kind": kind},
+                    "payload": {
+                        "status": "running",
+                        "message": str(body.get("message") or ""),
+                        "kind": kind,
+                        "harness_adapter_id": run.get("harness_adapter_id"),
+                        "harness_session_id": run.get("harness_session_id"),
+                    },
                     "raw": {
                         "transport": "sse",
                         "type": "status",
@@ -129,7 +138,7 @@ def terminal_api_fake(monkeypatch: pytest.MonkeyPatch):
                     },
                 }
             ]
-            if kind == "agent":
+            if kind in {"agent", "harness"}:
                 events_by_run[run_id].append(
                     {
                         "schema": "ody.event.v1",
@@ -138,10 +147,10 @@ def terminal_api_fake(monkeypatch: pytest.MonkeyPatch):
                         "time": "2026-07-09T00:00:01+00:00",
                         "session_id": session_id,
                         "run_id": run_id,
-                        "source": "agent",
+                        "source": kind,
                         "kind": "heartbeat",
                         "level": "info",
-                        "summary": "agent Run heartbeat",
+                        "summary": f"{kind} Run heartbeat",
                         "payload": {"status": "running", "activity": "started"},
                         "raw": {
                             "transport": "sse",
@@ -150,6 +159,10 @@ def terminal_api_fake(monkeypatch: pytest.MonkeyPatch):
                         },
                     }
                 )
+            if kind == "harness":
+                for event in events_by_run[run_id]:
+                    event["harness_adapter_id"] = run["harness_adapter_id"]
+                    event["harness_session_id"] = run["harness_session_id"]
             count = len(events_by_run[run_id])
             return {"run": _summary(run), "cursor": {"after": None, "next": str(count), "count": count}}
         if method == "GET" and path == "/api/terminal/runs":
@@ -1268,7 +1281,7 @@ def test_agent_runs_use_same_run_lifecycle_and_heartbeat_events(
 
 
 def test_harness_linked_runs_include_odysseus_and_harness_identities(
-    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
 
@@ -1284,6 +1297,10 @@ def test_harness_linked_runs_include_odysseus_and_harness_identities(
             "pi",
             "--harness-session-id",
             "pi-session-1",
+            "--harness-mode",
+            "observe",
+            "--workspace",
+            "/tmp/workspace",
             "--message",
             "observe",
             "--format=json",
@@ -1310,6 +1327,10 @@ def test_harness_linked_runs_include_odysseus_and_harness_identities(
     assert all(event["harness_adapter_id"] == "pi" for event in events)
     assert events[0]["payload"]["harness_adapter_id"] == "pi"
     assert events[0]["payload"]["harness_session_id"] == "pi-session-1"
+    assert not Path(ody_term._run_state_path()).exists()
+    assert terminal_api_fake["calls"][0][0:2] == ("POST", "/api/terminal/runs")
+    assert terminal_api_fake["calls"][0][3]["workspace"] == "/tmp/workspace"
+    assert terminal_api_fake["calls"][0][3]["harness_mode"] == "observe"
 
 
 def test_harness_commands_report_adapter_capabilities(
@@ -1439,7 +1460,7 @@ def test_service_control_does_not_treat_pid_as_an_elevated_target(
 
 
 def test_service_list_includes_managed_lifecycle_targets_with_capability_flags(
-    isolated_term_state: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    isolated_term_state: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
     log_path = tmp_path / "server.log"
@@ -1601,8 +1622,26 @@ def test_service_logs_exposes_cookbook_task_output_as_event_envelopes(
     assert events[1]["payload"] == {"message": "ERROR failed warmup"}
 
 
+def test_service_logs_zero_lines_returns_no_run_events(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    _, stdout, _ = run_cli(
+        ["run", "start", "--kind", "harness", "--harness-adapter", "pi", "--format=json"]
+    )
+    run_id = json.loads(stdout)["data"]["run"]["run_id"]
+
+    exit_code, stdout, stderr = run_cli(
+        ["service", "logs", f"run:{run_id}", "--lines", "0", "--format=json"]
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert json.loads(stdout)["data"]["events"] == []
+
+
 def test_service_stop_targets_run_lifecycle_without_host_process_mutation(
-    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
     _, stdout, _ = run_cli(
@@ -2065,7 +2104,7 @@ def test_inspect_events_debug_includes_renderer_and_safety_context(
 
 
 def test_tui_model_live_view_uses_shared_events_and_service_logs(
-    isolated_term_state: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    isolated_term_state: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
     log_path = tmp_path / "server.log"
@@ -2124,7 +2163,7 @@ def test_tui_model_live_view_uses_shared_events_and_service_logs(
 
 
 def test_tui_repl_and_interaction_paths_are_harnessed(
-    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
     _, stdout, _ = run_cli(
@@ -2180,7 +2219,7 @@ def test_tui_repl_and_interaction_paths_are_harnessed(
 
 
 def test_tui_browse_and_inspect_views_expose_shared_model_state(
-    isolated_term_state: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    isolated_term_state: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
     log_path = tmp_path / "server.log"
@@ -2242,7 +2281,7 @@ def test_tui_browse_and_inspect_views_expose_shared_model_state(
     assert inspect["capabilities"]["auth_facts"]["auth_mode"] == "auth-disabled"
     assert inspect["event_envelope_sample"]["schema"] == "ody.event.v1"
     assert inspect["shared_state_sources"] == [
-        "run-state",
+        "terminal-client-api",
         "event-envelopes",
         "lifecycle-targets",
         "terminal-capabilities",
@@ -2251,7 +2290,7 @@ def test_tui_browse_and_inspect_views_expose_shared_model_state(
 
 
 def test_tui_human_screen_has_focused_live_repl_browse_and_inspect_views(
-    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
 ) -> None:
     monkeypatch.setenv("AUTH_ENABLED", "false")
     run_cli(

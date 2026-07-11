@@ -4,11 +4,12 @@
 
 Current implementation status: the command surface, renderers, local server
 bootstrap, capability shapes, file/keychain auth storage, lifecycle inventory
-scaffold, API-backed chat and agent Run execution, persisted Run identity,
-bounded real Run Event Envelope query/replay, and the `ody.tui.v1` state model
-exist. Live JSONL tailing is available for chat and agent Runs. API-backed
-harness Runs, real-state lifecycle integration, and a full-screen interactive
-TUI are still open work tracked in
+scaffold, API-backed chat, agent, and harness Run execution, persisted Run
+identity, bounded real Run Event Envelope query/replay, real Run and harness
+lifecycle targets, and the `ody.tui.v1` state model exist. Live JSONL tailing
+is available for API-backed Runs. The TUI model and text fallback consume the
+same server-owned Run/Event state as the CLI; a full-screen interactive TUI is
+still open work tracked in
 `docs/wayfinder/terminal-client/implementation-review.md`.
 
 ## Command Shape

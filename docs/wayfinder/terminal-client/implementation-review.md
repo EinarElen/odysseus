@@ -51,15 +51,12 @@ That let four real requirements slip through:
 
 ## Remaining Required Repairs
 
-The API-backed chat and agent Run vertical slices and their real Event Envelope
-query, replay, and live JSONL paths are complete. The remaining repairs are:
+The API-backed chat, agent, and harness Run vertical slices and their real Event
+Envelope query, replay, lifecycle, and live JSONL paths are complete. The
+remaining repairs are:
 
-1. Extend the real terminal-client Run API to harness execution, removing its
-   production dependence on local JSON state.
-2. Make lifecycle inventory, logs, and controls consume real Run, harness, and
-   service evidence instead of client-local fixtures.
-3. Extend Event Envelope inspection beyond chat, agent, and local server logs
-   to harness, service, process, and system sources.
-4. Replace the `ody-term tui` text/model fallback with an actual interactive
+1. Extend Event Envelope inspection beyond chat, agent, harness, and local
+   server logs to independent service, process, and system sources.
+2. Replace the `ody-term tui` text/model fallback with an actual interactive
    terminal renderer. The existing `ody.tui.v1` model can remain the shared
    state seam.
