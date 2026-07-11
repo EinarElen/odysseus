@@ -723,6 +723,13 @@ def setup_chat_routes(
     # ------------------------------------------------------------------ #
     @router.post("/api/chat_stream")
     async def chat_stream(request: Request) -> StreamingResponse:
+        from src import agent_runs
+        if agent_runs.is_draining():
+            raise HTTPException(
+                503,
+                "Server restart is waiting for active AI runs to finish; retry after reconnect",
+                headers={"Retry-After": "2"},
+            )
         body = None
         try:
             if request.headers.get("content-type", "").startswith("application/json"):
@@ -2144,9 +2151,27 @@ def setup_chat_routes(
         # the run keeps going and saves the assistant message on completion
         # regardless. Reconnect via /api/chat/resume.
         if compare_mode:
-            return StreamingResponse(_safe_stream(), media_type="text/event-stream")
+            compare_run_id = f"compare:{session}:{id(request)}"
+            try:
+                agent_runs.register_external_run(compare_run_id)
+            except agent_runs.RunDrainingError as exc:
+                raise HTTPException(503, str(exc), headers={"Retry-After": "2"})
 
-        agent_runs.start(session, _safe_stream())
+            async def _tracked_compare_stream():
+                try:
+                    async for event in _safe_stream():
+                        yield event
+                finally:
+                    agent_runs.unregister_external_run(compare_run_id)
+
+            return StreamingResponse(_tracked_compare_stream(), media_type="text/event-stream")
+
+        stream = _safe_stream()
+        try:
+            agent_runs.start(session, stream)
+        except agent_runs.RunDrainingError as exc:
+            await stream.aclose()
+            raise HTTPException(503, str(exc), headers={"Retry-After": "2"})
         return StreamingResponse(agent_runs.subscribe(session), media_type="text/event-stream")
 
     # ------------------------------------------------------------------ #

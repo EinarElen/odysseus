@@ -1069,6 +1069,7 @@ async def _startup_event():
         logger.debug(f"Incognito purge skipped: {e}")
     try:
         from src import agent_runs
+        agent_runs.install_graceful_signal_drain()
         agent_runs.recover_stale_runs(session_manager)
     except Exception as e:
         logger.debug(f"Agent run recovery skipped: {e}")
@@ -1294,6 +1295,11 @@ async def _startup_event():
 
 async def _shutdown_event():
     logger.info("Application shutting down...")
+    try:
+        from src import agent_runs
+        agent_runs.restore_signal_handlers()
+    except Exception:
+        pass
     if upload_cleanup_task:
         upload_cleanup_task.cancel()
         try:

@@ -112,6 +112,43 @@ def test_request_server_reload_schedules_interactive_exec(monkeypatch, tmp_path)
     assert started["name"] == "odysseus-dev-reload"
     assert started["daemon"] is True
     assert started["called"] is True
+    # FakeThread intentionally never runs the restart target, so undo the
+    # production drain state that the target would end by exiting the process.
+    from src import agent_runs
+    agent_runs.cancel_drain()
+
+
+def test_server_reload_drains_agent_runs_before_exit(monkeypatch, tmp_path):
+    _init_repo(tmp_path)
+    monkeypatch.setenv("ODYSSEUS_DEV_MODE", "1")
+    monkeypatch.delenv("ODYSSEUS_RELOAD_ACTIVE", raising=False)
+    monkeypatch.setattr(dev_mode, "get_app_root", lambda: str(tmp_path))
+
+    calls = []
+    counts = iter((1, 1, 0))
+    from src import agent_runs
+    monkeypatch.setattr(agent_runs, "begin_drain", lambda: calls.append("drain") or 1)
+    monkeypatch.setattr(agent_runs, "active_run_count", lambda: next(counts))
+    monkeypatch.setattr(dev_mode, "_spawn_restart_helper", lambda *a, **k: calls.append("helper"))
+    monkeypatch.setattr(dev_mode, "_request_graceful_exit", lambda: calls.append("exit"))
+    monkeypatch.setattr(dev_mode.time, "sleep", lambda _seconds: calls.append("wait"))
+
+    class ImmediateThread:
+        def __init__(self, *, target, name, daemon):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(dev_mode.threading, "Thread", ImmediateThread)
+
+    result = dev_mode.request_server_reload(str(tmp_path), delay_s=0)
+
+    assert result["draining"] is True
+    assert result["draining_runs"] == 1
+    assert calls[0:2] == ["drain", "helper"]
+    assert calls[-1] == "exit"
+    assert calls.count("wait") == 3
 
 
 def test_request_server_reload_rejects_external_reload_supervisor(monkeypatch, tmp_path):

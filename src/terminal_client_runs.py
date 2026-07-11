@@ -347,6 +347,10 @@ def create_run(
     harness_adapter_id: str | None = None,
     harness_session_id: str | None = None,
 ) -> dict[str, Any]:
+    if agent_runs.is_draining():
+        raise agent_runs.RunDrainingError(
+            "Server restart is waiting for active AI runs to finish"
+        )
     _load_persisted_runs()
     resolved_session_id = session_id or _new_identity("ses")
     run = TerminalRun(
@@ -361,11 +365,22 @@ def create_run(
     _SESSION_ACTIVE.setdefault(resolved_session_id, []).append(run.run_id)
     _LIVE_RUN_BY_SESSION[resolved_session_id] = run.run_id
     _save_persisted_runs()
-    agent_runs.start(
-        resolved_session_id,
-        stream,
-        on_event=lambda seq, raw: _persist_raw_event(run, seq, raw),
-    )
+    try:
+        agent_runs.start(
+            resolved_session_id,
+            stream,
+            on_event=lambda seq, raw: _persist_raw_event(run, seq, raw),
+        )
+    except agent_runs.RunDrainingError:
+        _RUNS.pop(run.run_id, None)
+        active = _SESSION_ACTIVE.get(resolved_session_id, [])
+        _SESSION_ACTIVE[resolved_session_id] = [rid for rid in active if rid != run.run_id]
+        if not _SESSION_ACTIVE[resolved_session_id]:
+            _SESSION_ACTIVE.pop(resolved_session_id, None)
+        if _LIVE_RUN_BY_SESSION.get(resolved_session_id) == run.run_id:
+            _LIVE_RUN_BY_SESSION.pop(resolved_session_id, None)
+        _save_persisted_runs()
+        raise
     return {"run": run_summary(run), "cursor": {"after": None, "next": "0", "count": 0}}
 
 

@@ -17,6 +17,9 @@ close / navigation / refresh). It does NOT survive a server restart.
 import asyncio
 import json
 import logging
+import os
+import signal
+import threading
 import time
 from pathlib import Path
 from typing import AsyncGenerator, Callable, Dict, Optional
@@ -41,6 +44,120 @@ class _Run:
 
 
 _RUNS: Dict[str, _Run] = {}
+_EXTERNAL_RUNS: set[str] = set()
+_LIFECYCLE_LOCK = threading.RLock()
+_DRAINING = False
+_SIGNAL_HANDLERS: dict[int, object] = {}
+_SIGNAL_RELAY_STARTED = False
+
+
+class RunDrainingError(RuntimeError):
+    """Raised when a new run is submitted while shutdown is draining."""
+
+
+def begin_drain() -> int:
+    """Atomically stop accepting runs and return the active-run count.
+
+    The restart helper calls this before waiting.  Sharing the same lock with
+    start() closes the otherwise unavoidable race between observing zero runs
+    and a request registering a new one.
+    """
+    global _DRAINING
+    with _LIFECYCLE_LOCK:
+        _DRAINING = True
+        return active_run_count()
+
+
+def cancel_drain() -> None:
+    """Resume accepting runs when a scheduled restart could not proceed."""
+    global _DRAINING
+    with _LIFECYCLE_LOCK:
+        _DRAINING = False
+
+
+def is_draining() -> bool:
+    with _LIFECYCLE_LOCK:
+        return _DRAINING
+
+
+def active_run_count() -> int:
+    with _LIFECYCLE_LOCK:
+        return sum(1 for run in _RUNS.values() if run.status == "running") + len(_EXTERNAL_RUNS)
+
+
+def register_external_run(run_id: str) -> None:
+    """Include a directly streamed run (such as Compare) in drain accounting."""
+    with _LIFECYCLE_LOCK:
+        if _DRAINING:
+            raise RunDrainingError("Server restart is waiting for active runs to finish")
+        _EXTERNAL_RUNS.add(run_id)
+
+
+def unregister_external_run(run_id: str) -> None:
+    with _LIFECYCLE_LOCK:
+        _EXTERNAL_RUNS.discard(run_id)
+
+
+def install_graceful_signal_drain(*, poll_interval_s: float = 0.1) -> bool:
+    """Delay normal process termination until active AI runs are terminal.
+
+    Uvicorn installs its own SIGTERM/SIGINT handlers before application
+    startup.  We wrap (rather than replace) those handlers.  On the first
+    signal, admission closes and a daemon thread waits for active runs.  It
+    then sends the same signal again; the wrapper sees an empty registry and
+    delegates to uvicorn's original handler on the main thread.
+    """
+    global _SIGNAL_RELAY_STARTED
+    if threading.current_thread() is not threading.main_thread():
+        return False
+    installed = False
+    for signum in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None)):
+        if signum is None or signum in _SIGNAL_HANDLERS:
+            continue
+        previous = signal.getsignal(signum)
+
+        def _handle(received: int, frame, *, _previous=previous) -> None:
+            global _SIGNAL_RELAY_STARTED
+            # Close admission before observing the count. Otherwise a run can
+            # register between a zero observation and delegation to uvicorn.
+            active = begin_drain()
+            if active == 0:
+                if callable(_previous):
+                    _previous(received, frame)
+                elif _previous == signal.SIG_DFL:
+                    signal.signal(received, signal.SIG_DFL)
+                    os.kill(os.getpid(), received)
+                return
+            with _LIFECYCLE_LOCK:
+                if _SIGNAL_RELAY_STARTED:
+                    return
+                _SIGNAL_RELAY_STARTED = True
+
+            def _relay() -> None:
+                global _SIGNAL_RELAY_STARTED
+                while active_run_count() > 0:
+                    time.sleep(max(0.01, poll_interval_s))
+                with _LIFECYCLE_LOCK:
+                    _SIGNAL_RELAY_STARTED = False
+                os.kill(os.getpid(), received)
+
+            threading.Thread(target=_relay, name="odysseus-run-drain", daemon=True).start()
+
+        _SIGNAL_HANDLERS[signum] = previous
+        signal.signal(signum, _handle)
+        installed = True
+    return installed
+
+
+def restore_signal_handlers() -> None:
+    """Restore wrapped handlers, primarily for embedded servers and tests."""
+    global _SIGNAL_RELAY_STARTED
+    if threading.current_thread() is not threading.main_thread():
+        return
+    for signum, previous in list(_SIGNAL_HANDLERS.items()):
+        signal.signal(signum, previous)
+    _SIGNAL_HANDLERS.clear()
+    _SIGNAL_RELAY_STARTED = False
 
 # How long a FINISHED run (and its full replay buffer) is retained after the
 # last subscriber disconnects, so a reconnect within the window can still
@@ -171,7 +288,11 @@ def buffered_event_count(session_id: str) -> int:
 
 
 def reset_for_tests() -> None:
-    _RUNS.clear()
+    global _DRAINING
+    with _LIFECYCLE_LOCK:
+        _RUNS.clear()
+        _EXTERNAL_RUNS.clear()
+        _DRAINING = False
 
 
 async def _drain(session_id: str, agen: AsyncGenerator[str, None],
@@ -238,19 +359,22 @@ def start(
 ) -> _Run:
     """Start a detached run draining `agen` for a session. If a run is already in
     flight for this session (e.g. a rapid double-send), it's cancelled first."""
-    prev = _RUNS.get(session_id)
-    prev_task: Optional[asyncio.Task] = None
-    if prev:
-        if prev.task and not prev.task.done():
-            prev.task.cancel()
-            prev_task = prev.task   # new run awaits this before it starts writing
-        if prev.evict_task and not prev.evict_task.done():
-            prev.evict_task.cancel()
-    run = _Run(on_event=on_event)
-    _RUNS[session_id] = run
-    _set_persisted_status(session_id, "running", started_at=time.time())
-    run.task = asyncio.create_task(_drain(session_id, agen, prev_task))
-    return run
+    with _LIFECYCLE_LOCK:
+        if _DRAINING:
+            raise RunDrainingError("Server restart is waiting for active runs to finish")
+        prev = _RUNS.get(session_id)
+        prev_task: Optional[asyncio.Task] = None
+        if prev:
+            if prev.task and not prev.task.done():
+                prev.task.cancel()
+                prev_task = prev.task   # new run awaits this before it starts writing
+            if prev.evict_task and not prev.evict_task.done():
+                prev.evict_task.cancel()
+        run = _Run(on_event=on_event)
+        _RUNS[session_id] = run
+        _set_persisted_status(session_id, "running", started_at=time.time())
+        run.task = asyncio.create_task(_drain(session_id, agen, prev_task))
+        return run
 
 
 async def subscribe(session_id: str) -> AsyncGenerator[str, None]:

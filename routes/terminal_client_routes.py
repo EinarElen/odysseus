@@ -22,7 +22,7 @@ from routes.chat_helpers import (
     save_assistant_response,
 )
 from routes.session_routes import _verify_session_owner
-from src import terminal_client_runs
+from src import agent_runs, terminal_client_runs
 from src.agent_access import AgentAccess, resolve_agent_access
 from src.agent_loop import stream_agent_loop
 from src.agent_runtime import resolve_agent_execution_limits
@@ -567,6 +567,12 @@ def setup_terminal_client_routes(
     @router.post("/runs")
     async def start_run(request: Request, payload: RunStartRequest) -> dict[str, Any]:
         require_terminal_scope(request, RUN_START_SCOPES)
+        if agent_runs.is_draining():
+            raise HTTPException(
+                503,
+                "Server restart is waiting for active AI runs to finish; retry after reconnect",
+                headers={"Retry-After": "2"},
+            )
         if payload.kind not in {"chat", "agent", "harness"}:
             raise HTTPException(400, "Terminal Client run start supports kind=chat, kind=agent, or kind=harness")
         if payload.kind in {"agent", "harness"}:
@@ -662,14 +668,18 @@ def setup_terminal_client_routes(
                 message=payload.message,
                 preset_id=payload.preset_id,
             )
-        return terminal_client_runs.create_run(
-            kind=payload.kind,
-            session_id=session_id,
-            message=payload.message,
-            stream=stream,
-            harness_adapter_id=adapter.id if adapter is not None else None,
-            harness_session_id=None,
-        )
+        try:
+            return terminal_client_runs.create_run(
+                kind=payload.kind,
+                session_id=session_id,
+                message=payload.message,
+                stream=stream,
+                harness_adapter_id=adapter.id if adapter is not None else None,
+                harness_session_id=None,
+            )
+        except agent_runs.RunDrainingError as exc:
+            await stream.aclose()
+            raise HTTPException(503, str(exc), headers={"Retry-After": "2"})
 
     @router.get("/runs")
     async def list_runs(request: Request, kind: str | None = None, status: str | None = None) -> dict[str, Any]:

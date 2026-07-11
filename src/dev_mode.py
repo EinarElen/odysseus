@@ -444,16 +444,13 @@ def _restart_helper_code() -> str:
         "cwd = sys.argv[2]\n"
         "delay = float(sys.argv[3])\n"
         "argv = json.loads(os.environ.pop('ODYSSEUS_RESTART_ARGV_JSON'))\n"
-        "deadline = time.time() + 45\n"
         "time.sleep(delay)\n"
-        "while time.time() < deadline:\n"
+        "while True:\n"
         "    try:\n"
         "        os.kill(pid, 0)\n"
         "    except OSError:\n"
         "        break\n"
         "    time.sleep(0.1)\n"
-        "else:\n"
-        "    sys.exit(2)\n"
         "os.chdir(cwd)\n"
         "child_env = os.environ.copy()\n"
         "subprocess.Popen(argv, cwd=cwd, env=child_env)\n"
@@ -498,11 +495,20 @@ def request_server_reload(root: Optional[str] = None, *, delay_s: float = 0.35) 
     env.pop("ODYSSEUS_DEV_RELOAD", None)
     env.pop("ODYSSEUS_RELOAD_ACTIVE", None)
 
+    # Planned restarts drain agent execution before terminating this process.
+    # The browser can disconnect/reconnect meanwhile; agent_runs owns the live
+    # stream and its replay buffer until every run reaches a terminal state.
+    from src import agent_runs
+    draining_runs = agent_runs.begin_drain()
+
     def _restart() -> None:
         try:
             _spawn_restart_helper(app_root, argv, env, delay_s)
         except Exception:
+            agent_runs.cancel_drain()
             return
+        while agent_runs.active_run_count() > 0:
+            time.sleep(0.1)
         time.sleep(max(0.05, min(delay_s, 2.0)))
         _request_graceful_exit()
 
@@ -513,6 +519,8 @@ def request_server_reload(root: Optional[str] = None, *, delay_s: float = 0.35) 
         "delay_s": delay_s,
         "command": shlex.join(argv),
         "mode": "interactive",
+        "draining": draining_runs > 0,
+        "draining_runs": draining_runs,
     }
 
 
