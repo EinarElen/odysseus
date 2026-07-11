@@ -52,8 +52,7 @@ That let four real requirements slip through:
 ## Remaining Required Repairs
 
 The API-backed chat, agent, and harness Run vertical slices, their real Event
-Envelope query/replay/lifecycle/live JSONL paths, and the full-screen Textual
-renderer are complete. The remaining repairs are:
-
-1. Extend Event Envelope inspection beyond chat, agent, harness, and local
-   server logs to independent service, process, and system sources.
+Envelope query/replay/lifecycle/live JSONL paths, managed service/process/system
+runtime snapshots, the full-screen Textual renderer, and retirement of
+client-local Run fixtures are complete. The final contract audit remains to
+reconcile evidence and user-facing documentation before closing v1.

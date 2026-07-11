@@ -11,13 +11,13 @@ the user-facing behavior works. Do not count scaffold, local fixture state,
 static renderer output, or command-shape tests as production behavior unless the
 ticket is explicitly labelled scaffold-only.
 
-- [ ] Real backend/API behavior is verified when the ticket promises live
+- [x] Real backend/API behavior is verified when the ticket promises live
       Odysseus Sessions, Runs, events, lifecycle state, auth, or capabilities.
-- [ ] Interactive behavior is verified against an interactive terminal harness
+- [x] Interactive behavior is verified against an interactive terminal harness
       when the ticket promises TUI keyboard, mouse, or full-screen behavior.
-- [ ] CLI contract tests are paired with integration-style checks whenever the
+- [x] CLI contract tests are paired with integration-style checks whenever the
       command claims to control or observe real Odysseus state.
-- [ ] Any remaining prototype/scaffold behavior is labelled open in this file
+- [x] Any remaining prototype/scaffold behavior is labelled open in this file
       and in user-facing docs.
 
 ## Survey Odysseus Terminal-Relevant Technology
@@ -103,9 +103,9 @@ ticket is explicitly labelled scaffold-only.
 - [x] Raw and debug modes expose source details without becoming the default automation contract.
 - [x] Event filtering and cursor metadata have a stable initial behavior over real Odysseus activity streams, not only local server logs.
 
-Correction note: the current implementation normalizes local server logs and
-real API-backed chat, agent, and harness Run events. Independent service,
-process, and system streams remain open. See [Terminal Client Implementation
+Correction note: the current implementation normalizes local server logs,
+real API-backed chat/agent/harness Run events, and managed service, process,
+and system runtime snapshots. See [Terminal Client Implementation
 Review](implementation-review.md).
 
 ## Create Run Identity Compatibility Layer For Chat Runs
@@ -490,10 +490,34 @@ explicitly labelled open.
 **Blocked by:** Retire Local Run-State Fixtures From Production Commands; Make
 Lifecycle Logs And Controls Consume Real Run/Event State.
 
-- [ ] All Terminal Client tickets are reviewed against the implementation
+- [x] All Terminal Client tickets are reviewed against the implementation
       evidence gates.
-- [ ] `docs/ody-term.md` describes only behavior that works, with unfinished
+- [x] `docs/ody-term.md` describes only behavior that works, with unfinished
       behavior clearly labelled as open work.
-- [ ] The wayfinder map points to the production recovery tickets and no longer
+- [x] The wayfinder map points to the production recovery tickets and no longer
       implies the real API/TUI requirements are complete.
-- [ ] Focused and full verification commands are recorded with the final status.
+- [x] Focused and full verification commands are recorded with the final status.
+
+2026-07-11 managed snapshot completion: `inspect events --source
+service|process|system` emits bounded `ody.event.v1` snapshots from the same
+Lifecycle Target and owned runtime evidence consumed by service commands. The
+TUI merges those sources with Run events and server logs. Focused tests cover
+schema, kind, source, cursor count, real process ownership evidence, and the
+shared TUI timeline. Live service/system inspection against the dev server
+returned fourteen managed service snapshots and one system snapshot.
+
+2026-07-11 final contract audit: every canonical command is implemented; the
+stale generic `config set/unset` advertisements were removed. A narrow
+owner-scoped Session API now backs `session list/show/history/export` with
+`session:read`, keeping durable history and linked Run summaries separate.
+Live verification listed sixteen Sessions and read the persisted harness
+Session with one linked Run, two history messages, and a 96-character Markdown
+export. Managed runtime snapshots use `cursor.mode=snapshot`, return
+`next: null`, and reject stream cursors. Textual pilot tests and a real PTY run
+cover keyboard, mouse, REPL, tree, event selection, and terminal restoration.
+Final focused command: `uv run pytest -q tests/test_ody_term_cli.py
+tests/test_ody_term_tui.py tests/test_terminal_client_routes.py` — 126 passed.
+Final repository command: `uv run pytest -q` — 4771 passed, 3 skipped. Ruff
+correctness checks and `git diff --check` passed; `ty` remained advisory with
+known dynamic-boundary warnings. Independent Standards and Spec review axes
+both passed after their findings were corrected.

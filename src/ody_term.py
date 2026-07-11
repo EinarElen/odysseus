@@ -88,7 +88,7 @@ ALIASES = (
 
 COMMANDS: dict[str, tuple[str, ...]] = {
     "auth": ("status", "login", "logout", "capabilities"),
-    "config": ("show", "profile", "resolve-target", "set", "unset"),
+    "config": ("show", "profile", "resolve-target"),
     "server": ("status", "start", "stop", "logs"),
     "session": ("list", "show", "history", "export"),
     "run": ("start", "list", "status", "attach", "stop"),
@@ -274,6 +274,7 @@ def _parse_command_options(args: list[str]) -> tuple[dict[str, str | bool], list
         "--mouse",
         "--select-event",
         "--repl",
+        "--export-format",
     }
     bool_flags = {"--default", "--dry-run", "--force"}
     while index < len(args):
@@ -1101,6 +1102,43 @@ def _run_list(request: CommandRequest) -> CommandResponse:
     )
 
 
+def _session_list(request: CommandRequest) -> CommandResponse:
+    _require_capability("session:read", request)
+    options, positionals = _parse_command_options(request.args)
+    if positionals:
+        raise CommandError("unexpected_session_args", f"unexpected session list args: {' '.join(positionals)}")
+    payload = _terminal_api_request(request, "GET", "/api/terminal/sessions")
+    sessions = payload.get("sessions")
+    return CommandResponse(
+        ok=True,
+        command=["session", "list"],
+        message=f"{len(sessions) if isinstance(sessions, list) else 0} Session(s)",
+        data={"sessions": sessions if isinstance(sessions, list) else []},
+    )
+
+
+def _session_read(request: CommandRequest) -> CommandResponse:
+    _require_capability("session:read", request)
+    options, positionals = _parse_command_options(request.args)
+    if len(positionals) != 1:
+        raise CommandError("missing_session", f"session {request.verb} requires exactly one Session id")
+    session_id = positionals[0]
+    suffix = "/history" if request.verb == "history" else ""
+    query = None
+    if request.verb == "export":
+        suffix = "/export"
+        export_format = str(options.get("export_format") or "md")
+        if export_format not in {"md", "txt", "json"}:
+            raise CommandError("invalid_export_format", "--export-format must be md, txt, or json")
+        query = {"format": export_format}
+    payload = _terminal_api_request(request, "GET", f"/api/terminal/sessions/{session_id}{suffix}", query=query)
+    return CommandResponse(
+        ok=True,
+        command=["session", str(request.verb)],
+        message=f"Session {session_id} {request.verb}",
+        data=payload,
+        raw=payload.get("content") if request.verb == "export" else None,
+    )
 def _run_status(request: CommandRequest) -> CommandResponse:
     _require_capability("run:read", request)
     options, positionals = _parse_command_options(request.args)
@@ -1251,6 +1289,77 @@ def _harness_stop(request: CommandRequest) -> CommandResponse:
     return _run_stop(request)
 
 
+def _managed_runtime_snapshot_events(
+    request: CommandRequest,
+    *,
+    source: str,
+    cursor: int | None,
+    limit: int,
+    targets: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    if cursor is not None:
+        raise CommandError(
+            "snapshot_cursor_unsupported",
+            f"{source} managed-runtime snapshots do not support continuation cursors",
+            exit_code=1,
+        )
+    targets = _lifecycle_targets(request) if targets is None else targets
+    records: list[tuple[str, dict[str, object]]] = []
+    if source == "service":
+        records = [("lifecycle.status", target) for target in targets]
+    elif source == "process":
+        for target in targets:
+            raw = target.get("raw") if isinstance(target.get("raw"), dict) else {}
+            runtime = cast(dict[str, object], raw).get("runtime_state") if isinstance(raw, dict) else None
+            if isinstance(runtime, dict) and isinstance(runtime.get("pid"), int):
+                records.append(("process.status", target))
+    elif source == "system":
+        server = next((target for target in targets if target.get("id") == "main-server"), None)
+        if server is not None:
+            records = [("system.status", server)]
+
+    events: list[dict[str, object]] = []
+    include_raw = request.globals.format in {"raw", "debug"}
+    if limit <= 0:
+        return {
+            "events": [],
+            "cursor": {"after": None, "next": None, "count": 0, "mode": "snapshot"},
+            "source": "managed-runtime-snapshot",
+        }
+    for seq, (kind, target) in enumerate(records, start=1):
+        target_id = str(target.get("id") or f"target-{seq}")
+        payload = {
+            "target_id": target_id,
+            "target_kind": target.get("kind"),
+            "status": target.get("status"),
+            "label": target.get("label"),
+            "ownership": target.get("ownership"),
+            "capabilities": target.get("capabilities"),
+            "last_activity": target.get("last_activity"),
+        }
+        event: dict[str, object] = {
+            "schema": "ody.event.v1",
+            "id": f"evt_{source}_{target_id.replace(':', '_')}",
+            "seq": seq,
+            "time": target.get("last_activity") or _utc_now(),
+            "source": source,
+            "kind": kind,
+            "level": "warn" if target.get("status") in {"error", "stale", "unknown"} else "info",
+            "summary": f"{target.get('label') or target_id} is {target.get('status') or 'unknown'}",
+            "payload": payload,
+        }
+        if include_raw:
+            event["raw"] = {"transport": "managed-runtime-snapshot", "target": target}
+        events.append(event)
+        if len(events) >= limit:
+            break
+    return {
+        "events": events,
+        "cursor": {"after": None, "next": None, "count": len(events), "mode": "snapshot"},
+        "source": "managed-runtime-snapshot",
+    }
+
+
 def _inspect_events(request: CommandRequest) -> CommandResponse:
     capability = "event:raw" if request.globals.format in {"raw", "debug"} else "event:read"
     _require_capability(capability, request)
@@ -1284,7 +1393,14 @@ def _inspect_events(request: CommandRequest) -> CommandResponse:
     session_id = filters["session_id"]
     use_terminal_api = bool(run_id or session_id) and filters["source"] != "server"
     event_stream: Iterable[dict[str, object]] | None = None
-    if use_terminal_api:
+    if filters["source"] in {"service", "process", "system"} and not run_id and not session_id:
+        payload = _managed_runtime_snapshot_events(
+            request,
+            source=str(filters["source"]),
+            cursor=cursor,
+            limit=max(lines, 0),
+        )
+    elif use_terminal_api:
         query: dict[str, object] = {
             "run_id": run_id,
             "session_id": session_id,
@@ -1868,7 +1984,7 @@ def _tui_selected_event(events: list[dict[str, object]], selector: str | None) -
     if not events:
         return None
     if not selector:
-        return events[-1]
+        return next((event for event in reversed(events) if event.get("run_id")), events[-1])
     for event in events:
         if str(event.get("id")) == selector:
             return event
@@ -1958,6 +2074,16 @@ def _build_tui_model(request: CommandRequest) -> dict[str, object]:
         else []
     )
     run_events = _merged_tui_events(_api_run_events(request, runs), lifecycle_targets=lifecycle_targets)
+    for snapshot_source in ("service", "process", "system"):
+        snapshot = _managed_runtime_snapshot_events(
+            request,
+            source=snapshot_source,
+            cursor=None,
+            limit=80,
+            targets=lifecycle_targets,
+        )
+        run_events.extend(cast(list[dict[str, object]], snapshot["events"]))
+    run_events.sort(key=lambda event: (str(event.get("time") or ""), str(event.get("source") or ""), int(event.get("seq") or 0)))
     capability_payload = _capabilities_payload()
     capabilities = cast(dict[str, object], capability_payload["capabilities"])
     target = _safe_tui_value("target", lambda: _resolve_target(request))
@@ -2073,7 +2199,7 @@ def _render_tui_screen(model: dict[str, object]) -> str:
         tabs,
         "",
         "Live",
-        *(timeline_lines[-6:] or ["No Event Envelopes yet"]),
+        *(timeline_lines[-12:] or ["No Event Envelopes yet"]),
         "",
         "REPL",
         "commands: " + ", ".join(str(command["command"]) for command in commands),
@@ -2603,6 +2729,10 @@ HANDLERS: dict[tuple[str, str | None], CommandHandler] = {
     ("auth", "login"): _auth_login,
     ("auth", "logout"): _auth_logout,
     ("auth", "capabilities"): _auth_capabilities,
+    ("session", "list"): _session_list,
+    ("session", "show"): _session_read,
+    ("session", "history"): _session_read,
+    ("session", "export"): _session_read,
     ("run", "start"): _run_start,
     ("run", "list"): _run_list,
     ("run", "status"): _run_status,

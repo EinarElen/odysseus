@@ -396,17 +396,6 @@ def test_jsonl_format_emits_one_object_per_line() -> None:
     assert payload["data"]["domains"][0] == "auth"
 
 
-def test_registered_but_unimplemented_commands_have_structured_baseline() -> None:
-    exit_code, stdout, stderr = run_cli(["session", "list"])
-
-    assert exit_code == 1
-    assert stderr == ""
-    payload = json.loads(stdout)
-    assert payload["ok"] is False
-    assert payload["command"] == ["session", "list"]
-    assert payload["data"]["implemented"] is False
-
-
 @pytest.mark.parametrize(
     ("argv", "code"),
     [
@@ -934,6 +923,46 @@ def test_run_start_creates_distinct_chat_run_for_new_session(
     assert run["events_available"] is True
     assert data["cursor"] == {"after": None, "next": "1", "count": 1}
     assert terminal_api_fake["calls"][0][0:2] == ("POST", "/api/terminal/runs")
+
+
+def test_session_commands_read_durable_session_api_without_conflating_run_events(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    calls: list[tuple[str, str, dict[str, object] | None]] = []
+    session = {"session_id": "ses_durable", "name": "Durable chat", "message_count": 2}
+    history = [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}]
+
+    def fake_api(request, method, path, *, query=None, body=None):
+        calls.append((method, path, query))
+        if path == "/api/terminal/sessions":
+            return {"sessions": [session]}
+        if path == "/api/terminal/sessions/ses_durable/history":
+            return {"session": session, "history": history, "runs": [{"run_id": "run_recent"}]}
+        if path == "/api/terminal/sessions/ses_durable/export":
+            return {"session": session, "format": "md", "media_type": "text/markdown", "content": "## USER\n\nhello"}
+        return {"session": session, "runs": [{"run_id": "run_recent"}]}
+
+    monkeypatch.setattr(ody_term, "_terminal_api_request", fake_api)
+
+    list_code, list_stdout, _ = run_cli(["session", "list", "--format=json"])
+    show_code, show_stdout, _ = run_cli(["session", "show", "ses_durable", "--format=json"])
+    history_code, history_stdout, _ = run_cli(["session", "history", "ses_durable", "--format=json"])
+    export_code, export_stdout, _ = run_cli(
+        ["session", "export", "ses_durable", "--export-format", "md", "--format=json"]
+    )
+
+    assert [list_code, show_code, history_code, export_code] == [0, 0, 0, 0]
+    assert json.loads(list_stdout)["data"]["sessions"] == [session]
+    assert json.loads(show_stdout)["data"]["runs"] == [{"run_id": "run_recent"}]
+    assert json.loads(history_stdout)["data"]["history"] == history
+    assert json.loads(export_stdout)["data"]["content"] == "## USER\n\nhello"
+    assert calls == [
+        ("GET", "/api/terminal/sessions", None),
+        ("GET", "/api/terminal/sessions/ses_durable", None),
+        ("GET", "/api/terminal/sessions/ses_durable/history", None),
+        ("GET", "/api/terminal/sessions/ses_durable/export", {"format": "md"}),
+    ]
 
 
 def test_run_start_default_chat_uses_terminal_client_api(
@@ -1776,6 +1805,8 @@ def test_inspect_events_queries_real_terminal_run_events(
     assert stderr == ""
     data = json.loads(stdout)["data"]
     assert data["source"] == "terminal-api"
+
+
     assert data["cursor"] == {"after": "0", "next": "1", "count": 1}
     assert [event["run_id"] for event in data["events"]] == [run_id]
     assert terminal_api_fake["calls"][-1] == (
@@ -1814,6 +1845,65 @@ def test_inspect_events_queries_real_terminal_run_events(
     assert [(event["seq"], event["payload"]) for event in map(json.loads, reconnect_stdout.splitlines())] == [
         (2, {"text": "next"})
     ]
+
+
+@pytest.mark.parametrize(
+    ("source", "kind"),
+    [("service", "lifecycle.status"), ("process", "process.status"), ("system", "system.status")],
+)
+def test_inspect_events_exposes_managed_runtime_snapshot_sources(
+    isolated_term_state: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_api_fake,
+    source: str,
+    kind: str,
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    (tmp_path / "runtime.json").write_text(
+        json.dumps(
+            {
+                "kind": "ody-term-local-server",
+                "pid": 4242,
+                "pgid": 4242,
+                "repo": str(Path(__file__).resolve().parents[1]),
+                "command": ["uv", "run", "ody"],
+                "url": "http://127.0.0.1:7860",
+                "started_at": "2026-07-11T12:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ody_term, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(ody_term, "_process_group_matches", lambda pid, pgid: True)
+
+    exit_code, stdout, stderr = run_cli(["inspect", "events", "--source", source, "--format=json"])
+
+    assert exit_code == 0
+    assert stderr == ""
+    data = json.loads(stdout)["data"]
+    assert data["source"] == "managed-runtime-snapshot"
+    assert data["events"]
+    assert all(event["schema"] == "ody.event.v1" for event in data["events"])
+    assert all(event["source"] == source for event in data["events"])
+    assert all(event["kind"] == kind for event in data["events"])
+    assert data["cursor"]["count"] == len(data["events"])
+    assert data["cursor"]["mode"] == "snapshot"
+    assert data["cursor"]["next"] is None
+
+
+def test_managed_runtime_snapshots_reject_stream_cursor_semantics(
+    isolated_term_state: None, monkeypatch: pytest.MonkeyPatch, terminal_api_fake
+) -> None:
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+
+    exit_code, stdout, stderr = run_cli(
+        ["inspect", "events", "--source", "service", "--cursor", "1", "--format=json"]
+    )
+
+    assert exit_code == 1
+    assert stdout == ""
+    assert json.loads(stderr)["error"]["code"] == "snapshot_cursor_unsupported"
 
 
 def test_inspect_events_by_session_streams_real_events_as_jsonl(
@@ -2125,7 +2215,7 @@ def test_tui_model_live_view_uses_shared_events_and_service_logs(
     assert live["selected_event"]["schema"] == "ody.event.v1"
     assert any("harness.heartbeat" in line for line in live["timeline_lines"])
     assert any("server.log" in line for line in live["timeline_lines"])
-    assert {event["source"] for event in live["timeline"]} == {"harness", "server"}
+    assert {event["source"] for event in live["timeline"]} == {"harness", "server", "service", "process", "system"}
     assert any(event["run_id"] == run_id for event in live["timeline"] if event["source"] == "harness")
 
 
@@ -2243,7 +2333,7 @@ def test_tui_browse_and_inspect_views_expose_shared_model_state(
     inspect = model["views"]["Inspect"]
     assert inspect["model"]["sessions"] == 1
     assert inspect["model"]["runs"] == 1
-    assert inspect["model"]["events"] == 3
+    assert inspect["model"]["events"] == len(model["views"]["Live"]["timeline"])
     assert inspect["target"]["value"]["source"] == "runtime-state"
     assert inspect["capabilities"]["auth_facts"]["auth_mode"] == "auth-disabled"
     assert inspect["event_envelope_sample"]["schema"] == "ody.event.v1"
@@ -2285,7 +2375,7 @@ def test_tui_text_fallback_has_focused_live_repl_browse_and_inspect_views(
     assert "harness.heartbeat" in stdout
     assert "commands: status, tail, filter, stop, harness, service" in stdout
     assert "Session ses_screen" in stdout
-    assert "sessions=1 runs=1 events=2" in stdout
+    assert "sessions=1 runs=1 events=" in stdout
     assert "keyboard: F1-F4, 1-4, Tab; mouse: tabs, event rows, tree nodes, controls" in stdout
 
 

@@ -1,8 +1,8 @@
 # Terminal Client V1 Spec
 
-Status: open
+Status: implemented
 Type: spec
-Labels: ready-for-agent
+Labels: implemented
 Blocked by: none
 Assignee: Codex
 

@@ -9,13 +9,15 @@ identity, bounded real Run Event Envelope query/replay, real Run and harness
 lifecycle targets, and the `ody.tui.v1` state model exist. Live JSONL tailing
 is available for API-backed Runs. Production Run and harness status/control
 commands use the terminal-client API exclusively; client-local JSON Run state
-is no longer read or written. On a human TTY, `ody-term tui` opens a
+is no longer read or written. Managed service, process, and system state is
+available as bounded Event Envelope snapshots through `inspect events
+--source`. On a human TTY, `ody-term tui` opens a
 full-screen Textual renderer with Live, REPL, Browse, and Inspect views,
 keyboard navigation and controls, a command-input REPL, clickable controls,
 selectable Event Envelope rows, and a selectable Session/Run tree. Structured
 output and non-interactive human output retain the text/model fallback.
-Remaining production-recovery work is tracked in
-`docs/wayfinder/terminal-client/implementation-review.md`.
+Final implementation evidence is tracked in
+`docs/wayfinder/terminal-client/tickets.md`.
 
 ## Command Shape
 
@@ -52,7 +54,7 @@ the server remains the authorization boundary.
 ```bash
 ody-term auth login \
   --token 'ody_...' \
-  --scopes 'run:start,run:read,run:stop,event:read,event:raw'
+  --scopes 'session:read,run:start,run:read,run:stop,event:read,event:raw'
 ody-term auth status --format=json
 ```
 
@@ -91,11 +93,26 @@ uses the authenticated owner's configured Default Model. Pass both
 `--endpoint-url` and `--model` to override it, or pass `--session-id` to reuse
 that Session's model selection.
 
+Durable Session reads are separate from Run lifecycle and event replay:
+
+```bash
+ody-term session list --format=json
+ody-term session show ses_abc --format=json
+ody-term session history ses_abc --format=json
+ody-term session export ses_abc --export-format md --format=json
+```
+
+Session history responses include linked recent Run summaries separately; they
+do not merge Event Envelopes into persisted conversation history.
+
 `inspect events` reads real chat activity through the Terminal Client API when
-given `--run-id` or `--session-id`. Without either identity it reads local server
-logs; use `--source server` to select that source explicitly when also passing
-identity filters. `--lines` bounds each API snapshot; pass `data.cursor.next`
-back through `--cursor` to continue. With `--format=jsonl`, Run/Session event
+given `--run-id` or `--session-id`. Without either identity it reads local
+server logs by default. Explicit `--source service|process|system` selects a
+bounded managed-runtime snapshot, while `--source server` selects local server
+logs. `--lines` bounds each response. Run/Session and server-log responses
+support continuation through `data.cursor.next`; managed-runtime snapshots
+return `next: null` and reject `--cursor` because they are regenerated current
+state, not append-only streams. With `--format=jsonl`, Run/Session event
 inspection instead opens a live tail, replays after `--cursor`, and flushes one
 Event Envelope per line until the Run finishes.
 Chat Event Envelopes are persisted under Run identity while execution drains,
@@ -105,6 +122,7 @@ time.
 ```bash
 ody-term inspect events --run-id run_abc --source chat --format=jsonl
 ody-term inspect events --session-id ses_abc --kind message.delta --cursor 4 --format=json
+ody-term inspect events --source service --format=json
 ```
 
 The stable replay contract is the normalized Event Envelope, not raw backend transport:

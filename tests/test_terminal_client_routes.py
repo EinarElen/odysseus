@@ -64,6 +64,9 @@ class FakeSessionManager:
     def save_sessions(self):
         self.saved += 1
 
+    def get_sessions_for_user(self, owner):
+        return {session.id: session for session in self.sessions.values() if session.owner in {None, owner}}
+
     def _persist_message(self, session_id, message):
         if message.metadata is None:
             message.metadata = {}
@@ -87,6 +90,71 @@ def install_terminal_route_fakes(monkeypatch, *, patch_owner=True):
         return "msg_assistant"
 
     monkeypatch.setattr("routes.terminal_client_routes.save_assistant_response", fake_save_assistant_response)
+
+
+def test_terminal_session_read_api_keeps_history_and_run_identity_separate(monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    manager = FakeSessionManager()
+    manager.sessions["ses-real"].owner = "alice"
+    manager.sessions["ses-real"].name = "Durable chat"
+    manager.sessions["ses-real"].add_message(ChatMessage("user", "hello"))
+    manager.sessions["ses-real"].add_message(ChatMessage("assistant", "hi"))
+    install_terminal_route_fakes(monkeypatch)
+    monkeypatch.setattr("routes.terminal_client_routes.effective_user", lambda request: "alice")
+    app = FastAPI()
+    app.include_router(setup_terminal_client_routes(session_manager=manager, chat_handler=FakeChatHandler()))
+    client = TestClient(app)
+
+    listed = client.get("/api/terminal/sessions")
+    shown = client.get("/api/terminal/sessions/ses-real")
+    history = client.get("/api/terminal/sessions/ses-real/history")
+    exported = client.get("/api/terminal/sessions/ses-real/export", params={"format": "md"})
+
+    assert listed.status_code == shown.status_code == history.status_code == exported.status_code == 200
+    assert "ses-real" in {session["session_id"] for session in listed.json()["sessions"]}
+    assert shown.json()["session"]["name"] == "Durable chat"
+    assert history.json()["history"] == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+    ]
+    assert history.json()["runs"] == []
+    assert "## USER\n\nhello" in exported.json()["content"]
+
+
+def test_terminal_session_read_api_requires_session_scope(monkeypatch):
+    manager = FakeSessionManager()
+    install_terminal_route_fakes(monkeypatch)
+    app = FastAPI()
+    token = {"scopes": ["run:read"]}
+
+    @app.middleware("http")
+    async def fake_token(request, call_next):
+        request.state.api_token = True
+        request.state.api_token_owner = "alice"
+        request.state.api_token_scopes = token["scopes"]
+        return await call_next(request)
+
+    app.include_router(setup_terminal_client_routes(session_manager=manager, chat_handler=FakeChatHandler()))
+    client = TestClient(app)
+
+    denied = client.get("/api/terminal/sessions")
+    token["scopes"] = ["session:read"]
+    allowed = client.get("/api/terminal/sessions")
+
+    assert denied.status_code == 403
+    assert "session:read" in denied.json()["detail"]
+    assert allowed.status_code == 200
+
+
+def test_terminal_session_read_api_reports_missing_runtime(monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    app = FastAPI()
+    app.include_router(setup_terminal_client_routes())
+    client = TestClient(app)
+
+    response = client.get("/api/terminal/sessions/missing")
+
+    assert response.status_code == 503
 
 
 @pytest.mark.asyncio

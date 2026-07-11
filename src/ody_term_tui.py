@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Callable, cast
+from typing import Callable, Protocol, cast
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -11,6 +11,10 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Footer, Header, Input, Static, Tree
 
 VIEWS = ("Live", "REPL", "Browse", "Inspect")
+
+
+class _TreeParent(Protocol):
+    def add(self, label: str, *, data: dict[str, object], expand: bool) -> _TreeParent: ...
 
 
 def _mapping(value: object) -> dict[str, object]:
@@ -61,16 +65,16 @@ class TerminalClientApp(App[None]):
         self.attempt = attempt
         requested_view = str(model.get("active_view") or "Live")
         self.active_view = requested_view if requested_view in VIEWS else "Live"
+        views = _mapping(model.get("views"))
+        self._repl_lines = [_json(_mapping(views.get("REPL")).get("history", []))]
+        self._control_lines = [str(line) for line in _sequence(_mapping(views.get("Live")).get("control_log"))]
 
     def compose(self) -> ComposeResult:
         views = _mapping(self.model.get("views"))
         live = _mapping(views.get("Live"))
-        repl = _mapping(views.get("REPL"))
         browse = _mapping(views.get("Browse"))
         inspect = _mapping(views.get("Inspect"))
         selected = live.get("selected_event")
-        control_log = _sequence(live.get("control_log"))
-
         yield Header(show_clock=True)
         with Horizontal(id="view-bar"):
             for view in VIEWS:
@@ -81,7 +85,7 @@ class TerminalClientApp(App[None]):
                 yield Static(_json(selected or live.get("selected_event")), id="event-detail", classes="pane")
             with Horizontal(id="panel-repl", classes="hidden"):
                 with Vertical(classes="pane"):
-                    yield Static(_json(repl.get("history", [])), id="repl-history")
+                    yield Static("\n".join(self._repl_lines), id="repl-history")
                     yield Input(placeholder="status | tail | filter | stop | harness | service", id="repl-input")
             with Horizontal(id="panel-browse", classes="hidden"):
                 yield Tree("Odysseus", id="browse-tree", classes="pane")
@@ -92,7 +96,7 @@ class TerminalClientApp(App[None]):
                 yield Button("Stop Run", id="control-stop", variant="warning")
                 yield Button("Harness", id="control-harness")
                 yield Button("Service", id="control-service")
-            yield Static("\n".join(str(line) for line in control_log), id="control-log")
+            yield Static("\n".join(self._control_lines), id="control-log")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -109,9 +113,9 @@ class TerminalClientApp(App[None]):
         tree.root.expand()
         self._apply_view(self.active_view)
 
-    def _add_tree_node(self, parent: object, node: dict[str, object]) -> None:
+    def _add_tree_node(self, parent: _TreeParent, node: dict[str, object]) -> None:
         label = str(node.get("label") or node.get("id") or "unknown")
-        child = parent.add(label, data=node, expand=True)  # type: ignore[attr-defined]
+        child = parent.add(label, data=node, expand=True)
         for raw_child in _sequence(node.get("children")):
             self._add_tree_node(child, _mapping(raw_child))
 
@@ -163,12 +167,10 @@ class TerminalClientApp(App[None]):
         result = self.attempt(verb.lower())
         if verb.lower() == "filter" and expression and result.get("status") != "denied":
             result = {**result, "filter": self._apply_filter(expression)}
-        history = self.query_one("#repl-history", Static)
-        prior = history.render().plain.strip()
-        history.update(f"{prior}\nody-term> {command}\n{_json(result)}".strip())
-        control_log = self.query_one("#control-log", Static)
-        control_prior = control_log.render().plain.strip()
-        control_log.update(f"{control_prior}\n{command}: {result.get('status', 'unknown')}".strip())
+        self._repl_lines.extend([f"ody-term> {command}", _json(result)])
+        self.query_one("#repl-history", Static).update("\n".join(self._repl_lines))
+        self._control_lines.append(f"{command}: {result.get('status', 'unknown')}")
+        self.query_one("#control-log", Static).update("\n".join(self._control_lines))
 
     def _apply_filter(self, expression: str) -> dict[str, object]:
         field, separator, value = expression.partition("=")

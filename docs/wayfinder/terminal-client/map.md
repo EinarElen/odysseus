@@ -2,20 +2,20 @@
 
 ## Destination
 
-A concrete architecture/spec for a non-graphical Odysseus Terminal Client that supports both human terminal use and machine-driven automation, including interactive TUI use, scriptable CLI use, structured/raw introspection output, repeated scripted runs motivated by experiment workflows, and a path toward Odysseus-driven self-improvement workflows.
+An implemented and evidence-backed non-graphical Odysseus Terminal Client that supports both human terminal use and machine-driven automation, including interactive TUI use, scriptable CLI use, structured/raw introspection output, repeated scripted runs motivated by experiment workflows, and a path toward Odysseus-driven self-improvement workflows.
 
 ## Notes
 
 - Local Markdown tracker for this effort; do not create or update GitHub issues.
 - Local child tickets live in `docs/wayfinder/terminal-client/tickets/`; each ticket records status, type, and blockers in its metadata because there is no native tracker relationship.
-- This map is planning/spec work by default. Implementation is out of scope unless a small prototype is explicitly needed to clarify a decision.
+- The planning map has advanced through implementation and production recovery; `tickets.md` is the authoritative completion/evidence ledger.
 - Use `wayfinder`, `grilling`, and `domain-modeling` while charting or resolving tickets.
 - Backend posture decided so far: HTTP/API-first for the first version, with a future privileged inspection mode kept in mind.
 - `uv` is the main project/task runner, but it does not determine `ody-term` implementation technology.
 
 ## Decisions so far
 
-- Destination accepted — the effort ends with an architecture/spec for the Terminal Client, not an implemented client.
+- Destination delivered — the architecture/spec now has an HTTP/API-first `ody-term` implementation, production-recovery evidence, and a final contract audit.
 - Terminal Client terminology accepted — Terminal Client is the umbrella term; TUI and CLI name the interactive and scriptable modes.
 - Backend posture accepted — first version should be HTTP/API-first, while preserving a future path for privileged inspection of local internals.
 - V1 scope accepted — optimize for development/debugging of chat, agent, and harness sessions, with minimum support for the main server, harness sessions, relevant session details such as heartbeats, and service/process listing plus stop/restart controls.
@@ -34,9 +34,9 @@ A concrete architecture/spec for a non-graphical Odysseus Terminal Client that s
 - [Decide Live TUI Prototype Scope](tickets/007-live-tui-prototype-scope.md) — validate `ody-term tui` as focused tab-like views over shared session/run/event state, with first-class Live, REPL, Browse/tree, Inspect, keyboard, and mouse interaction.
 - [Specify Server, Profile, And Config Runtime State](tickets/009-server-profile-config-runtime-state.md) — keep `ody-term` profiles/config and runtime state client-local, delegate server bootstrap to existing `uv run ody launch` machinery, and separate local server control from API-backed service lifecycle.
 - [Decide Odysseus-Driven Self-Improvement Path](tickets/010-decide-odysseus-driven-self-improvement-path.md) — treat self-improvement as future orchestration over ordinary `ody-term` run/event/service/profile/auth primitives rather than a special v1 command family or bypass path.
-- [Terminal Client V1 Spec](tickets/011-terminal-client-v1-spec.md) — ready-for-agent consolidated product/API contract for implementing `ody-term` from the resolved wayfinder decisions.
-- [Terminal Client V1 Implementation Tickets](tickets.md) — ready-for-agent tracer-bullet implementation sequence, starting with internal and external technology surveys.
-- [Terminal Client Implementation Review](implementation-review.md) — post-implementation review of scaffold-vs-production gaps; use the Production Recovery tickets and Implementation Evidence Gates in `tickets.md` before marking further implementation work complete.
+- [Terminal Client V1 Spec](tickets/011-terminal-client-v1-spec.md) — implemented product/API contract derived from the resolved wayfinder decisions.
+- [Terminal Client V1 Implementation Tickets](tickets.md) — completed tracer-bullet and production-recovery implementation/evidence ledger.
+- [Terminal Client Implementation Review](implementation-review.md) — resolved review of the original scaffold-vs-production gaps.
 
 ## Not yet specified
 
@@ -44,7 +44,6 @@ None.
 
 ## Out of scope
 
-- Building the production Terminal Client during this wayfinder charting session.
 - Replacing the graphical Odysseus client.
 - Broad feature parity for calendar, email, gallery, documents, cookbook, and other non-session product areas in v1.
 - [Specify Replay And Experiment Constraints](tickets/008-replay-experiment-constraints.md) — a dedicated replay/experiment feature surface is out of scope for v1; replay and experiment workflows remain a motivation for scriptable commands, stable structured output, and event/history primitives.

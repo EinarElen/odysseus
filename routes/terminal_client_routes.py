@@ -38,6 +38,7 @@ from src.terminal_client_auth import (
     RUN_READ_SCOPES,
     RUN_START_SCOPES,
     RUN_STOP_SCOPES,
+    SESSION_READ_SCOPES,
     require_terminal_scope,
 )
 from src.tool_policy import build_effective_tool_policy
@@ -486,6 +487,72 @@ def setup_terminal_client_routes(
             for event in rendered["events"]:
                 event.pop("raw", None)
         return rendered
+
+    def session_summary(session: Any) -> dict[str, Any]:
+        history = _session_messages(session)
+        return {
+            "session_id": str(getattr(session, "id", "")),
+            "name": str(getattr(session, "name", "") or ""),
+            "model": str(getattr(session, "model", "") or ""),
+            "archived": bool(getattr(session, "archived", False)),
+            "message_count": len(history),
+            "created_at": getattr(session, "created_at", None),
+            "updated_at": getattr(session, "updated_at", None),
+        }
+
+    def owned_session(request: Request, session_id: str) -> Any:
+        require_terminal_scope(request, SESSION_READ_SCOPES)
+        if session_manager is None:
+            raise HTTPException(503, "Terminal Client Session reads require the Odysseus session runtime")
+        _verify_session_owner(request, session_id, session_manager)
+        try:
+            return session_manager.get_session(session_id)
+        except KeyError:
+            raise HTTPException(404, f"Session {session_id} not found") from None
+
+    @router.get("/sessions")
+    async def list_sessions(request: Request) -> dict[str, Any]:
+        require_terminal_scope(request, SESSION_READ_SCOPES)
+        owner = effective_user(request)
+        if session_manager is None:
+            raise HTTPException(503, "Terminal Client Session reads require the Odysseus session runtime")
+        visible = session_manager.get_sessions_for_user(owner)
+        sessions = list(visible.values()) if isinstance(visible, dict) else list(visible)
+        return {"sessions": [session_summary(session) for session in sessions]}
+
+    @router.get("/sessions/{session_id}")
+    async def show_session(request: Request, session_id: str) -> dict[str, Any]:
+        session = owned_session(request, session_id)
+        runs = [run for run in terminal_client_runs.list_runs() if run.get("session_id") == session_id]
+        return {"session": session_summary(session), "runs": runs}
+
+    @router.get("/sessions/{session_id}/history")
+    async def session_history(request: Request, session_id: str) -> dict[str, Any]:
+        session = owned_session(request, session_id)
+        runs = [run for run in terminal_client_runs.list_runs() if run.get("session_id") == session_id]
+        return {"session": session_summary(session), "history": _session_messages(session), "runs": runs}
+
+    @router.get("/sessions/{session_id}/export")
+    async def export_session(request: Request, session_id: str, format: str = "md") -> dict[str, Any]:
+        session = owned_session(request, session_id)
+        history = _session_messages(session)
+        if format == "json":
+            content = json.dumps({"session": session_summary(session), "messages": history}, indent=2, ensure_ascii=False)
+            media_type = "application/json"
+        elif format == "txt":
+            content = "\n\n".join(f"[{str(message.get('role') or '').upper()}]\n{message.get('content') or ''}" for message in history)
+            media_type = "text/plain"
+        elif format == "md":
+            content = "\n\n".join(f"## {str(message.get('role') or '').upper()}\n\n{message.get('content') or ''}" for message in history)
+            media_type = "text/markdown"
+        else:
+            raise HTTPException(400, "Session export format must be md, txt, or json")
+        return {
+            "session": session_summary(session),
+            "format": format,
+            "media_type": media_type,
+            "content": content,
+        }
 
     @router.post("/runs")
     async def start_run(request: Request, payload: RunStartRequest) -> dict[str, Any]:
