@@ -474,9 +474,16 @@ impl eframe::App for App {
         let top_frame = egui::Frame::none()
             .fill(theme::PANEL)
             .inner_margin(egui::Margin::symmetric(14.0, 9.0));
+        // Keep the stream-pulse animating while a run is live.
+        if self.busy {
+            ctx.request_repaint();
+        }
         egui::TopBottomPanel::top("top").frame(top_frame).show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("◆ odysseus").heading().color(theme::FG).strong());
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let mark = if self.busy { theme::pulse_color(ctx, theme::FG) } else { theme::FG };
+                ui.label(egui::RichText::new("◆").heading().color(mark));
+                ui.label(egui::RichText::new("odysseus").heading().color(theme::FG).strong());
                 ui.add_space(12.0);
                 egui::ComboBox::from_id_source("kind")
                     .selected_text(&self.kind)
@@ -810,8 +817,10 @@ impl eframe::App for App {
                 .auto_shrink([false, false])
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
+                    let last = messages.len().saturating_sub(1);
                     for (idx, msg) in messages.iter().enumerate() {
-                        render_bubble(ui, idx, msg, cache, busy);
+                        let live = busy && idx == last && msg.role == Role::Assistant;
+                        render_bubble(ui, idx, msg, cache, live);
                         ui.add_space(10.0);
                     }
                 });
@@ -899,15 +908,18 @@ fn render_tool_card(ui: &mut egui::Ui, tool: &ToolCall, salt: (usize, usize)) {
         });
 }
 
-/// One chat bubble in the web app's style: user right + tail bottom-right,
-/// assistant left + tail bottom-left, colored role dot, teal-bordered panel.
-fn render_bubble(ui: &mut egui::Ui, idx: usize, msg: &ChatMessage, cache: &mut CommonMarkCache, busy: bool) {
+/// One chat bubble. The two participants are the ends of the event stream:
+/// the assistant speaks as a filled `◆ odysseus` (the brand mark, pulsing while
+/// its turn streams), the user is a hollow `◇ you`. User right + tail
+/// bottom-right, assistant left + tail bottom-left, teal-bordered panel.
+fn render_bubble(ui: &mut egui::Ui, idx: usize, msg: &ChatMessage, cache: &mut CommonMarkCache, live: bool) {
     let user = msg.role == Role::User;
-    let (who, dot, fill) = if user {
-        ("you", theme::FG, theme::USER_BUBBLE)
+    let (mark, who, fill) = if user {
+        ("◇", "you", theme::USER_BUBBLE)
     } else {
-        ("odysseus", theme::RED, theme::AI_BUBBLE)
+        ("◆", "odysseus", theme::AI_BUBBLE)
     };
+    let ident = if user { theme::MUTED } else { theme::FG };
     let max_w = (ui.available_width() * 0.82).min(760.0);
     let align = if user { egui::Align::Max } else { egui::Align::Min };
 
@@ -915,11 +927,12 @@ fn render_bubble(ui: &mut egui::Ui, idx: usize, msg: &ChatMessage, cache: &mut C
         ui.set_max_width(max_w);
         theme::bubble(fill, !user).show(ui, |ui| {
             ui.set_max_width(max_w - 26.0);
-            // Role line: colored dot + name.
+            // Role line: diamond mark + name; the assistant mark pulses live.
             ui.horizontal(|ui| {
-                let (r, _) = ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
-                ui.painter().circle_filled(r.center(), 4.0, dot);
-                ui.label(egui::RichText::new(who).color(dot).strong().small());
+                ui.spacing_mut().item_spacing.x = 5.0;
+                let mark_color = if live { theme::pulse_color(ui.ctx(), theme::FG) } else { ident };
+                ui.label(egui::RichText::new(mark).color(mark_color).small());
+                ui.label(egui::RichText::new(who).color(ident).strong().small());
             });
             if !msg.thinking.is_empty() {
                 egui::CollapsingHeader::new(egui::RichText::new("💭 thinking").color(theme::MUTED).small())
@@ -932,7 +945,7 @@ fn render_bubble(ui: &mut egui::Ui, idx: usize, msg: &ChatMessage, cache: &mut C
             for (i, tool) in msg.tools.iter().enumerate() {
                 render_tool_card(ui, tool, (idx, i));
             }
-            if msg.text.trim().is_empty() && !user && busy {
+            if msg.text.trim().is_empty() && live {
                 ui.label(egui::RichText::new("▍").color(theme::MUTED));
             } else if user {
                 // User input is shown verbatim (no markdown surprises).

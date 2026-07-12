@@ -96,6 +96,16 @@ fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// The stream-pulse: `base` whose alpha breathes on a ~1.4s sine, 0.55→1.0.
+/// Used only while an `ody.event.v1` run is streaming — the single motion the
+/// app commits to, tied to the protocol's defining act. Caller must
+/// `request_repaint` while it's live so the animation advances.
+pub fn pulse_color(ctx: &egui::Context, base: Color32) -> Color32 {
+    let t = ctx.input(|i| i.time) as f32;
+    let s = 0.5 + 0.5 * (t * std::f32::consts::TAU / 1.4).sin(); // 0..1
+    base.gamma_multiply(0.55 + 0.45 * s)
+}
+
 /// A rounded "bubble" frame in the web app's style: `fill` background, teal
 /// hairline border, generous padding. `tail` picks which corner is squared off.
 pub fn bubble(fill: Color32, tail_left: bool) -> egui::Frame {
