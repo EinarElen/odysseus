@@ -16,6 +16,7 @@ enum Msg {
     Tool(String),
     Error(String),
     Done(String), // session_id
+    Plan(String), // proposed/updated checklist (markdown)
     DocOpen { title: String, language: String },
     DocDelta(String),
     DocUpdate { id: String, content: String, version: i64, title: String, language: String },
@@ -51,6 +52,9 @@ pub struct App {
     model: String,
     models: Vec<ModelInfo>,
     kind: String, // "chat" | "agent"
+    plan_mode: bool,
+    plan: Option<String>,
+    awaiting_plan: bool,
     session_id: Option<String>,
     sessions: Vec<SessionSummary>,
     documents: Vec<Document>,
@@ -77,6 +81,9 @@ impl App {
             model: String::new(),
             models: Vec::new(),
             kind: "chat".to_string(),
+            plan_mode: false,
+            plan: None,
+            awaiting_plan: false,
             session_id: None,
             sessions: Vec::new(),
             documents: Vec::new(),
@@ -166,6 +173,26 @@ impl App {
             return;
         }
         self.input.clear();
+        // Plan mode only applies to agent runs.
+        let plan_mode = self.plan_mode && self.kind == "agent";
+        self.spawn_run(ctx, text, plan_mode, None);
+    }
+
+    /// Re-run the same session with the approved checklist so the agent executes it.
+    fn approve_plan(&mut self, ctx: &egui::Context) {
+        let plan = match self.plan.take() {
+            Some(p) => p,
+            None => return,
+        };
+        self.kind = "agent".to_string();
+        self.spawn_run(ctx, "Proceed with the approved plan.".to_string(), false, Some(plan));
+    }
+
+    fn spawn_run(&mut self, ctx: &egui::Context, text: String, plan_mode: bool, approved_plan: Option<String>) {
+        if self.busy {
+            return;
+        }
+        self.awaiting_plan = plan_mode;
         self.messages.push(ChatMessage {
             role: Role::User,
             text: text.clone(),
@@ -186,7 +213,9 @@ impl App {
         let session = self.session_id.clone();
         let tx = self.tx.clone();
         let ctx = ctx.clone();
-        std::thread::spawn(move || run_stream(client, kind, model, text, session, tx, ctx));
+        std::thread::spawn(move || {
+            run_stream(client, kind, model, text, session, plan_mode, approved_plan, tx, ctx)
+        });
     }
 
     fn drain(&mut self) {
@@ -225,6 +254,19 @@ impl App {
                 Msg::Done(sid) => {
                     self.session_id = Some(sid);
                     self.busy = false;
+                    // Plan mode ends the turn without executing; if the model
+                    // didn't call update_plan, its answer text *is* the plan.
+                    if self.awaiting_plan && self.plan.is_none() {
+                        if let Some(msg) = self.messages.last() {
+                            if msg.role == Role::Assistant && !msg.text.trim().is_empty() {
+                                self.plan = Some(msg.text.clone());
+                            }
+                        }
+                    }
+                    self.awaiting_plan = false;
+                }
+                Msg::Plan(p) => {
+                    self.plan = Some(p);
                 }
                 Msg::DocOpen { title, language } => {
                     self.doc = Some(DocState {
@@ -266,17 +308,26 @@ impl App {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_stream(
     client: Client,
     kind: String,
     model: String,
     message: String,
     session: Option<String>,
+    plan_mode: bool,
+    approved_plan: Option<String>,
     tx: Sender<Msg>,
     ctx: egui::Context,
 ) {
     let model = if model.is_empty() { None } else { Some(model.as_str()) };
-    let run = match client.start_run(&kind, &message, session.as_deref(), model) {
+    let opts = crate::api::RunOptions {
+        session_id: session.as_deref(),
+        model,
+        plan_mode,
+        approved_plan: approved_plan.as_deref(),
+    };
+    let run = match client.start_run(&kind, &message, opts) {
         Ok(r) => r,
         Err(e) => {
             let _ = tx.send(Msg::Error(e.to_string()));
@@ -302,6 +353,11 @@ fn run_stream(
             "tool_start" | "tool_output" => {
                 let name = p["tool"].as_str().or_else(|| p["name"].as_str()).unwrap_or("tool").to_string();
                 send(Msg::Tool(name));
+            }
+            "plan_update" => {
+                if let Some(plan) = p["plan"].as_str() {
+                    send(Msg::Plan(plan.to_string()));
+                }
             }
             "doc_stream_open" => send(Msg::DocOpen {
                 title: p["title"].as_str().unwrap_or("").to_string(),
@@ -350,6 +406,10 @@ impl eframe::App for App {
                             ui.selectable_value(&mut self.model, m.model.clone(), &m.model);
                         }
                     });
+                if self.kind == "agent" {
+                    ui.checkbox(&mut self.plan_mode, "plan")
+                        .on_hover_text("Propose a plan and wait for approval before executing");
+                }
                 ui.separator();
                 ui.label(format!("owner: {}", self.owner));
                 if self.busy {
@@ -357,6 +417,37 @@ impl eframe::App for App {
                 }
             });
         });
+
+        // Proposed plan: floating window with the checklist + approve/dismiss.
+        if self.plan.is_some() {
+            let mut approve = false;
+            let mut dismiss = false;
+            egui::Window::new("Proposed plan")
+                .collapsible(true)
+                .default_width(460.0)
+                .anchor(egui::Align2::CENTER_TOP, [0.0, 60.0])
+                .show(ctx, |ui| {
+                    if let Some(plan) = &self.plan {
+                        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                            ui.monospace(plan);
+                        });
+                    }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(!self.busy, egui::Button::new("✔ Approve & run")).clicked() {
+                            approve = true;
+                        }
+                        if ui.button("Dismiss").clicked() {
+                            dismiss = true;
+                        }
+                    });
+                });
+            if approve {
+                self.approve_plan(ctx);
+            } else if dismiss {
+                self.plan = None;
+            }
+        }
 
         egui::SidePanel::left("nav").resizable(true).default_width(210.0).show(ctx, |ui| {
             if ui.button("＋ New conversation").clicked() {

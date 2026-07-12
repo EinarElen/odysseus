@@ -16,6 +16,16 @@ use crate::model::{
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+/// Optional run parameters. `Default` gives a plain run (no session reuse, model
+/// fallback, no plan mode) so callers set only what they need.
+#[derive(Default)]
+pub struct RunOptions<'a> {
+    pub session_id: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub plan_mode: bool,
+    pub approved_plan: Option<&'a str>,
+}
+
 #[derive(Clone)]
 pub struct Client {
     base: String,
@@ -79,21 +89,28 @@ impl Client {
 
     /// Start a run. `kind` is "chat" or "agent". Reuse `session_id` for context;
     /// pass `model` to pin a specific model (skips the default-model fallback).
+    /// `plan_mode` proposes a plan and ends the turn; a follow-up run carrying
+    /// `approved_plan` (the checklist) executes it.
     pub fn start_run(
         &self,
         kind: &str,
         message: &str,
-        session_id: Option<&str>,
-        model: Option<&str>,
+        opts: RunOptions,
     ) -> Result<RunStartResponse> {
         let mut body = json!({ "kind": kind, "message": message });
-        if let Some(sid) = session_id {
+        if let Some(sid) = opts.session_id {
             body["session_id"] = json!(sid);
         }
-        if let Some(m) = model {
+        if let Some(m) = opts.model {
             if !m.is_empty() {
                 body["model"] = json!(m);
             }
+        }
+        if opts.plan_mode {
+            body["plan_mode"] = json!(true);
+        }
+        if let Some(plan) = opts.approved_plan {
+            body["approved_plan"] = json!(plan);
         }
         Ok(self
             .request("POST", "/api/terminal/runs")

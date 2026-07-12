@@ -23,6 +23,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        "plan" => {
+            if let Err(e) = plan_probe(&client) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
         "gui" => {
             let native_options = eframe::NativeOptions::default();
             let result = eframe::run_native(
@@ -68,7 +74,11 @@ fn probe(client: &api::Client, message: Option<String>) -> api::Result<()> {
 
     let msg = message.unwrap_or_else(|| "Reply with one short friendly sentence.".to_string());
     println!("\n> {msg}\n");
-    let run = client.start_run("chat", &msg, None, model.as_deref())?;
+    let run = client.start_run(
+        "chat",
+        &msg,
+        api::RunOptions { model: model.as_deref(), ..Default::default() },
+    )?;
     print!("< ");
     std::io::stdout().flush().ok();
 
@@ -106,8 +116,7 @@ fn docs_probe(client: &api::Client) -> api::Result<()> {
     let run = client.start_run(
         "agent",
         "Use the document tool to create a markdown doc titled RustCheck with the single line: hello from rust.",
-        None,
-        model.as_deref(),
+        api::RunOptions { model: model.as_deref(), ..Default::default() },
     )?;
     print!("streaming agent run… ");
     std::io::stdout().flush().ok();
@@ -134,5 +143,67 @@ fn docs_probe(client: &api::Client) -> api::Result<()> {
 
     let d2 = client.document_get(&doc_id)?;
     println!("verified content:\n---\n{}\n---", d2.current_content.unwrap_or_default());
+    Ok(())
+}
+
+/// Verifies plan mode: agent proposes a plan (plan_update, turn ends) → approve →
+/// follow-up run executes it.
+fn plan_probe(client: &api::Client) -> api::Result<()> {
+    let boot = client.bootstrap()?;
+    let model = boot.models.iter().find(|m| m.model.contains("terra")).map(|m| m.model.clone());
+
+    let mut plan_update: Option<String> = None;
+    let mut answer = String::new();
+    let run = client.start_run(
+        "agent",
+        "Plan (do not execute yet) how to add a haiku to a new document.",
+        api::RunOptions { model: model.as_deref(), plan_mode: true, ..Default::default() },
+    )?;
+    let session = Some(run.run.session_id.clone());
+    println!("plan-mode run streaming…");
+    client.stream_run(&run.run.run_id, |ev| match ev.kind.as_deref() {
+        Some("plan_update") => {
+            if let Some(p) = ev.payload["plan"].as_str() {
+                plan_update = Some(p.to_string());
+            }
+        }
+        Some("message.delta") => {
+            if let Some((text, thinking)) = ev.delta() {
+                if !thinking {
+                    answer.push_str(text);
+                }
+            }
+        }
+        _ => {}
+    })?;
+    // The model may record the plan via update_plan, or (more often) just write
+    // the checklist as its answer; the turn ends either way.
+    let plan = plan_update
+        .filter(|p| !p.trim().is_empty())
+        .or_else(|| Some(answer.trim().to_string()).filter(|p| !p.is_empty()))
+        .ok_or("plan mode produced neither a plan_update nor answer text")?;
+    println!("proposed plan:\n---\n{plan}\n---");
+
+    println!("approving → follow-up run executes it…");
+    let run2 = client.start_run(
+        "agent",
+        "Proceed with the approved plan.",
+        api::RunOptions {
+            session_id: session.as_deref(),
+            model: model.as_deref(),
+            approved_plan: Some(&plan),
+            ..Default::default()
+        },
+    )?;
+    let mut tools: Vec<String> = Vec::new();
+    client.stream_run(&run2.run.run_id, |ev| {
+        if matches!(ev.kind.as_deref(), Some("tool_start") | Some("tool_output")) {
+            let name = ev.payload["tool"].as_str().or_else(|| ev.payload["name"].as_str()).unwrap_or("tool");
+            if !tools.iter().any(|t| t == name) {
+                tools.push(name.to_string());
+            }
+        }
+    })?;
+    println!("execution run tools used: {tools:?}");
     Ok(())
 }
