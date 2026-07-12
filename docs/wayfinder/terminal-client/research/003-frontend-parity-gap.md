@@ -30,8 +30,31 @@ The gap analysis below was the pre-implementation baseline. Since then:
 reminders, task scheduling, calendar recurrence, IMAP) go through the real
 routes rather than thin — and buggy — terminal duplicates.
 
+### FOLLOW-UP — gaps closed (2026-07-12)
+
+The write-op and domain gaps identified after the two reference frontends are
+now filled on the normalized contract:
+
+- **Write-ops added under `/api/terminal`:** documents (DELETE, `/archive`,
+  `/versions`, `/restore/{num}`), notes (POST/PUT/DELETE), tasks (POST/PUT/
+  DELETE, `/run`), sessions (PATCH rename/model/archive, DELETE, `/truncate`,
+  `/fork`), and **uploads** (`POST /uploads` → attachment ids for `/runs`).
+- **New native domains under `/api/terminal`:** memory (GET/POST/DELETE),
+  search (`POST /search`, `/search/providers`), presets, prefs (GET + PUT
+  `/{key}`), skills (GET + `/index`), mcp (`/servers`, `/tools`). 15 native
+  domains total.
+- **Discovery:** `GET /capabilities` now returns a structured `domains` map —
+  the 15 native domains plus 11 **owner-token** domains (email, calendar,
+  gallery, research, compare, cookbook, stt, tts, vault, signatures, workspace)
+  with base path + key ops. The bearer token was verified to reach all of them
+  (200, incl. admin-gated vault/cookbook), so the heavy web logic (IMAP, CalDAV,
+  long-running research, model serving) is **made discoverable, not duplicated**.
+
+Net: a token frontend can now discover and drive the entire web surface — the
+normalized core directly, the rich domains via their (owner-attributed) routes.
+
 **Remaining refinement (not a capability gap):** `response_model`/OpenAPI typing
-on the terminal routes so clients can be generated rather than reverse-
+on every terminal route so clients can be generated rather than reverse-
 engineered. Applying it requires *complete* models per endpoint (FastAPI filters
 responses to declared fields), so it's a deliberate, test-backed pass.
 
