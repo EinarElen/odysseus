@@ -22,6 +22,8 @@ TERMINAL_CLIENT_SCOPES = frozenset(
         "auth:capabilities",
         "usage:read",
         "usage:export",
+        "documents:read",
+        "documents:write",
     }
 )
 EVENT_READ_SCOPES = frozenset({"event:read", "event:raw"})

@@ -98,6 +98,7 @@ class CapabilitiesOut(BaseModel):
     run_inputs: list[str] = Field(default_factory=list)
     terminal_domains: list[str] = Field(default_factory=list)
     reachable_via_owner_token: list[str] = Field(default_factory=list)
+    domains: dict[str, Any] = Field(default_factory=dict)
     events: CapabilitiesEvents = Field(default_factory=CapabilitiesEvents)
 
 
@@ -182,6 +183,52 @@ class BootstrapOut(BaseModel):
 # Machine-readable payload schema per event kind, published in /capabilities so
 # a client (or codegen) doesn't have to reverse-engineer the loose payloads.
 # "?" marks an optional field; the envelope fields are always present.
+# Full capability surface for a frontend, so a new client can discover every
+# domain without reading the source. `native` domains are normalized under
+# /api/terminal; `owner_token` domains are the rich web routes that the same
+# bearer token reaches directly (the middleware attributes it to its owner, and
+# the ody-term owner is admin), listed with their base path + key operations.
+TERMINAL_DOMAINS_DOC: dict[str, Any] = {
+    "native": {
+        "runs": {"base": "/api/terminal/runs", "ops": ["POST (start)", "GET (list)", "GET /{id}", "POST /{id}/stop"]},
+        "events": {"base": "/api/terminal/events", "ops": ["GET /stream?run_id", "GET (list)"]},
+        "sessions": {"base": "/api/terminal/sessions", "ops": [
+            "GET (list)", "GET /{id}", "GET /{id}/history", "GET /{id}/export",
+            "PATCH /{id} (rename/model/archive)", "DELETE /{id}",
+            "POST /{id}/truncate?keep", "POST /{id}/fork"]},
+        "documents": {"base": "/api/terminal/documents", "ops": [
+            "GET (list)", "POST", "GET /{id}", "PUT /{id}", "DELETE /{id}",
+            "POST /{id}/archive", "GET /{id}/versions", "POST /{id}/restore/{num}"]},
+        "notes": {"base": "/api/terminal/notes", "ops": ["GET", "GET /{id}", "POST", "PUT /{id}", "DELETE /{id}"]},
+        "tasks": {"base": "/api/terminal/tasks", "ops": ["GET", "GET /{id}", "POST", "PUT /{id}", "DELETE /{id}", "POST /{id}/run"]},
+        "memory": {"base": "/api/terminal/memory", "ops": ["GET", "POST", "DELETE /{id}"]},
+        "search": {"base": "/api/terminal/search", "ops": ["POST", "GET /providers"]},
+        "presets": {"base": "/api/terminal/presets", "ops": ["GET"]},
+        "prefs": {"base": "/api/terminal/prefs", "ops": ["GET", "PUT /{key}"]},
+        "skills": {"base": "/api/terminal/skills", "ops": ["GET", "GET /index"]},
+        "mcp": {"base": "/api/terminal/mcp", "ops": ["GET /servers", "GET /tools"]},
+        "uploads": {"base": "/api/terminal/uploads", "ops": ["POST (multipart -> attachment ids)"]},
+        "usage": {"base": "/api/terminal/usage", "ops": ["GET /summary|breakdown|timeseries|runs|cache|subscription|export|live"]},
+        "models": {"base": "/api/terminal/models", "ops": ["GET"]},
+    },
+    # Reachable with the same bearer token (owner-attributed); not duplicated
+    # under /api/terminal because the web logic is nontrivial (IMAP, CalDAV,
+    # long-running research, model serving). Verified 200 with the ody-term token.
+    "owner_token": {
+        "email": {"base": "/api/email", "ops": ["GET /accounts", "GET /list", "GET /read/{uid}", "POST /send", "GET /search", "GET /contacts"]},
+        "calendar": {"base": "/api/calendar", "ops": ["GET /calendars", "GET /events", "POST /events", "PUT /events/{uid}", "DELETE /events/{uid}"]},
+        "gallery": {"base": "/api/gallery", "ops": ["GET /library", "GET /albums", "GET /tags", "GET /stats", "GET /{image_id}"]},
+        "research": {"base": "/api/research", "ops": ["GET /library", "GET /active", "GET /status/{id}", "GET /report/{id}", "GET /detail/{id}"]},
+        "compare": {"base": "/api/compare", "ops": ["GET /history", "POST (blind multi-model compare)"]},
+        "cookbook": {"base": "/api/cookbook", "ops": ["model-serving control (owner/admin)"]},
+        "stt": {"base": "/api/stt", "ops": ["GET /stats", "POST (transcribe)"]},
+        "tts": {"base": "/api/tts", "ops": ["GET /stats", "POST (synthesize)"]},
+        "vault": {"base": "/api/vault", "ops": ["GET /config", "secrets (owner/admin)"]},
+        "signatures": {"base": "/api/signatures", "ops": ["GET", "CRUD"]},
+        "workspace": {"base": "/api/workspace", "ops": ["GET /browse", "file ops"]},
+    },
+}
+
 EVENT_KINDS_DOC: dict[str, Any] = {
     "envelope": [
         "schema", "id", "seq", "time", "session_id", "run_id",
@@ -866,16 +913,11 @@ def setup_terminal_client_routes(
                 "active_doc_id", "plan_mode", "approved_plan", "attachments",
                 "workspace", "harness_adapter_id", "harness_session_id", "harness_mode",
             ],
-            "terminal_domains": [
-                "runs", "events", "sessions", "usage", "models",
-                "documents (crud)", "notes (read)", "tasks (read)", "capabilities",
+            "terminal_domains": sorted(TERMINAL_DOMAINS_DOC["native"].keys()) + [
+                "capabilities", "bootstrap",
             ],
-            # Owner-attributed tokens reach the full web route surface directly.
-            "reachable_via_owner_token": [
-                "email", "calendar", "memory", "skills", "presets", "gallery",
-                "research", "compare", "cookbook", "search", "uploads", "settings",
-                "notes (write)", "tasks (write)", "harness /command",
-            ],
+            "reachable_via_owner_token": sorted(TERMINAL_DOMAINS_DOC["owner_token"].keys()),
+            "domains": TERMINAL_DOMAINS_DOC,
             "events": EVENT_KINDS_DOC,
         }
 
