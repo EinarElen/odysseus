@@ -178,6 +178,10 @@ class BootstrapOut(BaseModel):
     sessions: list[SessionSummaryOut] = Field(default_factory=list)
     models: list[ModelInfo] = Field(default_factory=list)
     default_model: str | None = None
+    identity: dict[str, Any] = Field(default_factory=dict)
+    navigation_counts: dict[str, int] = Field(default_factory=dict)
+    jobs: list[dict[str, Any]] = Field(default_factory=list)
+    notifications: list[dict[str, Any]] = Field(default_factory=list)
 
 
 # --- Response models for the write-ops + new domains. Rich/evolving objects
@@ -1632,6 +1636,12 @@ def setup_terminal_client_routes(
             if not doc:
                 raise HTTPException(404, "Document not found")
             _verify_doc_owner(db, doc, owner)
+            if payload.expected_version is not None and payload.expected_version != doc.version_count:
+                raise HTTPException(409, {
+                    "code": "document_version_conflict",
+                    "expected_version": payload.expected_version,
+                    "current_version": doc.version_count,
+                })
             content = coerce_document_content(doc, payload.content)
             # Same guard the web update path runs: reject content whose
             # pdf_source marker points at another user's upload.
@@ -1779,11 +1789,29 @@ def setup_terminal_client_routes(
         caps = await capabilities(request)
         sess = await list_sessions(request)
         mods = await list_models(request)
+        owner = effective_user(request)
+        runs = terminal_client_runs.list_runs()
+        visible_runs = [run for run in runs if run.get("session_id") in {
+            item.get("session_id") for item in sess.get("sessions", [])
+        }]
+        try:
+            from src.event_bus import query_application_events
+            notifications = query_application_events(owner=owner, limit=30)
+        except Exception:
+            notifications = []
         return {
             "capabilities": caps,
             "sessions": sess.get("sessions", []),
             "models": mods.get("models", []),
             "default_model": mods.get("default_model"),
+            "identity": {"owner": owner},
+            "navigation_counts": {
+                "sessions": len(sess.get("sessions", [])),
+                "jobs": len([run for run in visible_runs if run.get("status") not in {"completed", "failed", "cancelled"}]),
+                "notifications": len(notifications),
+            },
+            "jobs": visible_runs,
+            "notifications": notifications,
         }
 
     @router.get("/sessions/{session_id}")
@@ -2000,6 +2028,7 @@ def setup_terminal_client_routes(
                 stream=stream,
                 harness_adapter_id=adapter.id if adapter is not None else None,
                 harness_session_id=None,
+                owner=owner,
             )
         except agent_runs.RunDrainingError as exc:
             await stream.aclose()

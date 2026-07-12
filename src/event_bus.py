@@ -9,14 +9,21 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime
-from typing import Optional
+import threading
+from collections import deque
+from datetime import UTC, datetime
+from typing import Any, Optional
 
 from src.constants import AUTH_FILE
 
 logger = logging.getLogger(__name__)
 
 _task_scheduler = None
+_application_events: deque[dict[str, Any]] = deque(maxlen=2000)
+# A time-based process epoch keeps reconnect cursors monotonic across restarts.
+# Tests reset this to zero for compact deterministic fixtures.
+_application_event_sequence = int(datetime.now(UTC).timestamp() * 1000)
+_application_event_lock = threading.Lock()
 
 
 def set_task_scheduler(scheduler):
@@ -35,12 +42,64 @@ def fire_event(event_name: str, owner: Optional[str] = None):
 
     Safe to call from both sync and async contexts.
     """
+    publish_application_event(event_name, owner=owner)
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(_handle_event(event_name, owner))
     except RuntimeError:
         # No running loop — run in a new one (shouldn't happen in FastAPI)
         asyncio.run(_handle_event(event_name, owner))
+
+
+def publish_application_event(
+    event_name: str,
+    *,
+    owner: Optional[str] = None,
+    domain: Optional[str] = None,
+    resource_id: Optional[str] = None,
+    summary: Optional[str] = None,
+    payload: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Append one owner-scoped event to the replayable application feed."""
+    global _application_event_sequence
+    resolved_owner = _resolve_event_owner(owner)
+    with _application_event_lock:
+        _application_event_sequence += 1
+        event = {
+            "schema": "ody.event.v1",
+            "seq": _application_event_sequence,
+            "time": datetime.now(UTC).isoformat(),
+            "owner": resolved_owner,
+            "domain": domain or event_name.replace("_", ".").split(".", 1)[0],
+            "resource_id": resource_id,
+            "kind": event_name,
+            "summary": summary or event_name.replace(".", " "),
+            "payload": payload or {},
+        }
+        _application_events.append(event)
+        return dict(event)
+
+
+def query_application_events(
+    *, owner: Optional[str], cursor: int = 0, limit: int = 100
+) -> list[dict[str, Any]]:
+    """Return OWNER's events after CURSOR, bounded by LIMIT."""
+    bounded = max(1, min(int(limit), 500))
+    resolved_owner = _resolve_event_owner(owner)
+    with _application_event_lock:
+        return [
+            dict(event)
+            for event in _application_events
+            if event["seq"] > cursor and event.get("owner") == resolved_owner
+        ][:bounded]
+
+
+def reset_application_events_for_tests() -> None:
+    """Clear the in-process application feed."""
+    global _application_event_sequence
+    with _application_event_lock:
+        _application_events.clear()
+        _application_event_sequence = 0
 
 
 def _resolve_event_owner(owner: Optional[str]) -> Optional[str]:

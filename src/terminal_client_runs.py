@@ -41,6 +41,7 @@ class TerminalRun:
     updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     finished_at: str | None = None
     message: str = ""
+    owner: str | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -99,6 +100,7 @@ def _run_from_record(record: Any) -> TerminalRun | None:
         updated_at=str(record.get("updated_at") or _utc_now()),
         finished_at=str(record["finished_at"]) if isinstance(record.get("finished_at"), str) else None,
         message=str(record.get("message") or ""),
+        owner=str(record["owner"]) if isinstance(record.get("owner"), str) else None,
         events=[event for event in record.get("events", []) if isinstance(event, dict)]
         if isinstance(record.get("events"), list)
         else [],
@@ -288,9 +290,11 @@ def _persist_raw_event(run: TerminalRun, seq: int, raw: str) -> None:
     if event_type == "done" and run.status != "error":
         run.status = "done"
         run.finished_at = _utc_now()
+        _publish_run_activity(run, "completed", event)
     elif event_type == "error":
         run.status = "error"
         run.finished_at = _utc_now()
+        _publish_run_activity(run, "failed", event)
     run.updated_at = _utc_now()
     _remember_events(run, [event])
 
@@ -391,6 +395,7 @@ def create_run(
     stream: AsyncGenerator[str, None],
     harness_adapter_id: str | None = None,
     harness_session_id: str | None = None,
+    owner: str | None = None,
 ) -> dict[str, Any]:
     if agent_runs.is_draining():
         raise agent_runs.RunDrainingError(
@@ -405,11 +410,13 @@ def create_run(
         harness_adapter_id=harness_adapter_id,
         harness_session_id=harness_session_id,
         message=message,
+        owner=owner,
     )
     _RUNS[run.run_id] = run
     _SESSION_ACTIVE.setdefault(resolved_session_id, []).append(run.run_id)
     _LIVE_RUN_BY_SESSION[resolved_session_id] = run.run_id
     _save_persisted_runs()
+    _publish_run_activity(run, "started")
     try:
         agent_runs.start(
             resolved_session_id,
@@ -427,6 +434,20 @@ def create_run(
         _save_persisted_runs()
         raise
     return {"run": run_summary(run), "cursor": {"after": None, "next": "0", "count": 0}}
+
+
+def _publish_run_activity(run: TerminalRun, status: str, event: dict[str, Any] | None = None) -> None:
+    try:
+        from src.event_bus import publish_application_event
+        publish_application_event(
+            f"run.{status}", owner=run.owner, domain="runs", resource_id=run.run_id,
+            summary=f"{run.kind} run {status}",
+            payload={"run_id": run.run_id, "session_id": run.session_id,
+                     "kind": run.kind, "status": status,
+                     "event": event or {}},
+        )
+    except Exception:
+        logger.debug("[terminal-client-run] activity publish failed", exc_info=True)
 
 
 def create_chat_run(

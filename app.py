@@ -769,6 +769,10 @@ app.include_router(setup_terminal_client_routes(
     upload_handler=upload_handler,
 ))
 
+# Owner-wide activity for native application clients.
+from routes.application_event_routes import setup_application_event_routes
+app.include_router(setup_application_event_routes())
+
 # Research (background deep-research tasks)
 from routes.research.research_routes import setup_research_routes
 app.include_router(setup_research_routes(research_handler, session_manager=session_manager))

@@ -36,6 +36,7 @@ class DocumentUpdate(BaseModel):
     content: str
     summary: Optional[str] = None
     force_version: bool = False
+    expected_version: Optional[int] = None
 
 class DocumentPatch(BaseModel):
     title: Optional[str] = None
