@@ -1444,6 +1444,66 @@ def setup_terminal_client_routes(
             "content": content,
         }
 
+    @router.patch("/sessions/{session_id}")
+    async def rename_session_terminal(request: Request, session_id: str, body: dict) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_WRITE_SCOPES)
+        session = owned_session(request, session_id)
+        if body.get("name") is not None:
+            session_manager.update_session_name(session_id, str(body["name"]))
+        if body.get("model") is not None:
+            session.model = str(body["model"])
+        if body.get("archived") is not None:
+            session.archived = bool(body["archived"])
+        try:
+            session_manager.save_sessions()
+        except Exception:
+            pass
+        return {"session": session_summary(session_manager.get_session(session_id))}
+
+    @router.delete("/sessions/{session_id}")
+    async def delete_session_terminal(request: Request, session_id: str) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_WRITE_SCOPES)
+        owned_session(request, session_id)  # ownership gate
+        if session_manager.delete_session(session_id):
+            return {"status": "deleted", "id": session_id}
+        raise HTTPException(404, "Session not found")
+
+    @router.post("/sessions/{session_id}/truncate")
+    async def truncate_session_terminal(request: Request, session_id: str, keep: int = 0) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_WRITE_SCOPES)
+        owned_session(request, session_id)
+        if keep < 0:
+            raise HTTPException(400, "keep must be >= 0")
+        if not session_manager.truncate_messages(session_id, keep):
+            raise HTTPException(400, "Truncate failed")
+        return {"session": session_summary(session_manager.get_session(session_id))}
+
+    @router.post("/sessions/{session_id}/fork")
+    async def fork_session_terminal(request: Request, session_id: str, body: dict | None = None) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_WRITE_SCOPES)
+        source = owned_session(request, session_id)
+        owner = effective_user(request)
+        import uuid as _uuid
+        new_id = f"ses_{_uuid.uuid4().hex[:14]}"
+        name = (body or {}).get("name") or f"{getattr(source, 'name', 'session')} (fork)"
+        new = session_manager.create_session(
+            new_id, name,
+            getattr(source, "endpoint_url", "") or "",
+            getattr(source, "model", "") or "",
+            owner=owner,
+            provider_options=getattr(source, "provider_options", None) or {},
+        )
+        for message in getattr(source, "history", []) or []:
+            try:
+                session_manager.add_message(new_id, message)
+            except Exception:
+                pass
+        try:
+            session_manager.save_sessions()
+        except Exception:
+            pass
+        return {"session": session_summary(session_manager.get_session(new.id))}
+
     @router.post("/runs")
     async def start_run(request: Request, payload: RunStartRequest) -> dict[str, Any]:
         if execution_service.should_proxy():
