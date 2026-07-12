@@ -480,11 +480,11 @@ impl eframe::App for App {
         }
         egui::TopBottomPanel::top("top").frame(top_frame).show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                let mark = if self.busy { theme::pulse_color(ctx, theme::FG) } else { theme::FG };
-                ui.label(egui::RichText::new("◆").heading().color(mark));
-                ui.label(egui::RichText::new("odysseus").heading().color(theme::FG).strong());
-                ui.add_space(12.0);
+                ui.spacing_mut().item_spacing.x = 7.0;
+                let mark = if self.busy { theme::pulse_color(ctx, theme::ACCENT) } else { theme::ACCENT };
+                ui.label(egui::RichText::new("◆").font(theme::semibold(18.0)).color(mark));
+                ui.label(egui::RichText::new("odysseus").font(theme::semibold(18.0)).color(theme::FG));
+                ui.add_space(14.0);
                 egui::ComboBox::from_id_source("kind")
                     .selected_text(&self.kind)
                     .show_ui(ui, |ui| {
@@ -591,24 +591,24 @@ impl eframe::App for App {
 
         let nav_frame = egui::Frame::none()
             .fill(theme::PANEL)
-            .inner_margin(egui::Margin::symmetric(10.0, 12.0));
+            .inner_margin(egui::Margin::symmetric(12.0, 14.0));
         egui::SidePanel::left("nav")
             .resizable(true)
-            .default_width(220.0)
+            .default_width(232.0)
             .frame(nav_frame)
             .show(ctx, |ui| {
             let new_btn = egui::Button::new(egui::RichText::new("＋  New conversation").color(theme::BG).strong())
-                .fill(theme::FG)
-                .min_size(egui::vec2(ui.available_width(), 30.0));
+                .fill(theme::ACCENT)
+                .rounding(egui::Rounding::same(9.0))
+                .min_size(egui::vec2(ui.available_width(), 34.0));
             if ui.add(new_btn).clicked() {
                 self.session_id = None;
                 self.messages.clear();
                 self.plan = None;
                 self.ask = None;
             }
-            ui.add_space(10.0);
-            ui.label(egui::RichText::new("SESSIONS").color(theme::MUTED).small().strong());
-            ui.add_space(2.0);
+            ui.add_space(14.0);
+            section_label(ui, "SESSIONS");
             egui::ScrollArea::vertical().id_source("sess").max_height(240.0).show(ui, |ui| {
                 let picks: Vec<(String, String)> = self
                     .sessions
@@ -767,47 +767,48 @@ impl eframe::App for App {
 
         let composer_frame = egui::Frame::none()
             .fill(theme::PANEL)
-            .inner_margin(egui::Margin::symmetric(14.0, 10.0));
+            .inner_margin(egui::Margin::symmetric(16.0, 12.0));
         egui::TopBottomPanel::bottom("composer").frame(composer_frame).show(ctx, |ui| {
             if !self.status.is_empty() {
-                ui.label(egui::RichText::new(&self.status).color(theme::MUTED).small());
-                ui.add_space(4.0);
+                ui.label(egui::RichText::new(&self.status).color(theme::FAINT).small());
+                ui.add_space(6.0);
             }
-            ui.horizontal(|ui| {
-                let send_w = 74.0;
-                let hint = if self.kind == "agent" { "message the agent…" } else { "message…" };
-                let resp = ui.add_sized(
-                    [ui.available_width() - send_w - 8.0, 34.0],
-                    egui::TextEdit::singleline(&mut self.input)
-                        .hint_text(hint)
-                        .vertical_align(egui::Align::Center),
-                );
-                if !self.focused_once {
-                    resp.request_focus();
-                    self.focused_once = true;
-                }
-                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                let send_btn = egui::Button::new(egui::RichText::new("Send").color(theme::BG).strong())
-                    .fill(if self.busy { theme::MUTED } else { theme::FG })
-                    .min_size(egui::vec2(send_w, 34.0));
-                let clicked = ui.add_enabled(!self.busy, send_btn).clicked();
-                if enter || clicked {
-                    self.send(ctx);
-                    ui.memory_mut(|m| m.request_focus(resp.id));
-                }
+            // Center the composer under the chat column for a tidy axis.
+            let colw = ui.available_width().min(theme::COLUMN_W);
+            let pad = ((ui.available_width() - colw) / 2.0).max(0.0);
+            egui::Frame::none().inner_margin(egui::Margin::symmetric(pad, 0.0)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let send_w = 78.0;
+                    let hint = if self.kind == "agent" { "message the agent…" } else { "message…" };
+                    let resp = ui.add_sized(
+                        [ui.available_width() - send_w - 8.0, 40.0],
+                        egui::TextEdit::singleline(&mut self.input)
+                            .hint_text(hint)
+                            .margin(egui::Margin::symmetric(12.0, 0.0))
+                            .vertical_align(egui::Align::Center),
+                    );
+                    if !self.focused_once {
+                        resp.request_focus();
+                        self.focused_once = true;
+                    }
+                    let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let send_btn = egui::Button::new(egui::RichText::new("Send").color(theme::BG).strong())
+                        .fill(if self.busy { theme::ACCENT_DIM } else { theme::ACCENT })
+                        .rounding(egui::Rounding::same(9.0))
+                        .min_size(egui::vec2(send_w, 40.0));
+                    let clicked = ui.add_enabled(!self.busy, send_btn).clicked();
+                    if enter || clicked {
+                        self.send(ctx);
+                        ui.memory_mut(|m| m.request_focus(resp.id));
+                    }
+                });
             });
         });
 
-        let central_frame = egui::Frame::none()
-            .fill(theme::BG)
-            .inner_margin(egui::Margin::symmetric(18.0, 14.0));
+        let central_frame = egui::Frame::none().fill(theme::BG);
         egui::CentralPanel::default().frame(central_frame).show(ctx, |ui| {
             if self.messages.is_empty() {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(ui.available_height() * 0.4);
-                    ui.label(egui::RichText::new("◆").size(40.0).color(theme::BORDER));
-                    ui.label(egui::RichText::new("Start a conversation").color(theme::MUTED));
-                });
+                self.render_empty_state(ui);
                 return;
             }
             let busy = self.busy;
@@ -817,15 +818,64 @@ impl eframe::App for App {
                 .auto_shrink([false, false])
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
-                    let last = messages.len().saturating_sub(1);
-                    for (idx, msg) in messages.iter().enumerate() {
-                        let live = busy && idx == last && msg.role == Role::Assistant;
-                        render_bubble(ui, idx, msg, cache, live);
-                        ui.add_space(10.0);
-                    }
+                    // Center a fixed reading column so bubbles aren't lost in the void.
+                    let colw = ui.available_width().min(theme::COLUMN_W);
+                    let pad = ((ui.available_width() - colw) / 2.0).max(0.0);
+                    egui::Frame::none()
+                        .inner_margin(egui::Margin { left: pad, right: pad, top: 18.0, bottom: 18.0 })
+                        .show(ui, |ui| {
+                            let last = messages.len().saturating_sub(1);
+                            for (idx, msg) in messages.iter().enumerate() {
+                                let live = busy && idx == last && msg.role == Role::Assistant;
+                                render_bubble(ui, idx, msg, cache, live);
+                                ui.add_space(14.0);
+                            }
+                        });
                 });
         });
     }
+}
+
+impl App {
+    /// The hero shown before the first message: the mark, wordmark, one line of
+    /// orientation, and the live endpoint.
+    fn render_empty_state(&self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(ui.available_height() * 0.30);
+            ui.label(egui::RichText::new("◆").size(52.0).color(theme::ACCENT));
+            ui.add_space(10.0);
+            ui.label(egui::RichText::new("odysseus").font(theme::semibold(30.0)).color(theme::FG));
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new("Your self-hosted workspace. Chat, run agents, and edit documents.")
+                    .color(theme::MUTED),
+            );
+            ui.add_space(16.0);
+            // Endpoint chip.
+            egui::Frame::none()
+                .fill(theme::FIELD_BG)
+                .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                .rounding(egui::Rounding::same(20.0))
+                .inner_margin(egui::Margin::symmetric(12.0, 5.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 7.0;
+                        let (r, _) = ui.allocate_exact_size(egui::vec2(7.0, 7.0), egui::Sense::hover());
+                        let up = !self.owner.is_empty();
+                        ui.painter().circle_filled(r.center(), 3.5, if up { theme::GREEN } else { theme::RED });
+                        let host = self.client.base().trim_start_matches("http://").trim_start_matches("https://");
+                        ui.label(egui::RichText::new(host).monospace().small().color(theme::MUTED));
+                    });
+                });
+        });
+    }
+}
+
+/// A small tracked-caps section eyebrow (fake letter-spacing via thin gaps).
+fn section_label(ui: &mut egui::Ui, text: &str) {
+    let tracked: String = text.chars().flat_map(|c| [c, '\u{2009}']).collect();
+    ui.label(egui::RichText::new(tracked).color(theme::FAINT).small().strong());
+    ui.add_space(3.0);
 }
 
 /// Rebuild a tool card from a persisted `tool_events` entry (metadata on a
@@ -919,21 +969,22 @@ fn render_bubble(ui: &mut egui::Ui, idx: usize, msg: &ChatMessage, cache: &mut C
     } else {
         ("◆", "odysseus", theme::AI_BUBBLE)
     };
-    let ident = if user { theme::MUTED } else { theme::FG };
-    let max_w = (ui.available_width() * 0.82).min(760.0);
+    let ident = if user { theme::MUTED } else { theme::ACCENT };
+    let max_w = (ui.available_width() * 0.86).min(theme::COLUMN_W);
     let align = if user { egui::Align::Max } else { egui::Align::Min };
 
     ui.with_layout(egui::Layout::top_down(align), |ui| {
         ui.set_max_width(max_w);
         theme::bubble(fill, !user).show(ui, |ui| {
-            ui.set_max_width(max_w - 26.0);
+            ui.set_max_width(max_w - 30.0);
             // Role line: diamond mark + name; the assistant mark pulses live.
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 5.0;
-                let mark_color = if live { theme::pulse_color(ui.ctx(), theme::FG) } else { ident };
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let mark_color = if live { theme::pulse_color(ui.ctx(), theme::ACCENT) } else { ident };
                 ui.label(egui::RichText::new(mark).color(mark_color).small());
-                ui.label(egui::RichText::new(who).color(ident).strong().small());
+                ui.label(egui::RichText::new(who).color(ident).font(theme::semibold(12.5)));
             });
+            ui.add_space(3.0);
             if !msg.thinking.is_empty() {
                 egui::CollapsingHeader::new(egui::RichText::new("💭 thinking").color(theme::MUTED).small())
                     .id_salt((idx, "think"))
