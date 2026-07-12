@@ -228,14 +228,19 @@ _Verified reference implementation: `clients/nvim/odysseus.nvim` replicates
 chat, agents, sessions, live document editing (authoring + iterative edits +
 manual save-back), model picking, and usage on exactly this contract._
 
-_Second reference implementation (native GUI): `clients/rust/odysseus` (egui).
-Replicates chat + agent streaming (answer/thinking/tool cards), model + kind
-pickers, sessions + history, live document editing (streamed authoring +
-edit + save-back + open existing), notes/tasks read views, **interactive plan
-mode** (propose → approve → execute), and the **ask_user** choice channel — all
-on `/api/terminal`. Building it drove the Tier-1 interactive channel (§3.1) to
-done and surfaced/fixed a payload-shape wart: `plan_update` and `ask_user` SSE
-chunks nested their fields under `data`, unlike every other kind; the terminal
-event normalizer now flattens them so a client reads `payload[field]`
-uniformly. Headless probes (`odysseus probe|docs|plan`) exercise the chat,
-document, and plan flows against a live server._
+_Second reference implementation (native GUI): `clients/rust/odysseus` (egui),
+grown to **feature + visual parity** with the web app. Replicates chat + agent
+streaming, model + kind pickers, sessions + history, live document editing
+(streamed authoring + syntax-highlighted editor + save-back + open existing),
+notes/tasks read views, **interactive plan mode** (propose → approve → execute),
+and the **ask_user** choice channel — all on `/api/terminal`. Visually it mirrors
+the web app: the same One-Dark palette and Fira Code typeface (lifted from
+`static/style.css`), chat bubbles with role dots, **markdown** answers,
+collapsible **thinking**, and expandable **agent tool cards**; reopening a
+session rebuilds the full agent trace (thinking + tool cards) from history
+metadata. Building it drove the Tier-1 interactive channel (§3.1) to done and
+surfaced/fixed a payload-shape wart: `plan_update` and `ask_user` SSE chunks
+nested their fields under `data`, unlike every other kind; the terminal event
+normalizer now flattens them so a client reads `payload[field]` uniformly.
+Headless probes (`odysseus probe|docs|plan`) exercise the chat, document, and
+plan flows against a live server._
