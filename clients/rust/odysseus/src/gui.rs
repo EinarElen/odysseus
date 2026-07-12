@@ -146,11 +146,16 @@ impl App {
         if let Ok(hist) = self.client.history(&session_id) {
             for m in hist.history {
                 let role = if m.role == "user" { Role::User } else { Role::Assistant };
+                let thinking = m.metadata["thinking"].as_str().unwrap_or("").to_string();
+                let tools = m.metadata["tool_events"]
+                    .as_array()
+                    .map(|arr| arr.iter().map(tool_from_event).collect())
+                    .unwrap_or_default();
                 self.messages.push(ChatMessage {
                     role,
                     text: m.content.unwrap_or_default(),
-                    thinking: String::new(),
-                    tools: Vec::new(),
+                    thinking,
+                    tools,
                 });
             }
         }
@@ -805,6 +810,18 @@ impl eframe::App for App {
                     }
                 });
         });
+    }
+}
+
+/// Rebuild a tool card from a persisted `tool_events` entry (metadata on a
+/// reloaded assistant message).
+fn tool_from_event(ev: &serde_json::Value) -> ToolCall {
+    ToolCall {
+        name: ev["tool"].as_str().unwrap_or("tool").to_string(),
+        command: ev["command"].as_str().unwrap_or("").to_string(),
+        output: ev["output"].as_str().unwrap_or("").to_string(),
+        exit_code: ev["exit_code"].as_i64().unwrap_or(0),
+        done: true,
     }
 }
 

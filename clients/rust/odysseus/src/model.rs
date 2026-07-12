@@ -93,6 +93,10 @@ pub struct HistoryMessage {
     pub role: String,
     #[serde(default)]
     pub content: Option<String>,
+    /// Per-message metadata; for assistant turns this carries `thinking` and a
+    /// `tool_events` array so a reloaded session can rebuild the full trace.
+    #[serde(default)]
+    pub metadata: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
