@@ -1,6 +1,7 @@
 mod api;
 mod gui;
 mod model;
+mod theme;
 
 use std::io::Write;
 
@@ -30,11 +31,20 @@ fn main() {
             }
         }
         "gui" => {
-            let native_options = eframe::NativeOptions::default();
+            let native_options = eframe::NativeOptions {
+                viewport: eframe::egui::ViewportBuilder::default()
+                    .with_inner_size([1180.0, 780.0])
+                    .with_min_inner_size([720.0, 480.0])
+                    .with_title("Odysseus"),
+                ..Default::default()
+            };
             let result = eframe::run_native(
                 "Odysseus",
                 native_options,
-                Box::new(|_cc| Ok(Box::new(gui::App::new(client)))),
+                Box::new(|cc| {
+                    theme::apply(&cc.egui_ctx);
+                    Ok(Box::new(gui::App::new(client)))
+                }),
             );
             if let Err(e) = result {
                 eprintln!("gui error: {e}");

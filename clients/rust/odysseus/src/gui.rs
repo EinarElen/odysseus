@@ -9,6 +9,7 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use crate::api::Client;
 use crate::model::{Document, ModelInfo, Note, SessionSummary, Task};
+use crate::theme;
 
 enum Msg {
     Answer(String),
@@ -425,10 +426,13 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain();
 
-        egui::TopBottomPanel::top("top").show(ctx, |ui| {
+        let top_frame = egui::Frame::none()
+            .fill(theme::PANEL)
+            .inner_margin(egui::Margin::symmetric(14.0, 9.0));
+        egui::TopBottomPanel::top("top").frame(top_frame).show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.heading("Odysseus");
-                ui.separator();
+                ui.label(egui::RichText::new("◆ odysseus").heading().color(theme::FG).strong());
+                ui.add_space(12.0);
                 egui::ComboBox::from_id_source("kind")
                     .selected_text(&self.kind)
                     .show_ui(ui, |ui| {
@@ -448,11 +452,16 @@ impl eframe::App for App {
                     ui.checkbox(&mut self.plan_mode, "plan")
                         .on_hover_text("Propose a plan and wait for approval before executing");
                 }
-                ui.separator();
-                ui.label(format!("owner: {}", self.owner));
-                if self.busy {
-                    ui.spinner();
-                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self.busy {
+                        ui.spinner();
+                    }
+                    let dot = if self.owner.is_empty() { theme::RED } else { theme::GREEN };
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
+                    ui.painter().circle_filled(r.center(), 4.0, dot);
+                    let who = if self.owner.is_empty() { "offline" } else { self.owner.as_str() };
+                    ui.label(egui::RichText::new(who).color(theme::MUTED).small());
+                });
             });
         });
 
@@ -472,7 +481,9 @@ impl eframe::App for App {
                     }
                     ui.separator();
                     ui.horizontal(|ui| {
-                        if ui.add_enabled(!self.busy, egui::Button::new("✔ Approve & run")).clicked() {
+                        let go = egui::Button::new(egui::RichText::new("✔ Approve & run").color(theme::BG).strong())
+                            .fill(theme::GREEN);
+                        if ui.add_enabled(!self.busy, go).clicked() {
                             approve = true;
                         }
                         if ui.button("Dismiss").clicked() {
@@ -526,14 +537,27 @@ impl eframe::App for App {
             }
         }
 
-        egui::SidePanel::left("nav").resizable(true).default_width(210.0).show(ctx, |ui| {
-            if ui.button("＋ New conversation").clicked() {
+        let nav_frame = egui::Frame::none()
+            .fill(theme::PANEL)
+            .inner_margin(egui::Margin::symmetric(10.0, 12.0));
+        egui::SidePanel::left("nav")
+            .resizable(true)
+            .default_width(220.0)
+            .frame(nav_frame)
+            .show(ctx, |ui| {
+            let new_btn = egui::Button::new(egui::RichText::new("＋  New conversation").color(theme::BG).strong())
+                .fill(theme::FG)
+                .min_size(egui::vec2(ui.available_width(), 30.0));
+            if ui.add(new_btn).clicked() {
                 self.session_id = None;
                 self.messages.clear();
+                self.plan = None;
+                self.ask = None;
             }
-            ui.separator();
-            ui.strong("Sessions");
-            egui::ScrollArea::vertical().id_source("sess").max_height(220.0).show(ui, |ui| {
+            ui.add_space(10.0);
+            ui.label(egui::RichText::new("SESSIONS").color(theme::MUTED).small().strong());
+            ui.add_space(2.0);
+            egui::ScrollArea::vertical().id_source("sess").max_height(240.0).show(ui, |ui| {
                 let picks: Vec<(String, String)> = self
                     .sessions
                     .iter()
@@ -625,23 +649,36 @@ impl eframe::App for App {
 
         // Right pane: the live/opened document (editable, save-back).
         if self.doc.is_some() {
-            egui::SidePanel::right("doc").resizable(true).default_width(420.0).show(ctx, |ui| {
+            let doc_frame = egui::Frame::none()
+                .fill(theme::PANEL)
+                .inner_margin(egui::Margin::symmetric(12.0, 12.0));
+            egui::SidePanel::right("doc")
+                .resizable(true)
+                .default_width(440.0)
+                .frame(doc_frame)
+                .show(ctx, |ui| {
                 let mut do_save = false;
                 if let Some(d) = self.doc.as_mut() {
                     ui.horizontal(|ui| {
-                        ui.strong(if d.title.is_empty() { "Document".to_string() } else { d.title.clone() });
-                        ui.label(format!("v{}", d.version));
+                        let title = if d.title.is_empty() { "Untitled".to_string() } else { d.title.clone() };
+                        ui.label(egui::RichText::new(format!("▤ {title}")).color(theme::FG).strong());
+                        ui.label(egui::RichText::new(format!("v{}", d.version)).color(theme::MUTED).small());
                         if !d.language.is_empty() {
-                            ui.weak(&d.language);
+                            ui.label(egui::RichText::new(&d.language).color(theme::MUTED).small());
                         }
-                        if d.saving {
-                            ui.spinner();
-                        }
-                        let can_save = d.dirty && d.id.is_some() && !d.saving;
-                        if ui.add_enabled(can_save, egui::Button::new("Save")).clicked() {
-                            do_save = true;
-                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if d.saving {
+                                ui.spinner();
+                            }
+                            let can_save = d.dirty && d.id.is_some() && !d.saving;
+                            let save = egui::Button::new(egui::RichText::new("Save").color(theme::BG).strong())
+                                .fill(if can_save { theme::GREEN } else { theme::MUTED });
+                            if ui.add_enabled(can_save, save).clicked() {
+                                do_save = true;
+                            }
+                        });
                     });
+                    ui.add_space(4.0);
                     ui.separator();
                     egui::ScrollArea::vertical().id_source("docbody").show(ui, |ui| {
                         let resp = ui.add(
@@ -661,45 +698,105 @@ impl eframe::App for App {
             });
         }
 
-        egui::TopBottomPanel::bottom("composer").show(ctx, |ui| {
+        let composer_frame = egui::Frame::none()
+            .fill(theme::PANEL)
+            .inner_margin(egui::Margin::symmetric(14.0, 10.0));
+        egui::TopBottomPanel::bottom("composer").frame(composer_frame).show(ctx, |ui| {
+            if !self.status.is_empty() {
+                ui.label(egui::RichText::new(&self.status).color(theme::MUTED).small());
+                ui.add_space(4.0);
+            }
             ui.horizontal(|ui| {
-                let hint = if self.kind == "agent" { "message (agent)…" } else { "message…" };
-                let resp = ui.add(
+                let send_w = 74.0;
+                let hint = if self.kind == "agent" { "message the agent…" } else { "message…" };
+                let resp = ui.add_sized(
+                    [ui.available_width() - send_w - 8.0, 34.0],
                     egui::TextEdit::singleline(&mut self.input)
                         .hint_text(hint)
-                        .desired_width(f32::INFINITY),
+                        .vertical_align(egui::Align::Center),
                 );
-                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let send_btn = egui::Button::new(egui::RichText::new("Send").color(theme::BG).strong())
+                    .fill(if self.busy { theme::MUTED } else { theme::FG })
+                    .min_size(egui::vec2(send_w, 34.0));
+                let clicked = ui.add_enabled(!self.busy, send_btn).clicked();
+                if enter || clicked {
                     self.send(ctx);
                     ui.memory_mut(|m| m.request_focus(resp.id));
                 }
             });
-            ui.label(egui::RichText::new(&self.status).weak().small());
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
-                for msg in &self.messages {
-                    let (who, color) = match msg.role {
-                        Role::User => ("You", egui::Color32::from_rgb(120, 170, 255)),
-                        Role::Assistant => ("Odysseus", egui::Color32::from_rgb(255, 130, 170)),
-                    };
-                    ui.add_space(6.0);
-                    ui.label(egui::RichText::new(who).color(color).strong());
-                    if !msg.thinking.is_empty() {
-                        ui.label(egui::RichText::new(&msg.thinking).italics().weak());
+        let central_frame = egui::Frame::none()
+            .fill(theme::BG)
+            .inner_margin(egui::Margin::symmetric(18.0, 14.0));
+        egui::CentralPanel::default().frame(central_frame).show(ctx, |ui| {
+            if self.messages.is_empty() {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() * 0.4);
+                    ui.label(egui::RichText::new("◆").size(40.0).color(theme::BORDER));
+                    ui.label(egui::RichText::new("Start a conversation").color(theme::MUTED));
+                });
+                return;
+            }
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    let busy = self.busy;
+                    for msg in &self.messages {
+                        render_bubble(ui, msg, busy);
+                        ui.add_space(10.0);
                     }
-                    for tool in &msg.tools {
-                        ui.label(egui::RichText::new(format!("· {tool}")).weak().small());
-                    }
-                    let body = if msg.text.is_empty() && msg.role == Role::Assistant && self.busy {
-                        "…".to_string()
-                    } else {
-                        msg.text.clone()
-                    };
-                    ui.label(body);
-                }
-            });
+                });
         });
     }
+}
+
+/// One chat bubble in the web app's style: user right + tail bottom-right,
+/// assistant left + tail bottom-left, colored role dot, teal-bordered panel.
+fn render_bubble(ui: &mut egui::Ui, msg: &ChatMessage, busy: bool) {
+    let user = msg.role == Role::User;
+    let (who, dot, fill) = if user {
+        ("you", theme::FG, theme::USER_BUBBLE)
+    } else {
+        ("odysseus", theme::RED, theme::AI_BUBBLE)
+    };
+    let max_w = (ui.available_width() * 0.82).min(760.0);
+    let align = if user { egui::Align::Max } else { egui::Align::Min };
+
+    ui.with_layout(egui::Layout::top_down(align), |ui| {
+        ui.set_max_width(max_w);
+        theme::bubble(fill, !user).show(ui, |ui| {
+            ui.set_max_width(max_w - 26.0);
+            // Role line: colored dot + name.
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
+                ui.painter().circle_filled(r.center(), 4.0, dot);
+                ui.label(egui::RichText::new(who).color(dot).strong().small());
+            });
+            if !msg.thinking.is_empty() {
+                ui.label(egui::RichText::new(&msg.thinking).italics().color(theme::MUTED));
+            }
+            if !msg.tools.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    for tool in &msg.tools {
+                        egui::Frame::none()
+                            .fill(theme::FIELD_BG)
+                            .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                            .rounding(egui::Rounding::same(6.0))
+                            .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new(format!("⚙ {tool}")).color(theme::WARN).small());
+                            });
+                    }
+                });
+            }
+            if msg.text.trim().is_empty() && !user && busy {
+                ui.label(egui::RichText::new("▍").color(theme::MUTED));
+            } else {
+                ui.label(egui::RichText::new(&msg.text).color(theme::FG));
+            }
+        });
+    });
 }
