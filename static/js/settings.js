@@ -9,7 +9,7 @@ import { sortModelIds } from './modelSort.js';
 import { providerLogo } from './providers.js';
 import { isAltGrEvent } from './platform.js';
 import { bindMenuDismiss } from './escMenuStack.js';
-import { clearTerminalSecrets, copyTerminalCommand, createTerminalToken, isTerminalToken } from './terminalClientIntegration.js';
+import { clearTerminalSecrets, copyTerminalCommand, createTerminalToken, isTerminalToken, terminalLoginCommand, nvimTokenCommand, generalTokenCommand } from './terminalClientIntegration.js';
 
 let initialized = false;
 let modalEl = null;
@@ -3123,6 +3123,13 @@ async function initEmailAccountsSettings() {
 
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
+  // Scope checkbox list, shared by the new-token and edit-token forms.
+  const renderScopePicker = (scopes, selectedSet, cbClass) => scopes.map(s => `
+      <label class="uf-scope-row">
+        <input type="checkbox" class="${cbClass} uf-scope-cb" data-scope="${esc(s)}" ${selectedSet.has(s) ? 'checked' : ''}>
+        <span class="uf-scope-label">${esc(s)}</span>
+      </label>`).join('');
+
   async function fetchAccounts() {
     const r = await fetch('/api/email/accounts', { credentials: 'same-origin' });
     const d = await r.json();
@@ -5937,38 +5944,121 @@ async function initUnifiedIntegrations() {
     }
 
     if (existing) {
-      const scopes = Array.isArray(existing.scopes) ? existing.scopes : [];
+      const currentScopes = new Set(Array.isArray(existing.scopes) ? existing.scopes : []);
+      // Full set of grantable scopes, fetched so the picker stays in sync with
+      // the server's ALLOWED_SCOPES (terminal + content scopes).
+      let allowed = [];
+      try {
+        const pr = await fetch('/api/tokens/profiles', { credentials: 'same-origin' });
+        if (pr.ok) { const pj = await pr.json(); allowed = Array.isArray(pj.allowed_scopes) ? pj.allowed_scopes : []; }
+      } catch (_) {}
+      if (!allowed.length) allowed = Array.from(currentScopes);
+      const scopeRows = renderScopePicker(allowed, currentScopes, 'uf-terminal-scope');
       formEl.innerHTML = `
         <div class="admin-card" style="margin-top:8px">
           <div class="settings-col">
             <h2 style="font-size:13px;margin:0 0 4px">${esc(existing.name || 'Terminal Client')}</h2>
-            <div style="font-size:11px;opacity:0.62">${esc(existing.token_prefix || 'ody_')}... · ${esc(scopes.join(', '))}</div>
-            <div style="font-size:11px;opacity:0.62;margin-top:8px;line-height:1.4">The secret is shown only when created. Revoke this token from its integration card if it needs to be replaced.</div>
-            <div style="display:flex;justify-content:flex-end;margin-top:10px">
+            <div style="font-size:11px;opacity:0.62">${esc(existing.token_prefix || 'ody_')}...${existing.last_used_at ? ' · Last used ' + new Date(existing.last_used_at).toLocaleDateString() : ' · Never used'}</div>
+            <div style="font-size:11px;font-weight:600;opacity:0.62;margin:10px 0 4px">Scopes</div>
+            <div style="font-size:11px;opacity:0.62;margin-bottom:6px;line-height:1.4">Grant any scope the server allows — including content scopes (todos, documents, email, calendar, memory) — so one token can drive a full client. The secret itself is shown only at creation; scopes can be changed here anytime.</div>
+            <div style="display:flex;gap:8px;margin-bottom:6px">
+              <button type="button" class="admin-btn-sm" id="uf-terminal-scope-all">Select all</button>
+              <button type="button" class="admin-btn-sm" id="uf-terminal-scope-none">Clear</button>
+            </div>
+            <div style="max-height:220px;overflow-y:auto">${scopeRows}</div>
+            <div class="settings-row" style="margin-top:10px;align-items:center;gap:6px">
               <button class="admin-btn-add" id="uf-terminal-close">Close</button>
+              <span id="uf-terminal-scope-msg" style="font-size:11px;flex:1;text-align:center"></span>
+              <button class="admin-btn-add" id="uf-terminal-scope-save" style="font-weight:600">Save scopes</button>
             </div>
           </div>
         </div>`;
+      const scopeInputs = () => Array.from(formEl.querySelectorAll('.uf-terminal-scope'));
+      el('uf-terminal-scope-all')?.addEventListener('click', () => scopeInputs().forEach(i => { i.checked = true; }));
+      el('uf-terminal-scope-none')?.addEventListener('click', () => scopeInputs().forEach(i => { i.checked = false; }));
       el('uf-terminal-close')?.addEventListener('click', () => { formEl.style.display = 'none'; });
+      el('uf-terminal-scope-save')?.addEventListener('click', async () => {
+        const msg = el('uf-terminal-scope-msg');
+        const chosen = scopeInputs().filter(i => i.checked).map(i => i.dataset.scope);
+        msg.textContent = 'Saving…';
+        msg.style.color = '';
+        try {
+          const r = await fetch(`/api/tokens/${existing.id}`, {
+            method: 'PATCH', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scopes: chosen }),
+          });
+          if (!r.ok) throw new Error('Save failed');
+          msg.textContent = 'Saved';
+          msg.style.color = 'var(--green, #50fa7b)';
+          await renderList();
+          notifyIntegrationsChanged();
+        } catch (err) {
+          msg.textContent = err?.message || 'Save failed';
+          msg.style.color = 'var(--red)';
+        }
+      });
       return;
     }
+
+    // Fetch grantable scopes so the picker stays in sync with the server.
+    // Default selection = the Terminal Client profile.
+    let allowedScopes = [];
+    let defaultScopes = [];
+    try {
+      const pr = await fetch('/api/tokens/profiles', { credentials: 'same-origin' });
+      if (pr.ok) {
+        const pj = await pr.json();
+        allowedScopes = Array.isArray(pj.allowed_scopes) ? pj.allowed_scopes : [];
+        defaultScopes = (pj.profiles && Array.isArray(pj.profiles.terminal)) ? pj.profiles.terminal : [];
+      }
+    } catch (_) {}
+    if (!allowedScopes.length) allowedScopes = defaultScopes.slice();
+    const _defaultSet = new Set(defaultScopes);
+    const _scopePickerRows = renderScopePicker(allowedScopes, _defaultSet, 'uf-terminal-new-scope');
+
+    // Three ways to consume the token, each with a tailored reveal + default
+    // scope set: ody-term → CLI login; Neovim → :OdysseusToken paste; General
+    // → env var. Neovim defaults to the full scope set (it drives a full
+    // workspace), the others to the Terminal Client profile.
+    const FLAVORS = {
+      terminal: { label: 'ody-term', heading: 'Log in with ody-term', defaults: () => defaultScopes, cmd: (t, s) => terminalLoginCommand(t, s) },
+      nvim:     { label: 'Neovim',   heading: 'Paste this inside Neovim (odysseus.nvim)', defaults: () => allowedScopes, cmd: (t) => nvimTokenCommand(t) },
+      general:  { label: 'General',  heading: 'Store as ODYSSEUS_API_TOKEN', defaults: () => defaultScopes, cmd: (t) => generalTokenCommand(t) },
+    };
+    let _flavor = 'terminal';
 
     formEl.innerHTML = `
       <div class="admin-card" style="margin-top:8px">
         <div class="settings-col">
-          <h2 style="font-size:13px;margin:0">Terminal Client</h2>
-          <div style="font-size:11px;opacity:0.62;line-height:1.4">Create an owner-attributed token with the complete Terminal Client profile. The server still enforces every scope and ownership check.</div>
+          <h2 style="font-size:13px;margin:0">New token</h2>
+          <div style="font-size:11px;opacity:0.62;line-height:1.4">Owner-attributed API token. Defaults to the Terminal Client scopes; toggle any scopes — including content scopes (todos, documents, email, calendar, memory) — to create a broader or content-only token. The server still enforces every scope and ownership check.</div>
           <div id="uf-terminal-prompt">
+            <div class="settings-row" style="margin-top:8px;align-items:center;gap:6px">
+              <label class="settings-label">For</label>
+              <div id="uf-terminal-flavor" style="display:flex;gap:4px">
+                <button type="button" class="admin-btn-sm uf-flavor" data-flavor="terminal">ody-term</button>
+                <button type="button" class="admin-btn-sm uf-flavor" data-flavor="nvim">Neovim</button>
+                <button type="button" class="admin-btn-sm uf-flavor" data-flavor="general">General</button>
+              </div>
+            </div>
             <div class="settings-row" style="margin-top:8px">
               <label class="settings-label">Name</label>
               <input id="uf-terminal-name" class="settings-input" value="Terminal Client" maxlength="100">
             </div>
+            <div style="font-size:11px;font-weight:600;opacity:0.62;margin:10px 0 4px">Scopes</div>
+            <div style="display:flex;gap:8px;margin-bottom:6px">
+              <button type="button" class="admin-btn-sm" id="uf-terminal-new-all">Select all</button>
+              <button type="button" class="admin-btn-sm" id="uf-terminal-new-none">Clear</button>
+              <button type="button" class="admin-btn-sm" id="uf-terminal-new-default">Reset to default</button>
+            </div>
+            <div style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:4px 8px">${_scopePickerRows}</div>
           </div>
           <div id="uf-terminal-reveal" style="display:none">
             <div style="font-weight:600;font-size:12px;margin:8px 0 4px">Token</div>
             <div style="font-size:11px;opacity:0.62;margin-bottom:4px">Copy this token now. It will not be shown again.</div>
             <code id="uf-terminal-token" style="display:block;word-break:break-all;font-size:11px;padding:7px 8px;background:rgba(0,0,0,0.08);border-radius:4px"></code>
-            <div style="font-weight:600;font-size:12px;margin:12px 0 4px">Store with ody-term</div>
+            <div id="uf-terminal-reveal-heading" style="font-weight:600;font-size:12px;margin:12px 0 4px">Store with ody-term</div>
             <pre style="margin:0;white-space:pre-wrap;overflow-x:auto;font-size:10px;line-height:1.45;padding:8px 10px;background:rgba(0,0,0,0.08);border-radius:4px"><code id="uf-terminal-command"></code></pre>
             <button type="button" class="admin-btn-sm" id="uf-terminal-copy-command" style="margin-top:6px">Copy command</button>
           </div>
@@ -5984,16 +6074,44 @@ async function initUnifiedIntegrations() {
       clearTerminalSecrets(formEl);
       formEl.style.display = 'none';
     });
+    const _newScopeInputs = () => Array.from(formEl.querySelectorAll('.uf-terminal-new-scope'));
+    el('uf-terminal-new-all')?.addEventListener('click', () => _newScopeInputs().forEach(i => { i.checked = true; }));
+    el('uf-terminal-new-none')?.addEventListener('click', () => _newScopeInputs().forEach(i => { i.checked = false; }));
+    el('uf-terminal-new-default')?.addEventListener('click', () => _newScopeInputs().forEach(i => { i.checked = FLAVORS[_flavor].defaults().includes(i.dataset.scope); }));
+    const _applyFlavor = (flavor) => {
+      _flavor = flavor;
+      const set = new Set(FLAVORS[flavor].defaults() || []);
+      _newScopeInputs().forEach(i => { i.checked = set.has(i.dataset.scope); });
+      Array.from(formEl.querySelectorAll('.uf-flavor')).forEach(b => {
+        const on = b.dataset.flavor === flavor;
+        b.style.borderColor = on ? 'var(--accent, var(--red))' : '';
+        b.style.color = on ? 'var(--accent, var(--red))' : '';
+        b.style.fontWeight = on ? '600' : '';
+      });
+    };
+    Array.from(formEl.querySelectorAll('.uf-flavor')).forEach(b => {
+      b.addEventListener('click', () => _applyFlavor(b.dataset.flavor));
+    });
+    _applyFlavor('terminal');
     el('uf-terminal-create')?.addEventListener('click', async () => {
       const createBtn = el('uf-terminal-create');
       const msg = el('uf-terminal-msg');
       const name = (el('uf-terminal-name')?.value || '').trim() || 'Terminal Client';
+      const chosenScopes = _newScopeInputs().filter(i => i.checked).map(i => i.dataset.scope);
+      if (!chosenScopes.length) {
+        msg.textContent = 'Select at least one scope';
+        msg.style.color = 'var(--red)';
+        return;
+      }
       createBtn.disabled = true;
       msg.textContent = 'Creating…';
+      msg.style.color = '';
       try {
-        const d = await createTerminalToken(fetch, name);
+        const d = await createTerminalToken(fetch, name, chosenScopes);
         el('uf-terminal-token').textContent = d.token;
-        el('uf-terminal-command').textContent = d.command;
+        el('uf-terminal-command').textContent = FLAVORS[_flavor].cmd(d.token, d.scopes);
+        const _rh = el('uf-terminal-reveal-heading');
+        if (_rh) _rh.textContent = FLAVORS[_flavor].heading;
         el('uf-terminal-prompt').style.display = 'none';
         el('uf-terminal-reveal').style.display = '';
         createBtn.style.display = 'none';

@@ -41652,3 +41652,35 @@ body.theme-frosted .modal {
   .usage-kpis { grid-template-columns: repeat(2, 1fr); }
   .usage-chart-grid { grid-template-columns: 1fr; }
 }
+
+/* Token scope picker (Integrations → new/edit token). Bare checkboxes here
+   inherited grow-on-hover styling from elsewhere; pin them to a fixed size and
+   make the row and checkbox inert on hover. */
+.uf-scope-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  padding: 1px 0;
+}
+.uf-scope-row .uf-scope-cb {
+  width: 14px !important;
+  height: 14px !important;
+  min-width: 14px !important;
+  min-height: 14px !important;
+  flex: 0 0 14px !important;
+  margin: 0 !important;
+  transform: none !important;
+  transition: none !important;
+}
+.uf-scope-row:hover .uf-scope-cb,
+.uf-scope-row .uf-scope-cb:hover {
+  transform: none !important;
+  width: 14px !important;
+  height: 14px !important;
+}
+.uf-scope-row .uf-scope-label {
+  padding: 0;
+  font-size: 12px;
+  font-family: var(--mono, monospace);
+}

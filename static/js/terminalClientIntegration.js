@@ -11,10 +11,26 @@ export function terminalLoginCommand(token, scopes) {
   return `ody-term auth login \\\n  --token '${token}' \\\n  --scopes '${scopeList}'`;
 }
 
-export async function createTerminalToken(fetchImpl, name) {
+// Command to paste inside the odysseus.nvim plugin to adopt a token.
+export function nvimTokenCommand(token) {
+  return `:OdysseusToken ${token}`;
+}
+
+// General-purpose token: adopt via the generic API-token env var (not a
+// client-specific one), the same var the Codex integration reads.
+export function generalTokenCommand(token) {
+  return `export ODYSSEUS_API_TOKEN='${token}'`;
+}
+
+export async function createTerminalToken(fetchImpl, name, scopes) {
   const fd = new FormData();
   fd.append('name', String(name || '').trim() || 'Terminal Client');
-  fd.append('profile', 'terminal');
+  // Explicit scope selection wins; otherwise fall back to the terminal profile.
+  if (Array.isArray(scopes) && scopes.length) {
+    fd.append('scopes', scopes.join(','));
+  } else {
+    fd.append('profile', 'terminal');
+  }
   const response = await fetchImpl('/api/tokens', {
     method: 'POST',
     credentials: 'same-origin',
