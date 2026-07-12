@@ -130,9 +130,11 @@ def test_terminal_session_read_api_keeps_history_and_run_identity_separate(monke
     assert listed.status_code == shown.status_code == history.status_code == exported.status_code == 200
     assert "ses-real" in {session["session_id"] for session in listed.json()["sessions"]}
     assert shown.json()["session"]["name"] == "Durable chat"
+    # history carries per-message metadata (thinking + tool_events) so a client
+    # can rebuild the full agent trace on reload; simple messages have {}.
     assert history.json()["history"] == [
-        {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": "hello", "metadata": {}},
+        {"role": "assistant", "content": "hi", "metadata": {}},
     ]
     assert history.json()["runs"] == []
     assert "## USER\n\nhello" in exported.json()["content"]

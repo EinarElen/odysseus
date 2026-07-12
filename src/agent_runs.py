@@ -29,6 +29,41 @@ from src.constants import DATA_DIR
 
 logger = logging.getLogger(__name__)
 _STORE = Path(DATA_DIR) / "agent_runs.json"
+# A normalized heartbeat is emitted while a producer is quiet.  Keeping this
+# here (rather than as an SSE comment in subscribe()) lets every Run consumer,
+# including persisted event inspection, observe the same liveness event.
+HEARTBEAT_INTERVAL_S = 10.0
+
+
+def _heartbeat_event() -> str:
+    return (
+        "event: heartbeat\n"
+        f"data: {json.dumps({'type': 'heartbeat', 'status': 'running', 'activity': 'waiting'})}\n\n"
+    )
+
+
+def _normalize_event(event: str) -> str:
+    """Convert legacy SSE keepalive comments into replayable heartbeats."""
+    if event.strip().startswith(":"):
+        return _heartbeat_event()
+    return event
+
+
+def _safe_cancel(task: "asyncio.Task | None") -> None:
+    """Cancel `task`, tolerating one bound to an already-closed event loop.
+
+    In production every run lives on the single app loop, so this is a plain
+    cancel. Under Starlette's TestClient (a fresh loop per request) a run's
+    helper tasks can outlive the loop they were created on; then `.done()` /
+    `.cancel()` raise ``RuntimeError('Event loop is closed')`` — there is
+    nothing left to cancel, so swallow it."""
+    if task is None:
+        return
+    try:
+        if not task.done():
+            task.cancel()
+    except RuntimeError:
+        pass
 
 
 class _Run:
@@ -264,8 +299,7 @@ def _schedule_evict(session_id: str) -> None:
     run = _RUNS.get(session_id)
     if run is None:
         return
-    if run.evict_task and not run.evict_task.done():
-        run.evict_task.cancel()
+    _safe_cancel(run.evict_task)
 
     async def _evict(run_ref: _Run) -> None:
         try:
@@ -326,9 +360,27 @@ async def _drain(session_id: str, agen: AsyncGenerator[str, None],
             raise            # our own cancellation — propagate
         except Exception:
             pass
+    # Heartbeat as a separate, time-based task rather than a per-read timeout.
+    # Draining the producer directly with `async for` lets a fast/synchronous
+    # generator complete in a single task step (no extra loop turns), which is
+    # both simpler and what detached-run consumers rely on. The heartbeat task
+    # publishes a *replayable* liveness event only when the producer has been
+    # quiet for the interval, so attached terminals and persisted Run inspection
+    # still see liveness during model prefill and quiet tool phases.
+    last_activity = time.monotonic()
+    hb_task: asyncio.Task | None = None
+
+    async def _heartbeats() -> None:
+        while True:
+            await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+            if run.status == "running" and (time.monotonic() - last_activity) >= HEARTBEAT_INTERVAL_S:
+                _publish(run, _heartbeat_event())
+
     try:
+        hb_task = asyncio.create_task(_heartbeats())
         async for ev in agen:
-            _publish(run, ev)
+            last_activity = time.monotonic()
+            _publish(run, _normalize_event(ev))
         if run.status == "running":
             run.status = "done"
             _set_persisted_status(session_id, "done")
@@ -352,6 +404,7 @@ async def _drain(session_id: str, agen: AsyncGenerator[str, None],
         )
         _publish(run, "data: [DONE]\n\n")
     finally:
+        _safe_cancel(hb_task)
         # Wake every subscriber with the end sentinel so their SSE closes.
         for q in list(run.subscribers):
             try:
@@ -401,8 +454,7 @@ async def subscribe(session_id: str) -> AsyncGenerator[str, None]:
     run.subscribers.add(q)            # register BEFORE replaying so nothing is missed
     # A live subscriber is connected — don't let a pending grace timer evict
     # the run out from under it mid-replay.
-    if run.evict_task and not run.evict_task.done():
-        run.evict_task.cancel()
+    _safe_cancel(run.evict_task)
     try:
         next_seq = 0
         while next_seq < len(run.buffer):
@@ -410,20 +462,11 @@ async def subscribe(session_id: str) -> AsyncGenerator[str, None]:
             next_seq += 1
         if run.status != "running":
             return
-        heartbeat_idx = 0
         while True:
             try:
-                seq, ev = await asyncio.wait_for(q.get(), timeout=10.0)
-            except asyncio.TimeoutError:
-                # Keep slow local models/proxies alive while they prefill before
-                # the first token. SSE comments are ignored by the UI but reset
-                # browser/proxy idle timers, which prevents "empty response"
-                # disconnects on llama.cpp first-token latencies of 30s+.
-                if run.status == "running":
-                    heartbeat_idx += 1
-                    yield f": heartbeat {heartbeat_idx}\n\n"
-                    continue
-                seq, ev = (None, None)
+                seq, ev = await q.get()
+            except asyncio.CancelledError:
+                raise
             if seq is None:            # end sentinel
                 while next_seq < len(run.buffer):   # flush any tail the sentinel raced
                     yield run.buffer[next_seq]
