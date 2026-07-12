@@ -16,11 +16,12 @@ use crate::theme;
 enum Msg {
     Answer(String),
     Thinking(String),
-    Tool(String),
     Error(String),
     Done(String), // session_id
     Plan(String), // proposed/updated checklist (markdown)
     Ask { question: String, options: Vec<String>, multi: bool },
+    ToolStart { name: String, command: String },
+    ToolEnd { output: String, exit_code: i64 },
     DocOpen { title: String, language: String },
     DocDelta(String),
     DocUpdate { id: String, content: String, version: i64, title: String, language: String },
@@ -33,11 +34,20 @@ enum Role {
     Assistant,
 }
 
+/// One agent tool invocation, rendered as an expandable card in the bubble.
+struct ToolCall {
+    name: String,
+    command: String,
+    output: String,
+    exit_code: i64,
+    done: bool,
+}
+
 struct ChatMessage {
     role: Role,
     text: String,
     thinking: String,
-    tools: Vec<String>,
+    tools: Vec<ToolCall>,
 }
 
 /// An outstanding `ask_user` prompt: the agent ended its turn awaiting a choice,
@@ -259,10 +269,24 @@ impl App {
                         msg.thinking.push_str(&t);
                     }
                 }
-                Msg::Tool(name) => {
+                Msg::ToolStart { name, command } => {
                     if let Some(msg) = self.messages.last_mut() {
-                        if !msg.tools.contains(&name) {
-                            msg.tools.push(name);
+                        msg.tools.push(ToolCall {
+                            name,
+                            command,
+                            output: String::new(),
+                            exit_code: 0,
+                            done: false,
+                        });
+                    }
+                }
+                Msg::ToolEnd { output, exit_code } => {
+                    if let Some(msg) = self.messages.last_mut() {
+                        // Fill the most recent still-running tool card.
+                        if let Some(tc) = msg.tools.iter_mut().rev().find(|t| !t.done) {
+                            tc.output = output;
+                            tc.exit_code = exit_code;
+                            tc.done = true;
                         }
                     }
                 }
@@ -378,9 +402,19 @@ fn run_stream(
                     send(if thinking { Msg::Thinking(text.to_string()) } else { Msg::Answer(text.to_string()) });
                 }
             }
-            "tool_start" | "tool_output" => {
+            "tool_start" => {
                 let name = p["tool"].as_str().or_else(|| p["name"].as_str()).unwrap_or("tool").to_string();
-                send(Msg::Tool(name));
+                let command = p["command"]
+                    .as_str()
+                    .or_else(|| p["input"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+                send(Msg::ToolStart { name, command });
+            }
+            "tool_output" => {
+                let output = p["output"].as_str().unwrap_or("").to_string();
+                let exit_code = p["exit_code"].as_i64().unwrap_or(0);
+                send(Msg::ToolEnd { output, exit_code });
             }
             "plan_update" => {
                 if let Some(plan) = p["plan"].as_str() {
@@ -765,8 +799,8 @@ impl eframe::App for App {
                 .auto_shrink([false, false])
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
-                    for msg in messages {
-                        render_bubble(ui, msg, cache, busy);
+                    for (idx, msg) in messages.iter().enumerate() {
+                        render_bubble(ui, idx, msg, cache, busy);
                         ui.add_space(10.0);
                     }
                 });
@@ -798,9 +832,53 @@ fn syntect_lang(language: &str) -> &'static str {
     }
 }
 
+/// An agent tool call as an expandable card: status dot + name + command
+/// preview in the header, full command and output when expanded.
+fn render_tool_card(ui: &mut egui::Ui, tool: &ToolCall, salt: (usize, usize)) {
+    let (dot, tint) = if !tool.done {
+        (theme::WARN, theme::WARN)
+    } else if tool.exit_code == 0 {
+        (theme::GREEN, theme::MUTED)
+    } else {
+        (theme::RED, theme::RED)
+    };
+    let preview: String = tool.command.replace('\n', " ").chars().take(60).collect();
+    egui::Frame::none()
+        .fill(theme::FIELD_BG)
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .rounding(egui::Rounding::same(7.0))
+        .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+        .show(ui, |ui| {
+            let header = egui::CollapsingHeader::new(
+                egui::RichText::new(format!("⚙ {}", tool.name)).color(tint).small().strong(),
+            )
+            .id_salt(salt)
+            .default_open(false);
+            header.show_unindented(ui, |ui| {
+                if !tool.command.is_empty() {
+                    ui.label(egui::RichText::new("command").color(theme::MUTED).small());
+                    ui.add(egui::Label::new(egui::RichText::new(&tool.command).monospace().small()).wrap());
+                }
+                if !tool.output.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("output").color(theme::MUTED).small());
+                    let shown: String = tool.output.chars().take(4000).collect();
+                    ui.add(egui::Label::new(egui::RichText::new(shown).monospace().small()).wrap());
+                }
+            });
+            // Status dot + command preview on the header row.
+            let rect = ui.min_rect();
+            let painter = ui.painter();
+            painter.circle_filled(egui::pos2(rect.right() - 6.0, rect.top() + 10.0), 3.5, dot);
+            if !preview.is_empty() {
+                ui.label(egui::RichText::new(preview).color(theme::MUTED).small());
+            }
+        });
+}
+
 /// One chat bubble in the web app's style: user right + tail bottom-right,
 /// assistant left + tail bottom-left, colored role dot, teal-bordered panel.
-fn render_bubble(ui: &mut egui::Ui, msg: &ChatMessage, cache: &mut CommonMarkCache, busy: bool) {
+fn render_bubble(ui: &mut egui::Ui, idx: usize, msg: &ChatMessage, cache: &mut CommonMarkCache, busy: bool) {
     let user = msg.role == Role::User;
     let (who, dot, fill) = if user {
         ("you", theme::FG, theme::USER_BUBBLE)
@@ -823,19 +901,8 @@ fn render_bubble(ui: &mut egui::Ui, msg: &ChatMessage, cache: &mut CommonMarkCac
             if !msg.thinking.is_empty() {
                 ui.label(egui::RichText::new(&msg.thinking).italics().color(theme::MUTED));
             }
-            if !msg.tools.is_empty() {
-                ui.horizontal_wrapped(|ui| {
-                    for tool in &msg.tools {
-                        egui::Frame::none()
-                            .fill(theme::FIELD_BG)
-                            .stroke(egui::Stroke::new(1.0, theme::BORDER))
-                            .rounding(egui::Rounding::same(6.0))
-                            .inner_margin(egui::Margin::symmetric(6.0, 2.0))
-                            .show(ui, |ui| {
-                                ui.label(egui::RichText::new(format!("⚙ {tool}")).color(theme::WARN).small());
-                            });
-                    }
-                });
+            for (i, tool) in msg.tools.iter().enumerate() {
+                render_tool_card(ui, tool, (idx, i));
             }
             if msg.text.trim().is_empty() && !user && busy {
                 ui.label(egui::RichText::new("▍").color(theme::MUTED));
