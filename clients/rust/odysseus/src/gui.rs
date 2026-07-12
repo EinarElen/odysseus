@@ -514,7 +514,7 @@ impl eframe::App for App {
                 .show(ctx, |ui| {
                     if let Some(plan) = &self.plan {
                         egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                            ui.monospace(plan);
+                            CommonMarkViewer::new().show(ui, &mut self.md_cache, plan);
                         });
                     }
                     ui.separator();
@@ -899,7 +899,12 @@ fn render_bubble(ui: &mut egui::Ui, idx: usize, msg: &ChatMessage, cache: &mut C
                 ui.label(egui::RichText::new(who).color(dot).strong().small());
             });
             if !msg.thinking.is_empty() {
-                ui.label(egui::RichText::new(&msg.thinking).italics().color(theme::MUTED));
+                egui::CollapsingHeader::new(egui::RichText::new("💭 thinking").color(theme::MUTED).small())
+                    .id_salt((idx, "think"))
+                    .default_open(false)
+                    .show_unindented(ui, |ui| {
+                        ui.label(egui::RichText::new(&msg.thinking).italics().color(theme::MUTED));
+                    });
             }
             for (i, tool) in msg.tools.iter().enumerate() {
                 render_tool_card(ui, tool, (idx, i));
