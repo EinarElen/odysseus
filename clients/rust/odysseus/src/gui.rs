@@ -17,6 +17,7 @@ enum Msg {
     Error(String),
     Done(String), // session_id
     Plan(String), // proposed/updated checklist (markdown)
+    Ask { question: String, options: Vec<String>, multi: bool },
     DocOpen { title: String, language: String },
     DocDelta(String),
     DocUpdate { id: String, content: String, version: i64, title: String, language: String },
@@ -34,6 +35,15 @@ struct ChatMessage {
     text: String,
     thinking: String,
     tools: Vec<String>,
+}
+
+/// An outstanding `ask_user` prompt: the agent ended its turn awaiting a choice,
+/// which we send back as the next message.
+struct AskState {
+    question: String,
+    options: Vec<String>,
+    multi: bool,
+    selected: Vec<bool>,
 }
 
 struct DocState {
@@ -55,6 +65,7 @@ pub struct App {
     plan_mode: bool,
     plan: Option<String>,
     awaiting_plan: bool,
+    ask: Option<AskState>,
     session_id: Option<String>,
     sessions: Vec<SessionSummary>,
     documents: Vec<Document>,
@@ -84,6 +95,7 @@ impl App {
             plan_mode: false,
             plan: None,
             awaiting_plan: false,
+            ask: None,
             session_id: None,
             sessions: Vec::new(),
             documents: Vec::new(),
@@ -188,6 +200,13 @@ impl App {
         self.spawn_run(ctx, "Proceed with the approved plan.".to_string(), false, Some(plan));
     }
 
+    /// Answer an outstanding ask_user prompt: the choice goes back as the next
+    /// message in the same session (the agent's turn resumes from there).
+    fn answer_ask(&mut self, ctx: &egui::Context, answer: String) {
+        self.ask = None;
+        self.spawn_run(ctx, answer, false, None);
+    }
+
     fn spawn_run(&mut self, ctx: &egui::Context, text: String, plan_mode: bool, approved_plan: Option<String>) {
         if self.busy {
             return;
@@ -267,6 +286,10 @@ impl App {
                 }
                 Msg::Plan(p) => {
                     self.plan = Some(p);
+                }
+                Msg::Ask { question, options, multi } => {
+                    let selected = vec![false; options.len()];
+                    self.ask = Some(AskState { question, options, multi, selected });
                 }
                 Msg::DocOpen { title, language } => {
                     self.doc = Some(DocState {
@@ -359,6 +382,21 @@ fn run_stream(
                     send(Msg::Plan(plan.to_string()));
                 }
             }
+            "ask_user" => {
+                let options = p["options"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|o| o["label"].as_str().map(str::to_string))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                send(Msg::Ask {
+                    question: p["question"].as_str().unwrap_or("").to_string(),
+                    options,
+                    multi: p["multi"].as_bool().unwrap_or(false),
+                });
+            }
             "doc_stream_open" => send(Msg::DocOpen {
                 title: p["title"].as_str().unwrap_or("").to_string(),
                 language: p["language"].as_str().unwrap_or("").to_string(),
@@ -446,6 +484,45 @@ impl eframe::App for App {
                 self.approve_plan(ctx);
             } else if dismiss {
                 self.plan = None;
+            }
+        }
+
+        // Outstanding ask_user prompt: render the choices as buttons/checkboxes.
+        if self.ask.is_some() {
+            let mut answer: Option<String> = None;
+            egui::Window::new("The agent asks")
+                .collapsible(false)
+                .default_width(420.0)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    let ask = self.ask.as_mut().unwrap();
+                    ui.label(egui::RichText::new(&ask.question).strong());
+                    ui.separator();
+                    if ask.multi {
+                        for (i, opt) in ask.options.iter().enumerate() {
+                            ui.checkbox(&mut ask.selected[i], opt);
+                        }
+                        let any = ask.selected.iter().any(|s| *s);
+                        if ui.add_enabled(any && !self.busy, egui::Button::new("Submit")).clicked() {
+                            let chosen: Vec<String> = ask
+                                .options
+                                .iter()
+                                .zip(&ask.selected)
+                                .filter(|(_, s)| **s)
+                                .map(|(o, _)| o.clone())
+                                .collect();
+                            answer = Some(chosen.join(", "));
+                        }
+                    } else {
+                        for opt in &ask.options {
+                            if ui.add_enabled(!self.busy, egui::Button::new(opt)).clicked() {
+                                answer = Some(opt.clone());
+                            }
+                        }
+                    }
+                });
+            if let Some(a) = answer {
+                self.answer_ask(ctx, a);
             }
         }
 

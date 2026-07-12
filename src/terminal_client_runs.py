@@ -206,12 +206,42 @@ def _event_level(event_type: str, payload: Any) -> str:
 
 
 def _summary(kind: str, payload: Any) -> str:
-    if isinstance(payload, dict):
-        for key in ("summary", "message", "text", "content", "status"):
-            value = payload.get(key)
-            if isinstance(value, str) and value:
-                return value[:160]
+    if not isinstance(payload, dict):
+        return kind
+    tool = payload.get("tool") or payload.get("name") or payload.get("tool_name")
+    if kind in {"tool_start", "tool.progress", "tool_progress", "tool_end", "tool_result", "tool_error"}:
+        label = str(tool) if isinstance(tool, str) and tool else "tool"
+        if kind == "tool_start":
+            return f"{label} started"
+        if kind in {"tool.progress", "tool_progress"}:
+            return f"{label} working"
+        if kind == "tool_error":
+            return f"{label} failed"
+        return f"{label} completed"
+    for key in ("summary", "message", "text", "content", "status"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value[:160]
     return kind
+
+
+# Interactive kinds whose SSE chunk wraps its fields in a nested `data` object
+# ({"type": "plan_update", "data": {...}}). Every other kind (doc_update,
+# tool_output, message.delta, …) already carries its fields flat in the payload,
+# so a client that reads `payload[field]` works uniformly only if we flatten
+# these too. Web SSE is untouched — this normalization is terminal-only.
+_NESTED_DATA_KINDS = {"plan_update", "ask_user"}
+
+
+def _flatten_nested_data(kind: str, payload: Any) -> Any:
+    if kind not in _NESTED_DATA_KINDS or not isinstance(payload, dict):
+        return payload
+    inner = payload.get("data")
+    if not isinstance(inner, dict):
+        return payload
+    merged = {k: v for k, v in payload.items() if k != "data"}
+    merged.update(inner)
+    return merged
 
 
 def _event_envelope(run: TerminalRun, *, seq: int, raw: str) -> dict[str, Any]:
@@ -219,6 +249,7 @@ def _event_envelope(run: TerminalRun, *, seq: int, raw: str) -> dict[str, Any]:
     kind = _event_kind(event_type, payload)
     if run.kind == "agent" and kind == "agent_prep":
         kind = "heartbeat"
+    payload = _flatten_nested_data(kind, payload)
     return {
         "schema": "ody.event.v1",
         "id": f"evt_{run.run_id}_{seq}",
@@ -266,15 +297,23 @@ def _persist_raw_event(run: TerminalRun, seq: int, raw: str) -> None:
 
 async def _collect_events(run: TerminalRun, *, cursor: int | None = None) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
-    seq = 0
-    async for raw in agent_runs.subscribe(run.session_id):
-        if not isinstance(raw, str) or raw.startswith(":"):
+    # agent_runs' buffer sequence is the durable Run sequence.  Do not
+    # renumber skipped SSE comments: normalized heartbeats now occupy a real
+    # sequence slot, so reconnect cursors remain monotonic and lossless.
+    async for seq, raw in enumerate_async(agent_runs.subscribe(run.session_id), start=1):
+        if not isinstance(raw, str):
             continue
-        seq += 1
         if cursor is not None and seq <= cursor:
             continue
         events.append(_event_envelope(run, seq=seq, raw=raw))
     return events
+
+
+async def enumerate_async(iterable: Any, *, start: int = 0):
+    index = start
+    async for value in iterable:
+        yield index, value
+        index += 1
 
 
 def _stored_events_after(run: TerminalRun, *, cursor: int | None = None) -> list[dict[str, Any]]:
@@ -290,6 +329,12 @@ def _remember_events(run: TerminalRun, events: list[dict[str, Any]]) -> None:
         seq = int(event.get("seq", 0))
         if seq in seen:
             continue
+        if event.get("kind") == "heartbeat":
+            # Quiet producers can run indefinitely. Persist only the newest
+            # liveness envelope per Run; sequence ids intentionally remain
+            # sparse so cursors never move backward or get renumbered.
+            run.events = [stored for stored in run.events if stored.get("kind") != "heartbeat"]
+            seen = {int(stored.get("seq", 0)) for stored in run.events}
         run.events.append(event)
         seen.add(seq)
         added = True
