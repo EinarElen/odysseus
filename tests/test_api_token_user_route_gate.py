@@ -24,14 +24,14 @@ def _request(*, current_user="api", api_token=True, api_token_owner="alice"):
     )
 
 
-def test_require_user_rejects_api_token_pseudo_user(monkeypatch):
+def test_require_user_attributes_api_token_to_owner(monkeypatch):
+    # Dev/wild-west unlock: require_user now attributes a bearer token to its
+    # owner on owner-scoped routes so a token-based frontend has full access
+    # (was: raised 403 to fence tokens onto the scope-aware API routes).
     monkeypatch.setenv("AUTH_ENABLED", "true")
     req = _request()
 
-    with pytest.raises(HTTPException) as exc:
-        auth_helpers.require_user(req)
-
-    assert exc.value.status_code == 403
+    assert auth_helpers.require_user(req) == "alice"
 
 
 def test_require_authenticated_request_allows_api_token_owner(monkeypatch):

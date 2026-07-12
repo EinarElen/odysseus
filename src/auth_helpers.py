@@ -79,7 +79,9 @@ def require_user(request: Request) -> str:
     open them up.
     """
     if _is_api_token_request(request):
-        raise HTTPException(403, "API tokens must use a scope-aware API route")
+        # Dev/wild-west: accept bearer tokens on owner-scoped routes, attributed
+        # to the token owner, so a token-based frontend has full access.
+        return effective_user(request) or get_current_user(request) or ""
 
     u = get_current_user(request)
     if u:

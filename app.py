@@ -164,10 +164,26 @@ app.add_middleware(
 # The frontend's text assets (style.css, index.html, the JS bundles) shipped
 # uncompressed on every cold load. gzip cuts CSS/JS/HTML by ~75-85% on the wire
 # with no behavioural change. Starlette's GZipMiddleware excludes
-# `text/event-stream` by default, so the SSE streams (chat, shell, research,
-# model-probe — all served with media_type="text/event-stream") are never
-# compressed or buffered; only complete bodies over minimum_size are. The
-# security-header middleware composes cleanly on top.
+# `text/event-stream` by default, so the browser SSE streams (chat, shell,
+# research, model-probe — all served with media_type="text/event-stream") are
+# never compressed or buffered; only complete bodies over minimum_size are.
+#
+# The Terminal Client event streams, however, use media_type
+# "application/x-ndjson" (TERMINAL_EVENT_STREAM_MEDIA_TYPE), which is NOT in
+# Starlette's default exclusion list. Left compressed, a gzip-accepting client
+# (browser, or curl/libcurl that adds Accept-Encoding) receives a chunk-gzipped
+# body that the outer BaseHTTPMiddleware then emits without an intact
+# Content-Encoding header — i.e. an undecodable stream. Extend the module-level
+# exclusion so ndjson streams are treated like SSE. This version of Starlette
+# exposes no constructor hook for it.
+from starlette.middleware import gzip as _starlette_gzip
+
+if "application/x-ndjson" not in _starlette_gzip.DEFAULT_EXCLUDED_CONTENT_TYPES:
+    _starlette_gzip.DEFAULT_EXCLUDED_CONTENT_TYPES = (
+        *_starlette_gzip.DEFAULT_EXCLUDED_CONTENT_TYPES,
+        "application/x-ndjson",
+    )
+
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 
 # ========= SECURITY HEADERS MIDDLEWARE =========
@@ -495,8 +511,11 @@ if AUTH_ENABLED:
                             except Exception as _e:
                                 logger.debug("Failed to update token last_used_at", exc_info=_e)
                         _asyncio.create_task(_touch_last_used(matched_id))
-                        # Keep bearer-token callers out of normal cookie/user
-                        request.state.current_user = "api"
+                        # Dev/wild-west: attribute bearer-token callers to their
+                        # owner so a token-based frontend reaches the same
+                        # owner-scoped data as the desktop UI. (Was pinned to the
+                        # "api" pseudo-user to fence tokens out of cookie routes.)
+                        request.state.current_user = matched_owner or "api"
                         request.state.api_token = True
                         request.state.api_token_id = matched_id
                         request.state.api_token_owner = matched_owner
@@ -747,6 +766,7 @@ app.include_router(setup_terminal_client_routes(
     session_manager=session_manager,
     chat_handler=chat_handler,
     chat_processor=chat_processor,
+    upload_handler=upload_handler,
 ))
 
 # Research (background deep-research tasks)

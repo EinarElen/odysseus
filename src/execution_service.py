@@ -211,8 +211,13 @@ async def proxy(request: Request, path: str, *, streaming: bool, _retry: bool = 
     headers = {
         key: value for key, value in request.headers.items()
         if key.lower() not in {
-            "host", "content-length", HEADER, OWNER_HEADER, SCOPES_HEADER,
-            API_TOKEN_HEADER,
+            # Don't forward Accept-Encoding to the worker: inter-process
+            # localhost compression is pointless, and if the worker gzips a
+            # streaming response we relay the body but drop its Content-Encoding
+            # header below (not in the allowlist), leaving the client an
+            # undecodable gzip stream. Requesting identity keeps streams clean.
+            "host", "content-length", "accept-encoding", HEADER, OWNER_HEADER,
+            SCOPES_HEADER, API_TOKEN_HEADER,
         }
     }
     headers[HEADER] = str(state["secret"])

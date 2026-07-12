@@ -67,6 +67,9 @@ class _Identity:
             if headers.get(b"x-test-api-token"):
                 state["current_user"] = "api"
                 state["api_token"] = True
+                # Owner-attributed token (matches the app.py middleware): the
+                # dev unlock resolves it to this owner on owner-scoped routes.
+                state["api_token_owner"] = "alice"
         await self.app(scope, receive, send)
 
 
@@ -158,13 +161,16 @@ async def test_authenticated_user_still_scoped_to_own_notes(env):
         assert (await c.put("/api/notes/note-alice", json={"title": "mine"}, headers=alice)).status_code == 200
 
 
-async def test_api_token_pseudo_user_is_rejected(env):
-    """Bearer tokens must use the scope-aware API routes (require_user's
-    existing contract), not slip into cookie-session routes as user 'api'."""
+async def test_api_token_is_attributed_to_owner(env):
+    """Dev/wild-west unlock: a bearer token is attributed to its owner and
+    reaches that owner's data on the shared routes — it no longer slips in as a
+    pseudo-user 'api' nor is rejected with 403 (issue: token frontends need the
+    same owner-scoped access as the desktop UI)."""
     app, _ = env
     async with _client(app) as c:
         r = await c.get("/api/notes", headers={"x-test-api-token": "1"})
-    assert r.status_code == 403
+    assert r.status_code == 200
+    assert [n["id"] for n in r.json()["notes"]] == ["note-alice"]
 
 
 async def test_auth_disabled_keeps_single_user_mode_working(monkeypatch, tmp_path):
