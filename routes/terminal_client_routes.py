@@ -1141,6 +1141,157 @@ def setup_terminal_client_routes(
             raise HTTPException(409, "Task is already running")
         return {"ok": True, "id": task_id}
 
+    # ---- Memory: the agent's persistent facts about the owner ----
+
+    def _memory_manager():
+        from src.constants import DATA_DIR
+        from src.memory import MemoryManager
+        return MemoryManager(DATA_DIR)
+
+    @router.get("/memory")
+    async def list_memory_terminal(request: Request, limit: int = 500) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_READ_SCOPES)
+        owner = effective_user(request)
+        entries = _memory_manager().load(owner=owner)
+        entries = sorted(entries, key=lambda e: e.get("timestamp", 0), reverse=True)
+        return {"memories": entries[: max(1, min(limit, 2000))]}
+
+    @router.post("/memory")
+    async def add_memory_terminal(request: Request, body: dict) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_WRITE_SCOPES)
+        owner = effective_user(request)
+        text = (body.get("text") or "").strip()
+        if not text:
+            raise HTTPException(400, "text is required")
+        mgr = _memory_manager()
+        entry = mgr.add_entry(
+            text,
+            source=body.get("source") or "user",
+            category=body.get("category") or "fact",
+            owner=owner,
+        )
+        if body.get("session_id"):
+            entry["session_id"] = body["session_id"]
+        mgr.append_entry_record(entry)
+        return {"ok": True, "memory": entry}
+
+    @router.delete("/memory/{memory_id}")
+    async def delete_memory_terminal(request: Request, memory_id: str) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_WRITE_SCOPES)
+        owner = effective_user(request)
+        deleted = _memory_manager().delete_entry(memory_id, owner=owner, match_prefix=True)
+        if not deleted:
+            raise HTTPException(404, "Memory not found")
+        return {"ok": True, "id": memory_id}
+
+    # ---- Search: web search (context + sources) ----
+
+    @router.post("/search")
+    async def search_terminal(request: Request, body: dict) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_READ_SCOPES)
+        from services.search import comprehensive_web_search
+        query = str(body.get("query") or body.get("q") or "").strip()
+        if not query:
+            raise HTTPException(400, "query is required")
+        time_filter = body.get("time_filter") or body.get("freshness")
+        try:
+            context, sources = comprehensive_web_search(
+                query, return_sources=True,
+                time_filter=str(time_filter).strip() if time_filter else None,
+            )
+            return {"context": context, "sources": sources}
+        except Exception as exc:
+            return {"context": "", "sources": [], "error": str(exc)}
+
+    @router.get("/search/providers")
+    async def search_providers_terminal(request: Request) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_READ_SCOPES)
+        from services.search import PROVIDER_INFO
+        return {"providers": [{"id": pid, "label": label}
+                              for pid, (label, *_rest) in PROVIDER_INFO.items() if pid != "disabled"]}
+
+    # ---- Presets: prompt presets a run can reference via preset_id ----
+
+    @router.get("/presets")
+    async def list_presets_terminal(request: Request) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_READ_SCOPES)
+        from src.constants import DATA_DIR
+        from src.preset_manager import PresetManager
+        return {"presets": PresetManager(DATA_DIR).presets}
+
+    # ---- Prefs: per-owner settings (default model, theme, …) ----
+
+    @router.get("/prefs")
+    async def get_prefs_terminal(request: Request) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_READ_SCOPES)
+        from routes.prefs_routes import _load_for_user
+        return {"prefs": _load_for_user(effective_user(request))}
+
+    @router.put("/prefs/{key}")
+    async def set_pref_terminal(request: Request, key: str, body: dict) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_WRITE_SCOPES)
+        from routes.prefs_routes import _load_for_user, _save_for_user
+        owner = effective_user(request)
+        prefs = _load_for_user(owner)
+        prefs[key] = body.get("value")
+        _save_for_user(owner, prefs)
+        return {"key": key, "value": prefs[key]}
+
+    # ---- Skills: what capabilities the agent has available ----
+
+    @router.get("/skills")
+    async def list_skills_terminal(request: Request) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_READ_SCOPES)
+        owner = effective_user(request)
+        from services.memory.skills import SkillsManager
+        from src.constants import DATA_DIR
+        mgr = SkillsManager(DATA_DIR)
+        skills = mgr.load(owner=owner)
+        return {"skills": skills, "count": len(skills)}
+
+    @router.get("/skills/index")
+    async def skills_index_terminal(request: Request) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_READ_SCOPES)
+        owner = effective_user(request)
+        from services.memory.skills import SkillsManager
+        from src.constants import DATA_DIR
+        idx = SkillsManager(DATA_DIR).index_for(owner=owner)
+        return {"index": idx, "count": len(idx)}
+
+    # ---- MCP: connected servers and their tools ----
+
+    @router.get("/mcp/servers")
+    async def mcp_servers_terminal(request: Request) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_READ_SCOPES)
+        import json as _json
+        from core.database import McpServer, SessionLocal
+        from src.tool_execution import get_mcp_manager
+        mgr = get_mcp_manager()
+        db = SessionLocal()
+        try:
+            out = []
+            for srv in db.query(McpServer).all():
+                status = mgr.get_server_status(srv.id) if mgr else {}
+                out.append({
+                    "id": srv.id, "name": srv.name, "transport": srv.transport,
+                    "url": srv.url, "is_enabled": srv.is_enabled,
+                    "status": status.get("status", "disconnected"),
+                    "tool_count": status.get("tool_count", 0),
+                    "error": status.get("error"),
+                })
+            return {"servers": out}
+        finally:
+            db.close()
+
+    @router.get("/mcp/tools")
+    async def mcp_tools_terminal(request: Request) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_READ_SCOPES)
+        from src.tool_execution import get_mcp_manager
+        mgr = get_mcp_manager()
+        if not mgr:
+            return {"tools": []}
+        return {"tools": mgr.get_all_tools()}
+
     @router.get("/models", response_model=ModelsOut)
     async def list_models(request: Request) -> dict[str, Any]:
         require_terminal_scope(request, SESSION_READ_SCOPES)
