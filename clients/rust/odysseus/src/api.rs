@@ -10,7 +10,8 @@ use std::io::{BufRead, BufReader};
 use serde_json::{json, Value};
 
 use crate::model::{
-    Bootstrap, Document, DocumentsList, Event, History, RunStartResponse, SessionsResponse,
+    Bootstrap, Document, DocumentsList, Event, History, NotesList, RunStartResponse,
+    SessionsResponse, TasksList,
 };
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -116,6 +117,14 @@ impl Client {
             .request("PUT", &format!("/api/terminal/documents/{}", doc_id))
             .send_json(json!({ "content": content, "summary": "Edited in Rust GUI" }))?
             .into_json()?)
+    }
+
+    pub fn notes(&self) -> Result<NotesList> {
+        Ok(self.request("GET", "/api/terminal/notes").call()?.into_json()?)
+    }
+
+    pub fn tasks(&self) -> Result<TasksList> {
+        Ok(self.request("GET", "/api/terminal/tasks").call()?.into_json()?)
     }
 
     /// Follow a run's event stream, invoking `on_event` per `ody.event.v1` line

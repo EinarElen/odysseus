@@ -119,3 +119,39 @@ pub struct DocumentsList {
     #[serde(default)]
     pub documents: Vec<Document>,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Note {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub note_type: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NotesList {
+    #[serde(default)]
+    pub notes: Vec<Note>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Task {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub task_type: Option<String>,
+    #[serde(default)]
+    pub last_run: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TasksList {
+    #[serde(default)]
+    pub tasks: Vec<Task>,
+}

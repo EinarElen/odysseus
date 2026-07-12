@@ -8,7 +8,7 @@
 use std::sync::mpsc::{Receiver, Sender};
 
 use crate::api::Client;
-use crate::model::{Document, ModelInfo, SessionSummary};
+use crate::model::{Document, ModelInfo, Note, SessionSummary, Task};
 
 enum Msg {
     Answer(String),
@@ -55,6 +55,10 @@ pub struct App {
     sessions: Vec<SessionSummary>,
     documents: Vec<Document>,
     show_docs: bool,
+    notes: Vec<Note>,
+    notes_loaded: bool,
+    tasks: Vec<Task>,
+    tasks_loaded: bool,
     messages: Vec<ChatMessage>,
     doc: Option<DocState>,
     input: String,
@@ -77,6 +81,10 @@ impl App {
             sessions: Vec::new(),
             documents: Vec::new(),
             show_docs: false,
+            notes: Vec::new(),
+            notes_loaded: false,
+            tasks: Vec::new(),
+            tasks_loaded: false,
             messages: Vec::new(),
             doc: None,
             input: String::new(),
@@ -374,32 +382,77 @@ impl eframe::App for App {
             });
 
             ui.separator();
-            ui.horizontal(|ui| {
-                ui.strong("Documents");
-                if ui.small_button("↻").clicked() {
+            egui::CollapsingHeader::new("Documents").show(ui, |ui| {
+                if !self.show_docs {
                     if let Ok(list) = self.client.documents() {
                         self.documents = list.documents;
-                        self.show_docs = true;
+                    }
+                    self.show_docs = true;
+                }
+                if ui.small_button("↻ refresh").clicked() {
+                    if let Ok(list) = self.client.documents() {
+                        self.documents = list.documents;
+                    }
+                }
+                let picks: Vec<(String, String)> = self
+                    .documents
+                    .iter()
+                    .map(|d| {
+                        let t = d.title.clone().unwrap_or_else(|| d.id.clone());
+                        (d.id.clone(), format!("{}  v{}", t, d.version_count.unwrap_or(0)))
+                    })
+                    .collect();
+                for (id, label) in picks {
+                    if ui.selectable_label(false, label).clicked() {
+                        self.open_document(&id);
                     }
                 }
             });
-            if self.show_docs {
-                egui::ScrollArea::vertical().id_source("docs").max_height(220.0).show(ui, |ui| {
-                    let picks: Vec<(String, String)> = self
-                        .documents
-                        .iter()
-                        .map(|d| {
-                            let t = d.title.clone().unwrap_or_else(|| d.id.clone());
-                            (d.id.clone(), format!("{}  v{}", t, d.version_count.unwrap_or(0)))
-                        })
-                        .collect();
-                    for (id, label) in picks {
-                        if ui.selectable_label(false, label).clicked() {
-                            self.open_document(&id);
+
+            egui::CollapsingHeader::new("Tasks").show(ui, |ui| {
+                if !self.tasks_loaded {
+                    if let Ok(list) = self.client.tasks() {
+                        self.tasks = list.tasks;
+                    }
+                    self.tasks_loaded = true;
+                }
+                if self.tasks.is_empty() {
+                    ui.weak("no tasks");
+                }
+                for t in &self.tasks {
+                    let name = t.name.clone().unwrap_or_else(|| "(unnamed)".into());
+                    let status = t.status.clone().unwrap_or_default();
+                    ui.label(egui::RichText::new(format!("• {name}")).small());
+                    ui.label(
+                        egui::RichText::new(format!("   {} · {}", t.task_type.clone().unwrap_or_default(), status))
+                            .weak()
+                            .small(),
+                    );
+                }
+            });
+
+            egui::CollapsingHeader::new("Notes").show(ui, |ui| {
+                if !self.notes_loaded {
+                    if let Ok(list) = self.client.notes() {
+                        self.notes = list.notes;
+                    }
+                    self.notes_loaded = true;
+                }
+                if self.notes.is_empty() {
+                    ui.weak("no notes");
+                }
+                for n in &self.notes {
+                    let title = n.title.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| "(untitled)".into());
+                    let pin = if n.pinned { "📌 " } else { "" };
+                    ui.label(egui::RichText::new(format!("{pin}{title}")).small().strong());
+                    if let Some(c) = &n.content {
+                        if !c.is_empty() {
+                            let preview: String = c.chars().take(80).collect();
+                            ui.label(egui::RichText::new(preview).weak().small());
                         }
                     }
-                });
-            }
+                }
+            });
         });
 
         // Right pane: the live/opened document (editable, save-back).
