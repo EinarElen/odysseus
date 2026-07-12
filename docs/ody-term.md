@@ -184,7 +184,9 @@ ody-term run attach run_abc --cursor 42 --format=jsonl
 ody-term inspect events --cursor 42 --format=jsonl
 ```
 
-The cursor is an event sequence continuation point. Events with `seq <= cursor` are skipped.
+The cursor is an event sequence continuation point. Events with `seq <= cursor` are skipped. Sequence values are monotonic for a Run and may be sparse: quiet periods emit normalized `heartbeat` envelopes, while durable storage coalesces older heartbeats to bound persistence. Always resume from the returned cursor rather than assuming consecutive sequence numbers.
+
+With the default human and `grug` text profiles, `run attach` renders concise activity: assistant deltas, waiting heartbeats, lifecycle changes, and tool names/statuses. Full tool payloads are intentionally not printed there. This does not change `--format jsonl`, which remains a lossless normalized Event Envelope stream, nor `raw`/`debug`, which retain diagnostic source-native data.
 
 ## Raw And Debug Capture
 
