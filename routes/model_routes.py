@@ -1350,6 +1350,22 @@ def setup_model_routes(model_discovery):
                         ok, info = _should_refresh_endpoint(ep, now, force=force)
                         if not ok:
                             continue
+                        if _safe_detect_provider(info["base"]) == "chatgpt-subscription":
+                            auth_id = getattr(ep, "provider_auth_id", None)
+                            if not auth_id:
+                                continue
+                            try:
+                                from src.chatgpt_subscription import resolve_runtime_credentials
+                                creds = resolve_runtime_credentials(
+                                    auth_id,
+                                    getattr(ep, "owner", None),
+                                    force_refresh=force,
+                                )
+                                info["api_key"] = creds.get("api_key") or ""
+                                info["key"] = _refresh_key(info["base"], info["api_key"])
+                            except Exception as e:
+                                logger.warning("ChatGPT Subscription model refresh auth failed for endpoint %s: %s", info["id"], e)
+                                continue
                         groups.setdefault(info["key"], {
                             "base": info["base"],
                             "api_key": info["api_key"],
@@ -1498,9 +1514,7 @@ def setup_model_routes(model_discovery):
         # "see everything" by _fetch_models.
         try:
             if getattr(request.state, "api_token", False):
-                scopes = set(getattr(request.state, "api_token_scopes", []) or [])
-                if "chat" not in scopes:
-                    raise HTTPException(403, "API token is not scoped for chat")
+                # Dev/wild-west: any owner-attributed token may list models.
                 if not getattr(request.state, "api_token_owner", None):
                     raise HTTPException(403, "API token has no owner")
             owner = effective_user(request) or ""

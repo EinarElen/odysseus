@@ -40,7 +40,9 @@ class _FakeResponse:
         self.headers: dict[str, str] = {}
 
 
-async def _dispatch(path: str) -> _FakeResponse:
+async def _dispatch(path: str, monkeypatch: pytest.MonkeyPatch | None = None) -> _FakeResponse:
+    if monkeypatch is not None:
+        monkeypatch.delenv("ODYSSEUS_DEV_MODE", raising=False)
     mw = SecurityHeadersMiddleware(MagicMock())
     resp = _FakeResponse()
     call_next = AsyncMock(return_value=resp)
@@ -53,54 +55,54 @@ async def _dispatch(path: str) -> _FakeResponse:
 # ---------------------------------------------------------------------------
 
 
-async def test_doc_render_pdf_same_origin_framing():
+async def test_doc_render_pdf_same_origin_framing(monkeypatch):
     """Assert that /api/document/{id}/render-pdf allows same-origin framing."""
-    resp = await _dispatch("/api/document/abc-123/render-pdf")
+    resp = await _dispatch("/api/document/abc-123/render-pdf", monkeypatch)
 
     assert resp.headers.get("X-Frame-Options") == "SAMEORIGIN"
     csp = resp.headers.get("Content-Security-Policy", "")
     assert "frame-ancestors 'self'" in csp
 
 
-async def test_doc_render_pdf_keeps_baseline_security_headers():
+async def test_doc_render_pdf_keeps_baseline_security_headers(monkeypatch):
     """Assert that baseline security headers are preserved on the render-pdf path."""
-    resp = await _dispatch("/api/document/abc-123/render-pdf")
+    resp = await _dispatch("/api/document/abc-123/render-pdf", monkeypatch)
 
     assert resp.headers.get("X-Content-Type-Options") == "nosniff"
     assert resp.headers.get("Referrer-Policy") == "no-referrer"
 
 
-async def test_doc_export_pdf_still_frame_blocked():
+async def test_doc_export_pdf_still_frame_blocked(monkeypatch):
     """Assert that the export-pdf path remains frame-blocked."""
-    resp = await _dispatch("/api/document/abc-123/export-pdf")
+    resp = await _dispatch("/api/document/abc-123/export-pdf", monkeypatch)
 
     assert resp.headers.get("X-Frame-Options") == "DENY"
     assert "frame-ancestors 'none'" in resp.headers.get("Content-Security-Policy", "")
 
 
-async def test_doc_path_matching_is_precise():
+async def test_doc_path_matching_is_precise(monkeypatch):
     """Assert that similar paths are not exempted from framing restrictions."""
     for path in [
         "/api/document/abc-123/render-pdfx",
         "/api/document/abc-123/render-pdf/foo",
         "/api/documents/abc-123/render-pdf",
     ]:
-        resp = await _dispatch(path)
+        resp = await _dispatch(path, monkeypatch)
         assert resp.headers.get("X-Frame-Options") == "DENY"
 
 
-async def test_tool_render_exemption_preserved():
+async def test_tool_render_exemption_preserved(monkeypatch):
     """Assert that the tool-render path remains exempt from framing headers."""
-    resp = await _dispatch("/api/tools/foo/bar/render")
+    resp = await _dispatch("/api/tools/foo/bar/render", monkeypatch)
 
     assert "X-Frame-Options" not in resp.headers
     csp = resp.headers.get("Content-Security-Policy", "")
     assert "frame-ancestors" not in csp
 
 
-async def test_unrelated_paths_keep_strict_policy():
+async def test_unrelated_paths_keep_strict_policy(monkeypatch):
     """Assert that other paths keep the strict framing policy."""
-    resp = await _dispatch("/api/chat")
+    resp = await _dispatch("/api/chat", monkeypatch)
 
     assert resp.headers.get("X-Frame-Options") == "DENY"
     csp = resp.headers.get("Content-Security-Policy", "")

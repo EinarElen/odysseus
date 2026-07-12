@@ -20,7 +20,9 @@ def _client():
     return TestClient(app)
 
 
-def test_default_routes_remain_unframeable():
+def test_default_routes_remain_unframeable(monkeypatch):
+    monkeypatch.delenv("ODYSSEUS_DEV_MODE", raising=False)
+
     response = _client().get("/plain")
 
     assert response.headers["X-Frame-Options"] == "DENY"
@@ -37,7 +39,9 @@ def test_dev_mode_allows_embedded_preview(monkeypatch):
     assert "script-src" in response.headers["Content-Security-Policy"]
 
 
-def test_document_pdf_preview_can_be_framed_by_same_origin():
+def test_document_pdf_preview_can_be_framed_by_same_origin(monkeypatch):
+    monkeypatch.delenv("ODYSSEUS_DEV_MODE", raising=False)
+
     response = _client().get("/api/document/doc-123/render-pdf")
 
     assert response.headers["X-Frame-Options"] == "SAMEORIGIN"

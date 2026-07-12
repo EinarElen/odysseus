@@ -92,6 +92,9 @@ def strict_json_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(node, dict):
             return node
         out: Dict[str, Any] = {k: convert(v) for k, v in node.items() if k not in {"required", "additionalProperties"}}
+        for keyword in ("anyOf", "oneOf", "allOf"):
+            if isinstance(out.get(keyword), list):
+                out[keyword] = [convert(v) for v in out[keyword]]
         node_type = out.get("type")
         if node_type == "object" or "properties" in out:
             props = out.get("properties")
@@ -137,4 +140,11 @@ def _nullable_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
         else:
             out["type"] = [typ, "null"]
         return out
-    return {"anyOf": [schema, {"type": "null"}]}
+    return {"anyOf": [
+        {"type": "string"},
+        {"type": "number"},
+        {"type": "boolean"},
+        {"type": "object", "properties": {}, "additionalProperties": False},
+        {"type": "array", "items": {"type": "string"}},
+        {"type": "null"},
+    ]}

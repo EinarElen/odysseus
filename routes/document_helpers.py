@@ -5,6 +5,8 @@
 import logging
 import os
 import re
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import HTTPException, Request
@@ -16,6 +18,10 @@ from src.auth_helpers import _auth_disabled
 from src.upload_handler import UploadHandler
 
 logger = logging.getLogger(__name__)
+
+# Consecutive user edits within this window coalesce into one version instead
+# of creating a new one each keystroke-save.
+VERSION_COALESCE_SECONDS = 60
 
 
 # ---- Request schemas ----
@@ -69,6 +75,117 @@ def _version_to_dict(v: DocumentVersion) -> Dict[str, Any]:
         "source": v.source,
         "created_at": v.created_at.isoformat() if v.created_at else None,
     }
+
+
+def coerce_document_content(doc: Document, content: str) -> str:
+    """Normalize incoming content for the document, applying email-draft
+    header/body coercion when the document is (or looks like) an email. Sets
+    doc.language = "email" as a side effect in that case. Shared by the web
+    and Terminal Client update paths so both persist identically."""
+    from src.agent_tools.document_tools import (
+        _coerce_email_document_content,
+        _looks_like_email_document,
+    )
+
+    is_email = (
+        (doc.language or "").lower() == "email"
+        or _looks_like_email_document(doc.current_content or "", doc.title or "")
+        or _looks_like_email_document(content or "", doc.title or "")
+    )
+    if is_email:
+        doc.language = "email"
+        return _coerce_email_document_content(doc.current_content or "", content)
+    return content
+
+
+def apply_document_update(
+    db,
+    doc: Document,
+    *,
+    content: str,
+    summary: Optional[str] = None,
+    force_version: bool = False,
+) -> Dict[str, Any]:
+    """Persist a new content revision with version history + coalescing, then
+    return the serialized document. The single implementation used by both the
+    web document routes and the Terminal Client document endpoints.
+
+    `content` should already be coerced via :func:`coerce_document_content`.
+    Callers remain responsible for auth/ownership and any upload-marker checks.
+    """
+    if doc.current_content == content and not force_version:
+        return _doc_to_dict(doc)
+
+    latest_ver = (
+        db.query(DocumentVersion)
+        .filter(DocumentVersion.document_id == doc.id)
+        .order_by(DocumentVersion.version_number.desc())
+        .first()
+    )
+    now = datetime.now(timezone.utc)
+    coalesced = False
+    if latest_ver and latest_ver.source == "user" and not force_version:
+        ver_time = latest_ver.created_at
+        if ver_time.tzinfo is None:
+            ver_time = ver_time.replace(tzinfo=timezone.utc)
+        if (now - ver_time).total_seconds() < VERSION_COALESCE_SECONDS:
+            latest_ver.content = content
+            latest_ver.created_at = now
+            if summary:
+                latest_ver.summary = summary
+            coalesced = True
+
+    if not coalesced:
+        new_ver = (doc.version_count or 1) + 1
+        db.add(DocumentVersion(
+            id=str(uuid.uuid4()),
+            document_id=doc.id,
+            version_number=new_ver,
+            content=content,
+            summary=summary or "Manual edit",
+            source="user",
+        ))
+        doc.version_count = new_ver
+
+    doc.current_content = content
+    db.commit()
+    db.refresh(doc)
+    return _doc_to_dict(doc)
+
+
+def create_document_record(
+    db,
+    *,
+    owner: Optional[str],
+    title: str,
+    content: str,
+    language: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a document with its initial version. Shared create path."""
+    doc_id = str(uuid.uuid4())
+    doc = Document(
+        id=doc_id,
+        session_id=session_id,
+        owner=owner,
+        title=title or "Untitled",
+        language=language,
+        current_content=content or "",
+        version_count=1,
+        is_active=True,
+    )
+    db.add(doc)
+    db.add(DocumentVersion(
+        id=str(uuid.uuid4()),
+        document_id=doc_id,
+        version_number=1,
+        content=content or "",
+        summary="Created",
+        source="user",
+    ))
+    db.commit()
+    db.refresh(doc)
+    return _doc_to_dict(doc)
 
 
 def _verify_doc_owner(db, doc: Document, user: str):

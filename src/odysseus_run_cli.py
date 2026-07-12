@@ -1118,6 +1118,39 @@ def launch_launcher(args: argparse.Namespace) -> int:
     return run_plan(plan_launch_launcher(args), dry_run=args.dry_run)
 
 
+def plan_launch_nvim(args: argparse.Namespace) -> CommandPlan:
+    # Match ody_term.py: reuse the shared constants when importable, else the
+    # same documented defaults (the CLI runtime doesn't have src on the path).
+    try:
+        from src.constants import ODY_TERM_DEFAULT_HOST, ODY_TERM_DEFAULT_PORT
+    except ImportError:
+        ODY_TERM_DEFAULT_HOST, ODY_TERM_DEFAULT_PORT = "127.0.0.1", "7860"
+
+    host = getattr(args, "host", "") or ODY_TERM_DEFAULT_HOST
+    # Resolve the URL to connect to (not a port to bind), reusing the same
+    # default host/port the ody-term client uses.
+    port = getattr(args, "port", None) or int(ODY_TERM_DEFAULT_PORT)
+    url = getattr(args, "url", "") or f"http://{host}:{port}"
+    plugin_dir = REPO_ROOT / "clients" / "nvim" / "odysseus.nvim"
+    argv: list[str] = ["nvim"]
+    if getattr(args, "clean", False):
+        argv.append("--clean")
+    argv.extend([
+        "--cmd", f"set runtimepath^={plugin_dir}",
+        "-c", "runtime plugin/odysseus.lua",
+        "-c", f"lua require('odysseus').setup({{ base_url = '{url}' }})",
+        "-c", "Odysseus",
+    ])
+    return CommandPlan(f"Launch Neovim client ({url})", tuple(argv))
+
+
+def launch_nvim(args: argparse.Namespace) -> int:
+    if shutil.which("nvim") is None and not args.dry_run:
+        print("nvim is not on PATH. Install Neovim 0.10+ to launch the client.", file=sys.stderr)
+        return 2
+    return run_plan(plan_launch_nvim(args), dry_run=args.dry_run)
+
+
 def launch_candidates(args: argparse.Namespace) -> list[LaunchCandidate]:
     uv_ready = shutil.which("uv") is not None and REQUIREMENTS.exists()
     docker_ready = shutil.which("docker") is not None and (REPO_ROOT / "docker-compose.yml").exists()
@@ -1654,6 +1687,14 @@ def build_parser() -> argparse.ArgumentParser:
     windows_parser = launch_subparsers.add_parser("windows", help="Run the native Windows launcher.")
     add_native_launch_options(windows_parser)
     windows_parser.set_defaults(func=launch_windows)
+
+    nvim_parser = launch_subparsers.add_parser("nvim", help="Launch the Neovim client (odysseus.nvim).")
+    nvim_parser.add_argument("--url", default="", help="Server base URL. Overrides --host/--port.")
+    nvim_parser.add_argument("--host", default="127.0.0.1", help="Server host.")
+    nvim_parser.add_argument("--port", type=int, default=None, help="Server port. Defaults to 7860 on macOS, 7000 elsewhere.")
+    nvim_parser.add_argument("--clean", action="store_true", help="Launch nvim with --clean (ignore your Neovim config).")
+    nvim_parser.add_argument("--dry-run", action="store_true", help="Print command without executing it.")
+    nvim_parser.set_defaults(func=launch_nvim)
 
     docker_launch_parser = launch_subparsers.add_parser("docker", help="Run Docker Compose production stack.")
     docker_launch_parser.add_argument("--dry-run", action="store_true", help="Print command without executing it.")

@@ -3128,6 +3128,25 @@ def _event_payload(response: CommandResponse) -> list[dict[str, object]] | None:
     return [cast(dict[str, object], event) for event in events if isinstance(event, dict)]
 
 
+def _render_human_event(event: dict[str, object], *, grug: bool) -> str:
+    """Render a Run envelope without exposing raw or full tool-result payloads."""
+    kind = str(event.get("kind") or "event")
+    summary = str(event.get("summary") or "")
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    if kind == "message.delta":
+        delta = payload.get("delta") or payload.get("content") or payload.get("text") or summary
+        text = str(delta)
+        return text if grug else f"assistant: {text}"
+    if kind == "heartbeat":
+        return "waiting…" if grug else "[progress] waiting for model or tool activity…"
+    if kind == "run.status":
+        status = payload.get("status") or ("completed" if payload.get("done") else summary or "updated")
+        return f"done {status}" if grug else f"[run] {status}"
+    if kind in {"tool_start", "tool.progress", "tool_progress", "tool_end", "tool_result", "tool_error"}:
+        return summary or kind.replace("_", " ")
+    return summary or f"{event.get('source', 'run')}.{kind}"
+
+
 def render(response: CommandResponse, request: CommandRequest, stdout: TextIO) -> None:
     payload = _response_payload(response, request)
     output_format = request.globals.format
@@ -3172,26 +3191,21 @@ def render(response: CommandResponse, request: CommandRequest, stdout: TextIO) -
             if request.output_profile == "clanker":
                 _write_json(event, stdout)
             else:
-                data = event.get("data") if isinstance(event.get("data"), dict) else {}
-                run = cast(dict[str, object], data)
-                if request.output_profile == "grug":
-                    stdout.write(f"{run.get('status')} {run.get('kind')} {run.get('id')}\n")
-                else:
-                    stdout.write(f"[{run.get('status')}] {run.get('kind')} {run.get('id')} · {run.get('input_tokens', 0)} in / {run.get('output_tokens', 0)} out\n")
+                stdout.write(_render_human_event(event, grug=request.output_profile == "grug") + "\n")
             stdout.flush()
     elif request.output_profile == "clanker":
         _write_json(payload, stdout)
     elif request.output_profile == "grug":
         if events is not None:
             for event in events:
-                stdout.write(f"{event.get('seq')} {event.get('level')} {event.get('source')}.{event.get('kind')}: {event.get('summary', '')}\n")
+                stdout.write(_render_human_event(event, grug=True) + "\n")
         else:
             status = "ok" if response.ok else "no"
             stdout.write(f"{status} {' '.join(response.command)}: {response.message}\n")
     else:
         if events is not None:
             for event in events:
-                stdout.write(f"[{event.get('level')}] {event.get('source')}.{event.get('kind')} #{event.get('seq')}: {event.get('summary', '')}\n")
+                stdout.write(_render_human_event(event, grug=False) + "\n")
         elif response.command == ["tui"]:
             stdout.write(response.message + "\n")
         else:

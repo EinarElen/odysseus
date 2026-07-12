@@ -440,10 +440,14 @@ def build_user_content(
             try:
                 with open(path, "rb") as image_file:
                     encoded_string = base64.b64encode(image_file.read()).decode("utf-8")
-                image_format = ext[1:]
+                image_mime = mime if isinstance(mime, str) and mime.startswith("image/") else ""
+                if not image_mime:
+                    image_mime = mimetypes.guess_type(display_name)[0] or "image/png"
+                if image_mime == "image/jpg":
+                    image_mime = "image/jpeg"
                 content.append({
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/{image_format};base64,{encoded_string}"},
+                    "image_url": {"url": f"data:{image_mime};base64,{encoded_string}"},
                 })
             except Exception as e:
                 logger.error(f"Failed to encode image {fid}: {e}")

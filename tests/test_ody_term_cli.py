@@ -1333,6 +1333,40 @@ def test_chat_run_status_attach_stop_by_session_use_terminal_api(
     ]
 
 
+def test_run_attach_text_profiles_summarize_tool_output_without_changing_jsonl() -> None:
+    event = {
+        "schema": "ody.event.v1",
+        "seq": 7,
+        "source": "agent",
+        "kind": "tool_result",
+        "summary": "bash completed",
+        "payload": {"tool": "bash", "output": "secret full output"},
+        "raw": {"body": "source-native output"},
+    }
+    response = ody_term.CommandResponse(
+        ok=True,
+        command=["run", "attach"],
+        message="attached",
+        data={"events": [event]},
+    )
+
+    human = io.StringIO()
+    ody_term.render(response, ody_term.CommandRequest("run", "attach"), human)
+    grug = io.StringIO()
+    ody_term.render(response, ody_term.CommandRequest("run", "attach", output_profile="grug"), grug)
+    jsonl = io.StringIO()
+    ody_term.render(
+        response,
+        ody_term.CommandRequest("run", "attach", globals=ody_term.GlobalOptions(format="jsonl")),
+        jsonl,
+    )
+
+    assert human.getvalue() == "bash completed\n"
+    assert grug.getvalue() == "bash completed\n"
+    assert "secret full output" not in human.getvalue() + grug.getvalue()
+    assert json.loads(jsonl.getvalue()) == event
+
+
 def test_run_attach_jsonl_follows_live_event_stream(
     isolated_term_state: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

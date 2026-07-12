@@ -1409,13 +1409,21 @@ def _route_request():
     )
 
 
-def test_api_models_rejects_api_token_without_chat_scope(monkeypatch):
+def test_api_models_allows_api_token_without_chat_scope(monkeypatch):
+    # The chat-scope gate on /api/models was removed so a token-based frontend
+    # (which need not hold the chat scope) can list the owner's models. Access
+    # stays owner-scoped; it is not gated on a specific scope.
+    rows = [
+        _route_ep("alice", "http://alice.example/v1", cached_models=["alice-model"], owner="alice"),
+        _route_ep("bob", "http://bob.example/v1", cached_models=["bob-model"], owner="bob"),
+    ]
+    db = _RouteDb(rows)
     router = model_routes.setup_model_routes(model_discovery=None)
 
-    def fail_session():
-        raise AssertionError("model DB should not be queried without chat scope")
-
-    monkeypatch.setattr(model_routes, "SessionLocal", fail_session)
+    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(threading, "Thread", _NoopThread)
+    monkeypatch.setattr(model_routes, "build_chat_url", lambda base: f"{base.rstrip('/')}/chat/completions")
 
     request = SimpleNamespace(
         state=SimpleNamespace(
@@ -1431,11 +1439,9 @@ def test_api_models_rejects_api_token_without_chat_scope(monkeypatch):
         ),
     )
 
-    with pytest.raises(HTTPException) as exc:
-        _route_endpoint(router, "/api/models")(request)
+    result = _route_endpoint(router, "/api/models")(request)
 
-    assert exc.value.status_code == 403
-    assert "chat" in str(exc.value.detail)
+    assert [item["endpoint_name"] for item in result["items"]] == ["alice"]
 
 
 def test_api_models_scopes_api_token_to_token_owner(monkeypatch):
@@ -1538,6 +1544,51 @@ async def test_probe_local_skips_tailscale_proxy_endpoint(monkeypatch):
 
     assert set(result) == {"local"}
     assert pinged == ["http://127.0.0.1:8000/v1"]
+
+
+def test_background_refresh_chatgpt_subscription_uses_provider_auth_token(monkeypatch):
+    ep = _route_ep(
+        "chatgpt",
+        "https://chatgpt.com/backend-api/codex",
+        cached_models=["gpt-old"],
+        endpoint_kind="api",
+        refresh_mode="manual",
+        owner="alice",
+    )
+    ep.provider_auth_id = "auth1"
+    db = _RouteDb([ep])
+    router = model_routes.setup_model_routes(model_discovery=None)
+
+    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "_auth_disabled", lambda: True)
+    monkeypatch.setattr(model_routes, "build_chat_url", lambda base: f"{base}/responses")
+
+    from src import chatgpt_subscription
+
+    resolved = []
+    monkeypatch.setattr(
+        chatgpt_subscription,
+        "resolve_runtime_credentials",
+        lambda auth_id, owner=None, force_refresh=False: resolved.append((auth_id, owner, force_refresh)) or {"api_key": "ACCESS"},
+    )
+    calls = []
+    probe_done = threading.Event()
+
+    def fake_probe(base_url, api_key=None, timeout=2):
+        calls.append((base_url, api_key))
+        probe_done.set()
+        return ["gpt-5.6"]
+
+    monkeypatch.setattr(model_routes, "_probe_endpoint", fake_probe)
+
+    result = _route_endpoint(router, "/api/models")(_route_request(), refresh=True)
+
+    assert result["items"][0]["models"] == ["gpt-old"]
+    assert probe_done.wait(2)
+    assert _wait_for(lambda: json.loads(ep.cached_models) == ["gpt-5.6"])
+    assert resolved == [("auth1", "alice", True)]
+    assert calls == [("https://chatgpt.com/backend-api/codex", "ACCESS")]
 
 
 def test_background_refresh_deduplicates_same_base_url(monkeypatch):

@@ -72,6 +72,7 @@ from routes.document_helpers import (
     _verify_doc_owner, _owner_session_filter,
     _slug, _resolve_user_upload_path, _assert_pdf_marker_upload_owned, _derive_title,
     _PDF_RENDER_SCALE,
+    coerce_document_content, apply_document_update,
 )
 
 
@@ -620,17 +621,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 raise HTTPException(404, "Document not found")
             _verify_doc_owner(db, doc, user)
 
-            incoming_content = req.content
-            from src.agent_tools.document_tools import _coerce_email_document_content, _looks_like_email_document
-            is_email_doc = (
-                (doc.language or "").lower() == "email"
-                or _looks_like_email_document(doc.current_content or "", doc.title or "")
-                or _looks_like_email_document(req.content or "", doc.title or "")
-            )
-            if is_email_doc:
-                incoming_content = _coerce_email_document_content(doc.current_content or "", req.content)
-                doc.language = "email"
-
+            incoming_content = coerce_document_content(doc, req.content)
             # Skip if content is identical unless the caller explicitly wants
             # a checkpoint version from the current editor state.
             if doc.current_content == incoming_content and not req.force_version:
@@ -638,43 +629,12 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
 
             _assert_pdf_marker_upload_owned(request, incoming_content, user, upload_handler)
 
-            # Check if we can coalesce with the latest version
-            latest_ver = db.query(DocumentVersion).filter(
-                DocumentVersion.document_id == doc_id,
-            ).order_by(DocumentVersion.version_number.desc()).first()
-
-            now = datetime.now(timezone.utc)
-            coalesced = False
-            if latest_ver and latest_ver.source == "user" and not req.force_version:
-                ver_time = latest_ver.created_at
-                if ver_time.tzinfo is None:
-                    ver_time = ver_time.replace(tzinfo=timezone.utc)
-                age = (now - ver_time).total_seconds()
-                if age < VERSION_COALESCE_SECONDS:
-                    # Update the existing version in-place
-                    latest_ver.content = incoming_content
-                    latest_ver.created_at = now
-                    if req.summary:
-                        latest_ver.summary = req.summary
-                    coalesced = True
-
-            if not coalesced:
-                new_ver = doc.version_count + 1
-                ver = DocumentVersion(
-                    id=str(uuid.uuid4()),
-                    document_id=doc_id,
-                    version_number=new_ver,
-                    content=incoming_content,
-                    summary=req.summary or "Manual edit",
-                    source="user",
-                )
-                doc.version_count = new_ver
-                db.add(ver)
-
-            doc.current_content = incoming_content
-            db.commit()
-            db.refresh(doc)
-            return _doc_to_dict(doc)
+            return apply_document_update(
+                db, doc,
+                content=incoming_content,
+                summary=req.summary,
+                force_version=req.force_version,
+            )
         except HTTPException:
             raise
         except Exception as e:
