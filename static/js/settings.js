@@ -17,6 +17,13 @@ let _authPolicy = { password_min_length: 8 };
 
 function el(id) { return document.getElementById(id); }
 function esc(s) { return uiModule.esc(s); }
+function renderScopePicker(scopes, selectedSet, cbClass) {
+  return scopes.map(scope => `
+      <label class="uf-scope-row">
+        <input type="checkbox" class="${cbClass} uf-scope-cb" data-scope="${esc(scope)}" ${selectedSet.has(scope) ? 'checked' : ''}>
+        <span class="uf-scope-label">${esc(scope)}</span>
+      </label>`).join('');
+}
 function safeRasterDataUrl(raw) {
   const value = String(raw || '').trim();
   return /^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=\s]+$/i.test(value) ? value : '';
@@ -3122,13 +3129,6 @@ async function initEmailAccountsSettings() {
   if (!listEl || !addBtn || !formEl) return;
 
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-
-  // Scope checkbox list, shared by the new-token and edit-token forms.
-  const renderScopePicker = (scopes, selectedSet, cbClass) => scopes.map(s => `
-      <label class="uf-scope-row">
-        <input type="checkbox" class="${cbClass} uf-scope-cb" data-scope="${esc(s)}" ${selectedSet.has(s) ? 'checked' : ''}>
-        <span class="uf-scope-label">${esc(s)}</span>
-      </label>`).join('');
 
   async function fetchAccounts() {
     const r = await fetch('/api/email/accounts', { credentials: 'same-origin' });

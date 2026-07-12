@@ -110,3 +110,13 @@ def test_terminal_settings_wiring_escapes_text() -> None:
     assert ">${item.name} " not in source
     assert "clearTerminalSecrets(modalEl)" in source
     assert "const command = el('uf-terminal-command')?.textContent || '';" in source
+
+
+def test_terminal_scope_picker_is_visible_to_integrations_form() -> None:
+    source = SETTINGS_JS.read_text(encoding="utf-8")
+
+    helper = source.index("function renderScopePicker(")
+    email_initializer = source.index("async function initEmailAccountsSettings()")
+    terminal_form = source.index("async function showTerminalForm(editId)")
+
+    assert helper < email_initializer < terminal_form
