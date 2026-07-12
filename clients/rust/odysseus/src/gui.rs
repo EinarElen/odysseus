@@ -7,6 +7,8 @@
 
 use std::sync::mpsc::{Receiver, Sender};
 
+use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
+
 use crate::api::Client;
 use crate::model::{Document, ModelInfo, Note, SessionSummary, Task};
 use crate::theme;
@@ -82,6 +84,7 @@ pub struct App {
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     status: String,
+    md_cache: CommonMarkCache,
 }
 
 impl App {
@@ -112,6 +115,7 @@ impl App {
             tx,
             rx,
             status: String::new(),
+            md_cache: CommonMarkCache::default(),
         };
         match app.client.bootstrap() {
             Ok(b) => {
@@ -681,11 +685,26 @@ impl eframe::App for App {
                     ui.add_space(4.0);
                     ui.separator();
                     egui::ScrollArea::vertical().id_source("docbody").show(ui, |ui| {
+                        // Syntax-highlight the editor by the document's language.
+                        let lang = syntect_lang(&d.language);
+                        let theme = egui_extras::syntax_highlighting::CodeTheme::dark(13.5);
+                        let mut layouter = |ui: &egui::Ui, text: &str, wrap_width: f32| {
+                            let mut job = egui_extras::syntax_highlighting::highlight(
+                                ui.ctx(),
+                                ui.style(),
+                                &theme,
+                                text,
+                                lang,
+                            );
+                            job.wrap.max_width = wrap_width;
+                            ui.fonts(|f| f.layout_job(job))
+                        };
                         let resp = ui.add(
                             egui::TextEdit::multiline(&mut d.content)
                                 .desired_width(f32::INFINITY)
                                 .desired_rows(30)
-                                .code_editor(),
+                                .code_editor()
+                                .layouter(&mut layouter),
                         );
                         if resp.changed() {
                             d.dirty = true;
@@ -739,13 +758,15 @@ impl eframe::App for App {
                 });
                 return;
             }
+            let busy = self.busy;
+            let messages = &self.messages;
+            let cache = &mut self.md_cache;
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
-                    let busy = self.busy;
-                    for msg in &self.messages {
-                        render_bubble(ui, msg, busy);
+                    for msg in messages {
+                        render_bubble(ui, msg, cache, busy);
                         ui.add_space(10.0);
                     }
                 });
@@ -753,9 +774,33 @@ impl eframe::App for App {
     }
 }
 
+/// Map a document `language` label to the token egui_extras/syntect matches on
+/// (a file extension). Falls back to markdown, which most docs are.
+fn syntect_lang(language: &str) -> &'static str {
+    match language.trim().to_lowercase().as_str() {
+        "python" | "py" => "py",
+        "rust" | "rs" => "rs",
+        "javascript" | "js" | "node" => "js",
+        "typescript" | "ts" => "ts",
+        "json" => "json",
+        "yaml" | "yml" => "yaml",
+        "toml" => "toml",
+        "html" => "html",
+        "css" => "css",
+        "bash" | "sh" | "shell" | "zsh" => "sh",
+        "c" => "c",
+        "cpp" | "c++" | "cxx" => "cpp",
+        "go" => "go",
+        "sql" => "sql",
+        "xml" => "xml",
+        "" | "markdown" | "md" | "text" | "txt" => "md",
+        _ => "md",
+    }
+}
+
 /// One chat bubble in the web app's style: user right + tail bottom-right,
 /// assistant left + tail bottom-left, colored role dot, teal-bordered panel.
-fn render_bubble(ui: &mut egui::Ui, msg: &ChatMessage, busy: bool) {
+fn render_bubble(ui: &mut egui::Ui, msg: &ChatMessage, cache: &mut CommonMarkCache, busy: bool) {
     let user = msg.role == Role::User;
     let (who, dot, fill) = if user {
         ("you", theme::FG, theme::USER_BUBBLE)
@@ -794,8 +839,12 @@ fn render_bubble(ui: &mut egui::Ui, msg: &ChatMessage, busy: bool) {
             }
             if msg.text.trim().is_empty() && !user && busy {
                 ui.label(egui::RichText::new("▍").color(theme::MUTED));
-            } else {
+            } else if user {
+                // User input is shown verbatim (no markdown surprises).
                 ui.label(egui::RichText::new(&msg.text).color(theme::FG));
+            } else {
+                // Assistant text is markdown, like the web app.
+                CommonMarkViewer::new().show(ui, cache, &msg.text);
             }
         });
     });

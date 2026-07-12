@@ -1,0 +1,18 @@
+[package]
+name = "odysseus"
+version = "0.1.0"
+edition = "2021"
+description = "Native Rust GUI client for Odysseus (Terminal Client API)"
+
+[[bin]]
+name = "odysseus"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.29"
+egui = "0.29"
+egui_commonmark = "0.18"
+egui_extras = { version = "0.29", features = ["syntect"] }
+ureq = { version = "2", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
