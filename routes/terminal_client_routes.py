@@ -180,6 +180,156 @@ class BootstrapOut(BaseModel):
     default_model: str | None = None
 
 
+# --- Response models for the write-ops + new domains. Rich/evolving objects
+# (notes, tasks, presets, skills) stay `dict[str, Any]` inside a NAMED envelope:
+# every endpoint gets an OpenAPI schema for codegen, and FastAPI's response_model
+# filtering can never silently drop a field as those shapes grow. Small, stable
+# value-objects are fully typed.
+
+class OkId(BaseModel):
+    ok: bool = True
+    id: str
+
+
+class StatusId(BaseModel):
+    status: str
+    id: str
+
+
+class DocArchiveOut(BaseModel):
+    ok: bool = True
+    id: str
+    archived: bool
+
+
+class DocumentVersionItem(BaseModel):
+    id: str
+    version_number: int
+    content: str | None = None
+    summary: str | None = None
+    source: str | None = None
+    created_at: Any = None
+
+
+class DocumentVersionsOut(BaseModel):
+    versions: list[DocumentVersionItem] = Field(default_factory=list)
+
+
+class NotesListOut(BaseModel):
+    notes: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class TasksListOut(BaseModel):
+    tasks: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class MemoryEntry(BaseModel):
+    id: str
+    text: str
+    category: str | None = None
+    source: str | None = None
+    owner: str | None = None
+    timestamp: int | None = None
+    uses: int | None = None
+    session_id: str | None = None
+
+
+class MemoryListOut(BaseModel):
+    memories: list[MemoryEntry] = Field(default_factory=list)
+
+
+class MemoryAddOut(BaseModel):
+    ok: bool = True
+    memory: MemoryEntry
+
+
+class UploadFileOut(BaseModel):
+    id: str
+    name: str | None = None
+    mime: str | None = None
+    size: int | None = None
+    hash: str | None = None
+    uploaded_at: Any = None
+    width: int | None = None
+    height: int | None = None
+
+
+class UploadsOut(BaseModel):
+    files: list[UploadFileOut] = Field(default_factory=list)
+
+
+class SearchSource(BaseModel):
+    model_config = {"extra": "allow"}
+    title: str | None = None
+    url: str | None = None
+
+
+class SearchOut(BaseModel):
+    context: str = ""
+    sources: list[dict[str, Any]] = Field(default_factory=list)
+    error: str | None = None
+
+
+class SearchProvider(BaseModel):
+    id: str
+    label: str | None = None
+
+
+class SearchProvidersOut(BaseModel):
+    providers: list[SearchProvider] = Field(default_factory=list)
+
+
+class PresetsOut(BaseModel):
+    presets: dict[str, Any] = Field(default_factory=dict)
+
+
+class PrefsOut(BaseModel):
+    prefs: dict[str, Any] = Field(default_factory=dict)
+
+
+class PrefOut(BaseModel):
+    key: str
+    value: Any = None
+
+
+class SkillsOut(BaseModel):
+    skills: list[dict[str, Any]] = Field(default_factory=list)
+    count: int = 0
+
+
+class SkillsIndexOut(BaseModel):
+    index: list[dict[str, Any]] = Field(default_factory=list)
+    count: int = 0
+
+
+class McpServerOut(BaseModel):
+    id: str
+    name: str | None = None
+    transport: str | None = None
+    url: str | None = None
+    is_enabled: bool | None = None
+    status: str | None = None
+    tool_count: int | None = None
+    error: str | None = None
+
+
+class McpServersOut(BaseModel):
+    servers: list[McpServerOut] = Field(default_factory=list)
+
+
+class McpToolsOut(BaseModel):
+    tools: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SessionActionOut(BaseModel):
+    session: SessionSummaryOut
+
+
+class TaskRunOut(BaseModel):
+    ok: bool = True
+    id: str
+
+
 # Machine-readable payload schema per event kind, published in /capabilities so
 # a client (or codegen) doesn't have to reverse-engineer the loose payloads.
 # "?" marks an optional field; the envelope fields are always present.
@@ -921,7 +1071,7 @@ def setup_terminal_client_routes(
             "events": EVENT_KINDS_DOC,
         }
 
-    @router.get("/notes")
+    @router.get("/notes", response_model=NotesListOut)
     async def list_notes_terminal(request: Request, include_archived: bool = False, limit: int = 200) -> dict[str, Any]:
         require_terminal_scope(request, SESSION_READ_SCOPES)
         owner = effective_user(request)
@@ -1015,7 +1165,7 @@ def setup_terminal_client_routes(
         finally:
             db.close()
 
-    @router.delete("/notes/{note_id}")
+    @router.delete("/notes/{note_id}", response_model=OkId)
     async def delete_note_terminal(request: Request, note_id: str) -> dict[str, Any]:
         require_terminal_scope(request, CONTENT_WRITE_SCOPES)
         owner = effective_user(request)
@@ -1031,7 +1181,7 @@ def setup_terminal_client_routes(
         finally:
             db.close()
 
-    @router.get("/tasks")
+    @router.get("/tasks", response_model=TasksListOut)
     async def list_tasks_terminal(request: Request, limit: int = 200) -> dict[str, Any]:
         require_terminal_scope(request, SESSION_READ_SCOPES)
         owner = effective_user(request)
@@ -1146,7 +1296,7 @@ def setup_terminal_client_routes(
             db.close()
         return result
 
-    @router.delete("/tasks/{task_id}")
+    @router.delete("/tasks/{task_id}", response_model=OkId)
     async def delete_task_terminal(request: Request, task_id: str) -> dict[str, Any]:
         require_terminal_scope(request, CONTENT_WRITE_SCOPES)
         owner = effective_user(request)
@@ -1162,7 +1312,7 @@ def setup_terminal_client_routes(
         finally:
             db.close()
 
-    @router.post("/tasks/{task_id}/run")
+    @router.post("/tasks/{task_id}/run", response_model=TaskRunOut)
     async def run_task_terminal(request: Request, task_id: str, force: bool = False) -> dict[str, Any]:
         require_terminal_scope(request, CONTENT_WRITE_SCOPES)
         owner = effective_user(request)
@@ -1190,7 +1340,7 @@ def setup_terminal_client_routes(
         from src.memory import MemoryManager
         return MemoryManager(DATA_DIR)
 
-    @router.get("/memory")
+    @router.get("/memory", response_model=MemoryListOut)
     async def list_memory_terminal(request: Request, limit: int = 500) -> dict[str, Any]:
         require_terminal_scope(request, CONTENT_READ_SCOPES)
         owner = effective_user(request)
@@ -1198,7 +1348,7 @@ def setup_terminal_client_routes(
         entries = sorted(entries, key=lambda e: e.get("timestamp", 0), reverse=True)
         return {"memories": entries[: max(1, min(limit, 2000))]}
 
-    @router.post("/memory")
+    @router.post("/memory", response_model=MemoryAddOut)
     async def add_memory_terminal(request: Request, body: dict) -> dict[str, Any]:
         require_terminal_scope(request, CONTENT_WRITE_SCOPES)
         owner = effective_user(request)
@@ -1217,7 +1367,7 @@ def setup_terminal_client_routes(
         mgr.append_entry_record(entry)
         return {"ok": True, "memory": entry}
 
-    @router.delete("/memory/{memory_id}")
+    @router.delete("/memory/{memory_id}", response_model=OkId)
     async def delete_memory_terminal(request: Request, memory_id: str) -> dict[str, Any]:
         require_terminal_scope(request, CONTENT_WRITE_SCOPES)
         owner = effective_user(request)
@@ -1228,7 +1378,7 @@ def setup_terminal_client_routes(
 
     # ---- Search: web search (context + sources) ----
 
-    @router.post("/search")
+    @router.post("/search", response_model=SearchOut)
     async def search_terminal(request: Request, body: dict) -> dict[str, Any]:
         require_terminal_scope(request, CONTENT_READ_SCOPES)
         from services.search import comprehensive_web_search
@@ -1245,7 +1395,7 @@ def setup_terminal_client_routes(
         except Exception as exc:
             return {"context": "", "sources": [], "error": str(exc)}
 
-    @router.get("/search/providers")
+    @router.get("/search/providers", response_model=SearchProvidersOut)
     async def search_providers_terminal(request: Request) -> dict[str, Any]:
         require_terminal_scope(request, CONTENT_READ_SCOPES)
         from services.search import PROVIDER_INFO
@@ -1254,7 +1404,7 @@ def setup_terminal_client_routes(
 
     # ---- Presets: prompt presets a run can reference via preset_id ----
 
-    @router.get("/presets")
+    @router.get("/presets", response_model=PresetsOut)
     async def list_presets_terminal(request: Request) -> dict[str, Any]:
         require_terminal_scope(request, CONTENT_READ_SCOPES)
         from src.constants import DATA_DIR
@@ -1263,13 +1413,13 @@ def setup_terminal_client_routes(
 
     # ---- Prefs: per-owner settings (default model, theme, …) ----
 
-    @router.get("/prefs")
+    @router.get("/prefs", response_model=PrefsOut)
     async def get_prefs_terminal(request: Request) -> dict[str, Any]:
         require_terminal_scope(request, CONTENT_READ_SCOPES)
         from routes.prefs_routes import _load_for_user
         return {"prefs": _load_for_user(effective_user(request))}
 
-    @router.put("/prefs/{key}")
+    @router.put("/prefs/{key}", response_model=PrefOut)
     async def set_pref_terminal(request: Request, key: str, body: dict) -> dict[str, Any]:
         require_terminal_scope(request, CONTENT_WRITE_SCOPES)
         from routes.prefs_routes import _load_for_user, _save_for_user
@@ -1281,7 +1431,7 @@ def setup_terminal_client_routes(
 
     # ---- Skills: what capabilities the agent has available ----
 
-    @router.get("/skills")
+    @router.get("/skills", response_model=SkillsOut)
     async def list_skills_terminal(request: Request) -> dict[str, Any]:
         require_terminal_scope(request, CONTENT_READ_SCOPES)
         owner = effective_user(request)
@@ -1291,7 +1441,7 @@ def setup_terminal_client_routes(
         skills = mgr.load(owner=owner)
         return {"skills": skills, "count": len(skills)}
 
-    @router.get("/skills/index")
+    @router.get("/skills/index", response_model=SkillsIndexOut)
     async def skills_index_terminal(request: Request) -> dict[str, Any]:
         require_terminal_scope(request, CONTENT_READ_SCOPES)
         owner = effective_user(request)
@@ -1302,7 +1452,7 @@ def setup_terminal_client_routes(
 
     # ---- MCP: connected servers and their tools ----
 
-    @router.get("/mcp/servers")
+    @router.get("/mcp/servers", response_model=McpServersOut)
     async def mcp_servers_terminal(request: Request) -> dict[str, Any]:
         require_terminal_scope(request, CONTENT_READ_SCOPES)
         import json as _json
@@ -1325,7 +1475,7 @@ def setup_terminal_client_routes(
         finally:
             db.close()
 
-    @router.get("/mcp/tools")
+    @router.get("/mcp/tools", response_model=McpToolsOut)
     async def mcp_tools_terminal(request: Request) -> dict[str, Any]:
         require_terminal_scope(request, CONTENT_READ_SCOPES)
         from src.tool_execution import get_mcp_manager
@@ -1375,7 +1525,7 @@ def setup_terminal_client_routes(
         finally:
             db.close()
 
-    @router.post("/uploads")
+    @router.post("/uploads", response_model=UploadsOut)
     async def upload_attachment_terminal(
         request: Request,
         files: list[UploadFile] = File(...),
@@ -1500,7 +1650,7 @@ def setup_terminal_client_routes(
         finally:
             db.close()
 
-    @router.delete("/documents/{doc_id}")
+    @router.delete("/documents/{doc_id}", response_model=StatusId)
     async def delete_terminal_document(request: Request, doc_id: str) -> dict[str, str]:
         require_terminal_scope(request, DOCUMENT_WRITE_SCOPES)
         owner = effective_user(request)
@@ -1523,7 +1673,7 @@ def setup_terminal_client_routes(
         finally:
             db.close()
 
-    @router.post("/documents/{doc_id}/archive")
+    @router.post("/documents/{doc_id}/archive", response_model=DocArchiveOut)
     async def archive_terminal_document(request: Request, doc_id: str, archived: bool = True) -> dict[str, Any]:
         require_terminal_scope(request, DOCUMENT_WRITE_SCOPES)
         owner = effective_user(request)
@@ -1541,7 +1691,7 @@ def setup_terminal_client_routes(
         finally:
             db.close()
 
-    @router.get("/documents/{doc_id}/versions")
+    @router.get("/documents/{doc_id}/versions", response_model=DocumentVersionsOut)
     async def list_terminal_document_versions(request: Request, doc_id: str) -> dict[str, Any]:
         require_terminal_scope(request, DOCUMENT_READ_SCOPES)
         owner = effective_user(request)
@@ -1670,7 +1820,7 @@ def setup_terminal_client_routes(
             "content": content,
         }
 
-    @router.patch("/sessions/{session_id}")
+    @router.patch("/sessions/{session_id}", response_model=SessionActionOut)
     async def rename_session_terminal(request: Request, session_id: str, body: dict) -> dict[str, Any]:
         require_terminal_scope(request, CONTENT_WRITE_SCOPES)
         session = owned_session(request, session_id)
@@ -1686,7 +1836,7 @@ def setup_terminal_client_routes(
             pass
         return {"session": session_summary(session_manager.get_session(session_id))}
 
-    @router.delete("/sessions/{session_id}")
+    @router.delete("/sessions/{session_id}", response_model=StatusId)
     async def delete_session_terminal(request: Request, session_id: str) -> dict[str, Any]:
         require_terminal_scope(request, CONTENT_WRITE_SCOPES)
         owned_session(request, session_id)  # ownership gate
@@ -1694,7 +1844,7 @@ def setup_terminal_client_routes(
             return {"status": "deleted", "id": session_id}
         raise HTTPException(404, "Session not found")
 
-    @router.post("/sessions/{session_id}/truncate")
+    @router.post("/sessions/{session_id}/truncate", response_model=SessionActionOut)
     async def truncate_session_terminal(request: Request, session_id: str, keep: int = 0) -> dict[str, Any]:
         require_terminal_scope(request, CONTENT_WRITE_SCOPES)
         owned_session(request, session_id)
@@ -1704,7 +1854,7 @@ def setup_terminal_client_routes(
             raise HTTPException(400, "Truncate failed")
         return {"session": session_summary(session_manager.get_session(session_id))}
 
-    @router.post("/sessions/{session_id}/fork")
+    @router.post("/sessions/{session_id}/fork", response_model=SessionActionOut)
     async def fork_session_terminal(request: Request, session_id: str, body: dict | None = None) -> dict[str, Any]:
         require_terminal_scope(request, CONTENT_WRITE_SCOPES)
         source = owned_session(request, session_id)
