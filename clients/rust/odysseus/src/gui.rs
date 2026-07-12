@@ -95,6 +95,7 @@ pub struct App {
     rx: Receiver<Msg>,
     status: String,
     md_cache: CommonMarkCache,
+    focused_once: bool,
 }
 
 impl App {
@@ -126,6 +127,7 @@ impl App {
             rx,
             status: String::new(),
             md_cache: CommonMarkCache::default(),
+            focused_once: false,
         };
         match app.client.bootstrap() {
             Ok(b) => {
@@ -773,6 +775,10 @@ impl eframe::App for App {
                         .hint_text(hint)
                         .vertical_align(egui::Align::Center),
                 );
+                if !self.focused_once {
+                    resp.request_focus();
+                    self.focused_once = true;
+                }
                 let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 let send_btn = egui::Button::new(egui::RichText::new("Send").color(theme::BG).strong())
                     .fill(if self.busy { theme::MUTED } else { theme::FG })
