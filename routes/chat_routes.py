@@ -44,7 +44,12 @@ from routes.chat_helpers import (
     _enforce_chat_privileges,
 )
 from src.action_intents import ToolIntent, classify_tool_intent as _classify_tool_intent
-from src.tool_policy import build_effective_tool_policy
+from src.tool_policy import (
+    WEB_TOOL_NAMES,
+    build_effective_tool_policy,
+    is_web_search_explicitly_denied,
+    web_search_enabled_for_turn,
+)
 from src.agent_access import resolve_agent_access
 from src.agent_runtime import resolve_agent_execution_limits
 from src.usage_observability import (
@@ -792,17 +797,10 @@ def setup_chat_routes(
         # below). Skill extraction should only learn from real agent sessions,
         # not chats we quietly promoted for a notes/calendar intent.
         user_requested_agent = (chat_mode == "agent")
-        _web_search_explicitly_denied = (
-            allow_web_search is not None
-            and str(allow_web_search).lower() != "true"
-        )
-        _search_enabled = (
-            not _web_search_explicitly_denied
-            and (
-                str(allow_web_search).lower() == "true"
-                or str(use_web).lower() == "true"
-            )
-        )
+        # My main and upstream independently landed the same "explicit deny
+        # wins" rule; use upstream's shared helpers as the canonical source.
+        _web_search_explicitly_denied = is_web_search_explicitly_denied(allow_web_search)
+        _search_enabled = web_search_enabled_for_turn(allow_web_search, use_web)
         # Intent auto-escalation: if the user is clearly asking the assistant
         # to create a todo, reminder, or calendar event, promote chat → agent
         # for this turn so the LLM has access to manage_notes / manage_calendar.
@@ -1091,23 +1089,23 @@ def setup_chat_routes(
 
         # Build disabled-tools set from frontend toggles + user privileges
         disabled_tools = set()
-        # Only disable bash/web_search when the caller *explicitly* set them
-        # to a falsy value.  When unset (None), defer to per-user privilege
-        # checks below — this lets admins with can_use_bash=True use bash
-        # by default without having to send allow_bash in every request.
+        # Only disable bash when the caller *explicitly* set it to a falsy
+        # value. When unset (None), defer to per-user privilege checks below.
+        # Web search is per-turn opt-in: either the chat pre-search setting
+        # (`use_web=true`) or agent web toggle (`allow_web_search=true`) must
+        # explicitly enable it.
         if allow_bash is not None and str(allow_bash).lower() != "true":
             disabled_tools.add("bash")
-        if (
-            allow_web_search is not None
-            and str(allow_web_search).lower() != "true"
-        ):
-            disabled_tools.add("web_search")
-            disabled_tools.add("web_fetch")
+        # _explicit_web_intent is already computed above (my main's refined form
+        # requires the intent to actually need tools and not be explicitly
+        # denied); upstream re-derived it here only because their branch had lost
+        # the earlier assignment, so no re-definition is needed.
+        if is_web_search_explicitly_denied(allow_web_search) or not _search_enabled:
+            disabled_tools.update(WEB_TOOL_NAMES)
         if _explicit_web_intent:
             # A direct lookup/search request should not drift into personal
-            # tools or shell fallbacks. We still keep web_search/web_fetch
-            # available even when the frontend toggle is stale/falsy because
-            # the user's words are the stronger signal.
+            # tools or shell fallbacks. It can only use web_search/web_fetch
+            # when the request's explicit web setting enabled them.
             disabled_tools.update({
                 "bash", "python",
                 "search_chats", "manage_skills", "manage_memory",
@@ -1117,11 +1115,12 @@ def setup_chat_routes(
                 "manage_notes", "manage_calendar", "manage_tasks",
                 "api_call", "builtin_browser",
             })
-            disabled_tools.discard("web_search")
-            disabled_tools.discard("web_fetch")
+            if _search_enabled:
+                disabled_tools.difference_update(WEB_TOOL_NAMES)
+            else:
+                disabled_tools.update(WEB_TOOL_NAMES)
         elif _search_enabled:
-            disabled_tools.discard("web_search")
-            disabled_tools.discard("web_fetch")
+            disabled_tools.difference_update(WEB_TOOL_NAMES)
 
         # Nobody/incognito mode: deny tools that would expose the user's
         # persistent memory, past chats, or other identity-linked data.
@@ -1150,14 +1149,15 @@ def setup_chat_routes(
         # Enforce per-user privileges and global agent policy through the same
         # Module used by non-browser execution adapters.
         _user = ctx.user
-        explicit_web_allowed = (
-            _explicit_web_intent
-            or (allow_web_search is not None and str(allow_web_search).lower() == "true")
-        )
+        # Integrates upstream's "require explicit web enable" fix through my
+        # resolve_agent_access refactor: globally-disabled web tools now stay
+        # disabled (allow_globally_disabled_web=False) — an implied web intent
+        # no longer re-allows admin-disabled web_search/web_fetch. Privilege and
+        # global-disabled handling both live in resolve_agent_access.
         agent_access = resolve_agent_access(
             request,
             _user,
-            allow_globally_disabled_web=explicit_web_allowed,
+            allow_globally_disabled_web=False,
         )
         disabled_tools.update(agent_access.disabled_tools)
         if not agent_access.research_allowed:
@@ -1970,13 +1970,16 @@ def setup_chat_routes(
                 try:
                     _agent_limits = resolve_agent_execution_limits()
 
-                    _forced_tools = set(capability_forced_tools) if capability_forced_tools else None
-                    if _explicit_web_intent:
+                    # Per upstream's explicit-web-enable fix, force web tools only
+                    # when the turn explicitly enabled search (not on an implied
+                    # web intent); then layer on any harness capability-forced
+                    # tools so both are honored.
+                    _forced_tools = None
+                    if _search_enabled:
+                        _forced_tools = set(WEB_TOOL_NAMES)
+                    if capability_forced_tools:
                         _forced_tools = set(_forced_tools or set())
-                        _forced_tools.update({"web_search", "web_fetch"})
-                    elif _search_enabled:
-                        _forced_tools = set(_forced_tools or set())
-                        _forced_tools.update({"web_search", "web_fetch"})
+                        _forced_tools.update(capability_forced_tools)
 
                     async for chunk in stream_agent_loop(
                         sess.endpoint_url,

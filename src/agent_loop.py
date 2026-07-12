@@ -26,7 +26,7 @@ from src.model_context import estimate_tokens
 from src.settings import get_setting
 from src.prompt_security import untrusted_context_message
 from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
-from src.tool_policy import GUIDE_ONLY_DIRECTIVE, ToolPolicy
+from src.tool_policy import GUIDE_ONLY_DIRECTIVE, WEB_TOOL_NAMES, ToolPolicy
 from src.tool_utils import _truncate, get_mcp_manager
 from src.agent_tools import (
     parse_tool_blocks,
@@ -361,7 +361,7 @@ _DOMAIN_RULES = {
 }
 
 _DOMAIN_TOOL_MAP = {
-    "web": {"web_search", "web_fetch"},
+    "web": set(WEB_TOOL_NAMES),
     "research": {"trigger_research"},
     "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents"},
     "email": {"list_email_accounts", "list_emails", "read_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
@@ -2934,13 +2934,12 @@ async def stream_agent_loop(
         if "email" in (_intent.get("domains") or set()):
             _relevant_tools.add("ui_control")
         if "web" in (_intent.get("domains") or set()):
-            _relevant_tools.update({"web_search", "web_fetch"})
-            _removed_web_blocks = sorted({"web_search", "web_fetch"} & disabled_tools)
-            if _removed_web_blocks:
-                disabled_tools.difference_update({"web_search", "web_fetch"})
+            _relevant_tools.update(WEB_TOOL_NAMES)
+            _blocked_web_tools = sorted(WEB_TOOL_NAMES & disabled_tools)
+            if _blocked_web_tools:
                 logger.info(
-                    "[agent-intent] web turn forced search tools enabled; removed disabled=%s",
-                    _removed_web_blocks,
+                    "[agent-intent] web domain selected but search tools remain disabled=%s",
+                    _blocked_web_tools,
                 )
         if "research" in (_intent.get("domains") or set()):
             _relevant_tools.add("trigger_research")
@@ -2976,9 +2975,9 @@ async def stream_agent_loop(
             _relevant_tools = set(ALWAYS_AVAILABLE)
         _relevant_tools.update({"read_file", "grep", "ls", "manage_documents"})
 
-    # Per-request forced tools are stronger than retrieval. Search toggles and
-    # explicit lookup turns must make web tools visible even when tool RAG
-    # misses them; route-level disabled_tools decides what else is allowed.
+    # Per-request forced tools are stronger than retrieval. Explicit search
+    # settings make web tools visible even when tool RAG misses them;
+    # route-level disabled_tools decides what remains allowed.
     if not guide_only and forced_tools:
         forced_set = {t for t in forced_tools if t not in disabled_tools}
         if _relevant_tools is None:
