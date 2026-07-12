@@ -33,8 +33,11 @@ RUN_START_SCOPES = frozenset({"run:start"})
 RUN_STOP_SCOPES = frozenset({"run:stop"})
 SESSION_READ_SCOPES = frozenset({"session:read"})
 HARNESS_CONTROL_SCOPES = frozenset({"harness:control"})
-USAGE_READ_SCOPES = frozenset({"usage:read", "usage:export"})
-USAGE_EXPORT_SCOPES = frozenset({"usage:export"})
+# Accept the terminal session scopes too so the default ody-term token reads
+# usage out of the box (consistent with the other content domains); a
+# usage-only token still works via its dedicated scopes.
+USAGE_READ_SCOPES = frozenset({"usage:read", "usage:export", "session:read"})
+USAGE_EXPORT_SCOPES = frozenset({"usage:export", "session:write"})
 # Document CRUD. Accepts either the content scopes or the terminal session
 # scopes, so the default terminal token works out of the box during dev
 # without minting a documents-scoped token.
