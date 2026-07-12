@@ -33,6 +33,17 @@ SESSION_READ_SCOPES = frozenset({"session:read"})
 HARNESS_CONTROL_SCOPES = frozenset({"harness:control"})
 USAGE_READ_SCOPES = frozenset({"usage:read", "usage:export"})
 USAGE_EXPORT_SCOPES = frozenset({"usage:export"})
+# Document CRUD. Accepts either the content scopes or the terminal session
+# scopes, so the default terminal token works out of the box during dev
+# without minting a documents-scoped token.
+DOCUMENT_READ_SCOPES = frozenset({"documents:read", "documents:write", "session:read"})
+DOCUMENT_WRITE_SCOPES = frozenset({"documents:write", "session:write"})
+# Broad owner-scoped content domains (notes, tasks, memory, email, calendar,
+# presets, prefs, search, skills, mcp, compare, research, gallery, voice, …).
+# Accept the terminal session scopes so the default ody-term token works during
+# dev without minting a per-domain token.
+CONTENT_READ_SCOPES = frozenset({"session:read", "session:write"})
+CONTENT_WRITE_SCOPES = frozenset({"session:write"})
 
 
 def require_terminal_scope(request: Request, allowed: frozenset[str]) -> str:

@@ -33,6 +33,10 @@ from src.harness import get_harness_adapter
 from src.llm_core import stream_llm_with_fallback
 from src.model_context import estimate_tokens
 from src.terminal_client_auth import (
+    CONTENT_READ_SCOPES,
+    CONTENT_WRITE_SCOPES,
+    DOCUMENT_READ_SCOPES,
+    DOCUMENT_WRITE_SCOPES,
     EVENT_RAW_SCOPES,
     EVENT_READ_SCOPES,
     HARNESS_CONTROL_SCOPES,
@@ -44,6 +48,7 @@ from src.terminal_client_auth import (
     USAGE_READ_SCOPES,
     require_terminal_scope,
 )
+from routes.document_helpers import DocumentCreate, DocumentUpdate
 from routes.usage_routes import _time
 from src.subscription_usage import subscription_usage_store
 from src.usage_observability import usage_store
@@ -61,6 +66,151 @@ class RunStartRequest(BaseModel):
     harness_session_id: str | None = None
     harness_mode: str = "observe"
     workspace: str | None = None
+    # For agent runs: the document the AI should edit. When omitted, an agent
+    # run falls back to the session's most recent active document, so a client
+    # can keep editing the same doc across turns by echoing its doc_id.
+    active_doc_id: str | None = None
+    # Interactive planning. plan_mode=true proposes a plan (emits plan_update
+    # events and ends the turn); a follow-up run with approved_plan=<checklist>
+    # executes it. Mirrors the web plan/approve loop.
+    plan_mode: bool = False
+    approved_plan: str | None = None
+    # Upload ids (from POST /api/upload) to attach to an agent run — multimodal
+    # input and "document from file" flows.
+    attachments: list[str] | None = None
+
+
+# --- Typed response models for the fixed-shape endpoints (OpenAPI / client gen).
+# All fields are declared and permissive so response_model never drops or
+# rejects a value; verified against live responses with a before/after diff.
+
+class CapabilitiesEvents(BaseModel):
+    envelope: list[str] = Field(default_factory=list)
+    kinds: dict[str, Any] = Field(default_factory=dict)
+
+
+class CapabilitiesOut(BaseModel):
+    owner: str | None = None
+    auth_mode: str
+    scopes: list[str] = Field(default_factory=list)
+    event_schema: str
+    run_kinds: list[str] = Field(default_factory=list)
+    run_inputs: list[str] = Field(default_factory=list)
+    terminal_domains: list[str] = Field(default_factory=list)
+    reachable_via_owner_token: list[str] = Field(default_factory=list)
+    events: CapabilitiesEvents = Field(default_factory=CapabilitiesEvents)
+
+
+class ModelInfo(BaseModel):
+    model: str
+    endpoint_id: str
+    endpoint_url: str
+    endpoint_name: str
+
+
+class ModelsOut(BaseModel):
+    models: list[ModelInfo] = Field(default_factory=list)
+    default_model: str | None = None
+
+
+class DocumentOut(BaseModel):
+    id: str
+    session_id: str | None = None
+    title: str | None = None
+    language: str | None = None
+    current_content: str | None = None
+    version_count: int | None = None
+    is_active: bool | None = None
+    archived: bool | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    source_email_uid: str | None = None
+    source_email_folder: str | None = None
+    source_email_account_id: str | None = None
+    source_email_message_id: str | None = None
+
+
+class DocumentSummary(BaseModel):
+    id: str
+    title: str | None = None
+    language: str | None = None
+    version_count: int | None = None
+    session_id: str | None = None
+    is_active: bool | None = None
+    archived: bool | None = None
+    updated_at: str | None = None
+
+
+class DocumentsListOut(BaseModel):
+    documents: list[DocumentSummary] = Field(default_factory=list)
+
+
+class SessionSummaryOut(BaseModel):
+    session_id: str
+    name: str | None = None
+    model: str | None = None
+    archived: bool | None = None
+    message_count: int | None = None
+    created_at: Any = None
+    updated_at: Any = None
+
+
+class SessionsListOut(BaseModel):
+    sessions: list[SessionSummaryOut] = Field(default_factory=list)
+
+
+class MessageOut(BaseModel):
+    role: str
+    content: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class HistoryOut(BaseModel):
+    session: SessionSummaryOut
+    history: list[MessageOut] = Field(default_factory=list)
+    runs: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class BootstrapOut(BaseModel):
+    """One-call init for a new frontend."""
+    capabilities: CapabilitiesOut
+    sessions: list[SessionSummaryOut] = Field(default_factory=list)
+    models: list[ModelInfo] = Field(default_factory=list)
+    default_model: str | None = None
+
+
+# Machine-readable payload schema per event kind, published in /capabilities so
+# a client (or codegen) doesn't have to reverse-engineer the loose payloads.
+# "?" marks an optional field; the envelope fields are always present.
+EVENT_KINDS_DOC: dict[str, Any] = {
+    "envelope": [
+        "schema", "id", "seq", "time", "session_id", "run_id",
+        "source", "kind", "level", "summary", "payload",
+    ],
+    "kinds": {
+        "message.delta": {"delta": "str", "thinking": "bool?"},
+        "run.status": {"status": "str"},
+        "metrics": {"data": "object (usage/timing)"},
+        "message_saved": {"id": "str"},
+        "model_info": {"model": "str"},
+        "fallback": {"answered_by": "str", "reason": "str"},
+        "tool_start": {"tool": "str", "summary": "str?"},
+        "tool_progress": {"tool": "str", "summary": "str?"},
+        "tool_output": {"tool": "str", "summary": "str?"},
+        "agent_step": {"round": "int"},
+        "doc_stream_open": {"title": "str", "language": "str"},
+        "doc_stream_delta": {"content": "str (cumulative content so far)"},
+        "doc_update": {"doc_id": "str", "content": "str", "version": "int", "title": "str", "language": "str"},
+        "doc_suggestions": {"doc_id": "str", "suggestions": "list"},
+        "plan_update": {"plan": "object"},
+        "ask_user": {"question": "str", "options": "list", "multi": "bool?"},
+        "web_sources": {"data": "list"},
+        "rag_sources": {"data": "list"},
+        "memories_used": {"data": "list"},
+        "error": {"message": "str?", "text": "str?", "status": "int?"},
+        "heartbeat": {},
+    },
+}
 
 
 def _require_chat_runtime(session_manager: Any, chat_handler: Any) -> None:
@@ -146,18 +296,29 @@ def _terminal_chat_stream(
     request: Request,
     session_manager: Any,
     chat_handler: Any,
+    chat_processor: Any = None,
     session_id: str,
     sess: Any,
     message: str,
     preset_id: str | None,
+    attachments: list[str] | None = None,
 ) -> AsyncGenerator[str, None]:
     async def _stream() -> AsyncGenerator[str, None]:
         resolve_session_auth(sess, session_id, owner=effective_user(request))
-        sess.add_message(ChatMessage("user", message))
-        if hasattr(chat_handler, "update_session_name_if_needed"):
-            chat_handler.update_session_name_if_needed(sess, message)
-
-        messages = _session_messages(sess)
+        if attachments:
+            # Attachments need preprocessing (inline file content), which the
+            # lite path below doesn't do — build the context like the web/agent
+            # paths so chat-kind runs honour them instead of dropping them.
+            ctx = await build_chat_context(
+                sess, request, chat_handler, chat_processor,
+                message, session_id, preset_id=preset_id, att_ids=attachments,
+            )
+            messages = ctx.messages
+        else:
+            sess.add_message(ChatMessage("user", message))
+            if hasattr(chat_handler, "update_session_name_if_needed"):
+                chat_handler.update_session_name_if_needed(sess, message)
+            messages = _session_messages(sess)
         full_response = ""
         thinking_response = ""
         metrics: dict[str, Any] | None = None
@@ -166,7 +327,13 @@ def _terminal_chat_stream(
         actual_model = None
 
         try:
+            # Primary is the session's own (url, model, headers); append the
+            # owner's configured default-model fallback chain so a pre-content
+            # failure (e.g. a 404 on the primary model) falls back instead of
+            # surfacing to the client. Mirrors the web /api/chat_stream path
+            # and the terminal agent path, which both apply this chain.
             candidates = [(sess.endpoint_url, sess.model, getattr(sess, "headers", {}) or {})]
+            candidates += resolve_chat_fallback_candidates(owner=effective_user(request))
             async for chunk in stream_llm_with_fallback(
                 candidates,
                 messages,
@@ -245,6 +412,36 @@ def _terminal_chat_stream(
     return _stream()
 
 
+def _resolve_active_document(owner: str | None, session_id: str, active_doc_id: str | None) -> Any:
+    """Load the document an agent run should edit: the explicit id when given,
+    else the session's most recent active document. Detached so it stays usable
+    after the lookup session closes (the agent only reads its content/title)."""
+    from core.database import Document as DBDocument, SessionLocal
+    from routes.document_helpers import _owner_session_filter
+
+    db = SessionLocal()
+    try:
+        doc = None
+        if active_doc_id:
+            query = db.query(DBDocument).filter(DBDocument.id == active_doc_id)
+            doc = _owner_session_filter(query, owner).first()
+        if doc is None and session_id:
+            query = db.query(DBDocument).filter(
+                DBDocument.session_id == session_id,
+                DBDocument.is_active == True,  # noqa: E712 - SQLAlchemy column truthiness
+            )
+            doc = _owner_session_filter(query, owner).order_by(DBDocument.updated_at.desc()).first()
+        if doc is not None:
+            # Force-load the attributes the agent reads, then detach.
+            _ = (doc.id, doc.current_content, doc.title, doc.language, doc.session_id, doc.is_active)
+            db.expunge(doc)
+        return doc
+    except Exception:
+        return None
+    finally:
+        db.close()
+
+
 def _terminal_agent_stream(
     *,
     request: Request,
@@ -258,6 +455,10 @@ def _terminal_agent_stream(
     owner: str | None,
     access: AgentAccess,
     workspace: str | None,
+    active_doc_id: str | None = None,
+    plan_mode: bool = False,
+    approved_plan: str | None = None,
+    attachments: list[str] | None = None,
 ) -> AsyncGenerator[str, None]:
     async def _stream() -> AsyncGenerator[str, None]:
         resolve_session_auth(sess, session_id, owner=owner)
@@ -269,6 +470,7 @@ def _terminal_agent_stream(
             message,
             session_id,
             preset_id=preset_id,
+            att_ids=attachments or None,
             agent_mode=True,
         )
         disabled_tools = set(access.disabled_tools)
@@ -302,6 +504,9 @@ def _terminal_agent_stream(
                 uploaded_files=ctx.uploaded_files,
                 fallbacks=resolve_chat_fallback_candidates(owner=owner),
                 workspace=workspace,
+                active_document=_resolve_active_document(owner, session_id, active_doc_id),
+                plan_mode=plan_mode,
+                approved_plan=approved_plan or None,
                 provider_options=getattr(sess, "provider_options", None) or {},
             ):
                 if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
@@ -487,6 +692,7 @@ def setup_terminal_client_routes(
     session_manager=None,
     chat_handler=None,
     chat_processor=None,
+    upload_handler=None,
     **_deps: Any,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/terminal", tags=["terminal_client"])
@@ -646,7 +852,541 @@ def setup_terminal_client_routes(
 
         return StreamingResponse(events(), media_type=TERMINAL_EVENT_STREAM_MEDIA_TYPE)
 
-    @router.get("/sessions")
+    @router.get("/capabilities", response_model=CapabilitiesOut)
+    async def capabilities(request: Request) -> dict[str, Any]:
+        is_token = bool(getattr(request.state, "api_token", False))
+        return {
+            "owner": effective_user(request),
+            "auth_mode": "token" if is_token else "session",
+            "scopes": list(getattr(request.state, "api_token_scopes", []) or []) if is_token else ["*"],
+            "event_schema": "ody.event.v1",
+            "run_kinds": ["chat", "agent", "harness"],
+            "run_inputs": [
+                "message", "session_id", "model", "endpoint_url", "preset_id",
+                "active_doc_id", "plan_mode", "approved_plan", "attachments",
+                "workspace", "harness_adapter_id", "harness_session_id", "harness_mode",
+            ],
+            "terminal_domains": [
+                "runs", "events", "sessions", "usage", "models",
+                "documents (crud)", "notes (read)", "tasks (read)", "capabilities",
+            ],
+            # Owner-attributed tokens reach the full web route surface directly.
+            "reachable_via_owner_token": [
+                "email", "calendar", "memory", "skills", "presets", "gallery",
+                "research", "compare", "cookbook", "search", "uploads", "settings",
+                "notes (write)", "tasks (write)", "harness /command",
+            ],
+            "events": EVENT_KINDS_DOC,
+        }
+
+    @router.get("/notes")
+    async def list_notes_terminal(request: Request, include_archived: bool = False, limit: int = 200) -> dict[str, Any]:
+        require_terminal_scope(request, SESSION_READ_SCOPES)
+        owner = effective_user(request)
+        from core.database import Note, SessionLocal
+        from routes.note_routes import _note_to_dict
+        db = SessionLocal()
+        try:
+            query = db.query(Note).filter(Note.owner == owner)
+            if not include_archived:
+                query = query.filter(Note.archived == False)  # noqa: E712
+            rows = (
+                query.order_by(Note.pinned.desc(), Note.sort_order.asc(), Note.updated_at.desc())
+                .limit(max(1, min(limit, 1000)))
+                .all()
+            )
+            return {"notes": [_note_to_dict(n) for n in rows]}
+        finally:
+            db.close()
+
+    @router.get("/notes/{note_id}")
+    async def get_note_terminal(request: Request, note_id: str) -> dict[str, Any]:
+        require_terminal_scope(request, SESSION_READ_SCOPES)
+        owner = effective_user(request)
+        from core.database import Note, SessionLocal
+        from routes.note_routes import _note_to_dict
+        db = SessionLocal()
+        try:
+            note = db.query(Note).filter(Note.id == note_id).first()
+            if not note or note.owner != owner:
+                raise HTTPException(404, "Note not found")
+            return _note_to_dict(note)
+        finally:
+            db.close()
+
+    @router.post("/notes")
+    async def create_note_terminal(request: Request, body: dict) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_WRITE_SCOPES)
+        owner = effective_user(request)
+        import json as _json, uuid as _uuid
+        from core.database import Note, SessionLocal
+        from routes.note_routes import _note_to_dict
+        db = SessionLocal()
+        try:
+            note = Note(
+                id=str(_uuid.uuid4()),
+                owner=owner,
+                title=body.get("title"),
+                content=body.get("content"),
+                items=_json.dumps(body["items"]) if body.get("items") is not None else None,
+                note_type=body.get("note_type"),
+                color=body.get("color"),
+                label=body.get("label"),
+                pinned=bool(body.get("pinned", False)),
+                due_date=body.get("due_date"),
+                source=body.get("source") or "terminal",
+                session_id=body.get("session_id"),
+                repeat=body.get("repeat") or "none",
+                sort_order=int(body.get("sort_order") or 0),
+            )
+            db.add(note)
+            db.commit()
+            db.refresh(note)
+            return _note_to_dict(note)
+        finally:
+            db.close()
+
+    @router.put("/notes/{note_id}")
+    async def update_note_terminal(request: Request, note_id: str, body: dict) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_WRITE_SCOPES)
+        owner = effective_user(request)
+        import json as _json
+        from sqlalchemy.orm.attributes import flag_modified
+        from core.database import Note, SessionLocal
+        from routes.note_routes import _note_to_dict
+        db = SessionLocal()
+        try:
+            note = db.query(Note).filter(Note.id == note_id).first()
+            if not note or note.owner != owner:
+                raise HTTPException(404, "Note not found")
+            for field in ("title", "content", "note_type", "color", "label", "pinned",
+                          "archived", "due_date", "image_url", "repeat", "sort_order",
+                          "agent_session_id"):
+                if field in body and body[field] is not None:
+                    setattr(note, field, body[field])
+            if body.get("items") is not None:
+                note.items = _json.dumps(body["items"])
+                flag_modified(note, "items")
+            db.commit()
+            db.refresh(note)
+            return _note_to_dict(note)
+        finally:
+            db.close()
+
+    @router.delete("/notes/{note_id}")
+    async def delete_note_terminal(request: Request, note_id: str) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_WRITE_SCOPES)
+        owner = effective_user(request)
+        from core.database import Note, SessionLocal
+        db = SessionLocal()
+        try:
+            note = db.query(Note).filter(Note.id == note_id).first()
+            if not note or note.owner != owner:
+                raise HTTPException(404, "Note not found")
+            db.delete(note)
+            db.commit()
+            return {"ok": True, "id": note_id}
+        finally:
+            db.close()
+
+    @router.get("/tasks")
+    async def list_tasks_terminal(request: Request, limit: int = 200) -> dict[str, Any]:
+        require_terminal_scope(request, SESSION_READ_SCOPES)
+        owner = effective_user(request)
+        from core.database import ScheduledTask, SessionLocal
+        from routes.task_routes import _task_to_dict
+        db = SessionLocal()
+        try:
+            rows = (
+                db.query(ScheduledTask)
+                .filter(ScheduledTask.owner == owner)
+                .order_by(ScheduledTask.next_run.asc())
+                .limit(max(1, min(limit, 1000)))
+                .all()
+            )
+            return {"tasks": [_task_to_dict(t) for t in rows]}
+        finally:
+            db.close()
+
+    @router.get("/tasks/{task_id}")
+    async def get_task_terminal(request: Request, task_id: str) -> dict[str, Any]:
+        require_terminal_scope(request, SESSION_READ_SCOPES)
+        owner = effective_user(request)
+        from core.database import ScheduledTask, SessionLocal
+        from routes.task_routes import _task_to_dict
+        db = SessionLocal()
+        try:
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            if not task or task.owner != owner:
+                raise HTTPException(404, "Task not found")
+            return _task_to_dict(task, include_last_run_result=True)
+        finally:
+            db.close()
+
+    @router.post("/tasks")
+    async def create_task_terminal(request: Request, body: dict) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_WRITE_SCOPES)
+        owner = effective_user(request)
+        import uuid as _uuid
+        from datetime import datetime as _dt
+        from core.database import ScheduledTask, SessionLocal
+        from routes.task_routes import _task_to_dict
+        from src.task_scheduler import compute_next_run
+        task_type = body.get("task_type") or "llm"
+        trigger_type = body.get("trigger_type") or "schedule"
+        if task_type in ("llm", "research") and not body.get("prompt"):
+            raise HTTPException(400, "prompt is required for llm/research tasks")
+        if task_type == "action":
+            # Shell-executing actions stay owner-gated on the web side; keep the
+            # token contract to safe (non-shell) task types.
+            raise HTTPException(400, "action tasks aren't creatable over the token contract")
+        next_run = None
+        if trigger_type == "schedule":
+            sched_date = None
+            if body.get("scheduled_date"):
+                try:
+                    sched_date = _dt.fromisoformat(str(body["scheduled_date"]).replace("Z", "+00:00")).replace(tzinfo=None)
+                except ValueError:
+                    raise HTTPException(400, "Invalid scheduled_date")
+            next_run = compute_next_run(
+                body.get("schedule") or "once", body.get("scheduled_time"),
+                body.get("scheduled_day"), sched_date,
+                cron_expression=body.get("cron_expression"),
+            )
+        db = SessionLocal()
+        try:
+            task = ScheduledTask(
+                id=str(_uuid.uuid4()),
+                owner=owner,
+                name=body.get("name") or "Untitled Task",
+                prompt=body.get("prompt"),
+                task_type=task_type,
+                trigger_type=trigger_type,
+                trigger_event=body.get("trigger_event"),
+                trigger_count=body.get("trigger_count"),
+                schedule=body.get("schedule"),
+                scheduled_time=body.get("scheduled_time"),
+                scheduled_day=body.get("scheduled_day"),
+                cron_expression=body.get("cron_expression"),
+                next_run=next_run,
+                status="active",
+                model=body.get("model"),
+                output_target=body.get("output_target") or "none",
+            )
+            db.add(task)
+            db.commit()
+            db.refresh(task)
+            result = _task_to_dict(task)
+        finally:
+            db.close()
+        return result
+
+    @router.put("/tasks/{task_id}")
+    async def update_task_terminal(request: Request, task_id: str, body: dict) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_WRITE_SCOPES)
+        owner = effective_user(request)
+        from core.database import ScheduledTask, SessionLocal
+        from routes.task_routes import _task_to_dict
+        db = SessionLocal()
+        try:
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            if not task or task.owner != owner:
+                raise HTTPException(404, "Task not found")
+            for field in ("name", "prompt", "status", "schedule", "scheduled_time",
+                          "scheduled_day", "cron_expression", "trigger_event",
+                          "trigger_count", "model", "output_target"):
+                if field in body and body[field] is not None:
+                    setattr(task, field, body[field])
+            db.commit()
+            db.refresh(task)
+            result = _task_to_dict(task)
+        finally:
+            db.close()
+        return result
+
+    @router.delete("/tasks/{task_id}")
+    async def delete_task_terminal(request: Request, task_id: str) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_WRITE_SCOPES)
+        owner = effective_user(request)
+        from core.database import ScheduledTask, SessionLocal
+        db = SessionLocal()
+        try:
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            if not task or task.owner != owner:
+                raise HTTPException(404, "Task not found")
+            db.delete(task)
+            db.commit()
+            return {"ok": True, "id": task_id}
+        finally:
+            db.close()
+
+    @router.post("/tasks/{task_id}/run")
+    async def run_task_terminal(request: Request, task_id: str, force: bool = False) -> dict[str, Any]:
+        require_terminal_scope(request, CONTENT_WRITE_SCOPES)
+        owner = effective_user(request)
+        from core.database import ScheduledTask, SessionLocal
+        from src.event_bus import get_task_scheduler
+        db = SessionLocal()
+        try:
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            if not task or task.owner != owner:
+                raise HTTPException(404, "Task not found")
+        finally:
+            db.close()
+        scheduler = get_task_scheduler()
+        if not scheduler:
+            raise HTTPException(503, "Task scheduler not available")
+        started = await scheduler.run_task_now(task_id, force=force)
+        if not started:
+            raise HTTPException(409, "Task is already running")
+        return {"ok": True, "id": task_id}
+
+    @router.get("/models", response_model=ModelsOut)
+    async def list_models(request: Request) -> dict[str, Any]:
+        require_terminal_scope(request, SESSION_READ_SCOPES)
+        import json as _json
+        from core.database import ModelEndpoint, SessionLocal
+        try:
+            from src.settings import load_settings
+            default_model = load_settings().get("default_model")
+        except Exception:
+            default_model = None
+        db = SessionLocal()
+        try:
+            out: list[dict[str, Any]] = []
+            seen: set[tuple[str, str]] = set()
+            for ep in db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).all():  # noqa: E712
+                if (ep.model_type or "llm") != "llm":
+                    continue
+                try:
+                    hidden = set(_json.loads(ep.hidden_models or "[]"))
+                except Exception:
+                    hidden = set()
+                models: list[str] = []
+                for field in (ep.pinned_models, ep.cached_models):
+                    try:
+                        models.extend(_json.loads(field or "[]"))
+                    except Exception:
+                        pass
+                for model in models:
+                    if model in hidden or (ep.id, model) in seen:
+                        continue
+                    seen.add((ep.id, model))
+                    out.append({
+                        "model": model,
+                        "endpoint_id": ep.id,
+                        "endpoint_url": ep.base_url,
+                        "endpoint_name": ep.name,
+                    })
+            return {"models": out, "default_model": default_model}
+        finally:
+            db.close()
+
+    # ---- Documents: token-scoped CRUD for the writing surface ----
+
+    @router.get("/documents", response_model=DocumentsListOut)
+    async def list_documents(request: Request, limit: int = 100, include_archived: bool = False) -> dict[str, Any]:
+        require_terminal_scope(request, DOCUMENT_READ_SCOPES)
+        owner = effective_user(request)
+        from core.database import Document as DBDocument, SessionLocal
+        from routes.document_helpers import _doc_to_dict, _owner_session_filter
+        db = SessionLocal()
+        try:
+            query = db.query(DBDocument)
+            if not include_archived:
+                query = query.filter(DBDocument.archived == False)  # noqa: E712
+            rows = (
+                _owner_session_filter(query, owner)
+                .order_by(DBDocument.updated_at.desc())
+                .limit(max(1, min(limit, 500)))
+                .all()
+            )
+            keep = ("id", "title", "language", "version_count", "session_id", "is_active", "archived", "updated_at")
+            return {"documents": [{k: _doc_to_dict(doc)[k] for k in keep} for doc in rows]}
+        finally:
+            db.close()
+
+    @router.get("/documents/{doc_id}", response_model=DocumentOut)
+    async def get_terminal_document(request: Request, doc_id: str) -> dict[str, Any]:
+        require_terminal_scope(request, DOCUMENT_READ_SCOPES)
+        owner = effective_user(request)
+        from core.database import Document as DBDocument, SessionLocal
+        from routes.document_helpers import _doc_to_dict, _verify_doc_owner
+        db = SessionLocal()
+        try:
+            doc = db.query(DBDocument).filter(DBDocument.id == doc_id).first()
+            if not doc:
+                raise HTTPException(404, "Document not found")
+            _verify_doc_owner(db, doc, owner)
+            return _doc_to_dict(doc)
+        finally:
+            db.close()
+
+    @router.post("/documents", response_model=DocumentOut)
+    async def create_terminal_document(request: Request, payload: DocumentCreate) -> dict[str, Any]:
+        require_terminal_scope(request, DOCUMENT_WRITE_SCOPES)
+        owner = effective_user(request)
+        from core.database import SessionLocal
+        from routes.document_helpers import create_document_record
+        db = SessionLocal()
+        try:
+            return create_document_record(
+                db,
+                owner=owner,
+                title=payload.title,
+                content=payload.content,
+                language=payload.language,
+                session_id=payload.session_id,
+            )
+        finally:
+            db.close()
+
+    @router.put("/documents/{doc_id}", response_model=DocumentOut)
+    async def update_terminal_document(request: Request, doc_id: str, payload: DocumentUpdate) -> dict[str, Any]:
+        require_terminal_scope(request, DOCUMENT_WRITE_SCOPES)
+        owner = effective_user(request)
+        from core.database import Document as DBDocument, SessionLocal
+        from routes.document_helpers import (
+            apply_document_update, coerce_document_content, _verify_doc_owner,
+            _assert_pdf_marker_upload_owned,
+        )
+        db = SessionLocal()
+        try:
+            doc = db.query(DBDocument).filter(DBDocument.id == doc_id).first()
+            if not doc:
+                raise HTTPException(404, "Document not found")
+            _verify_doc_owner(db, doc, owner)
+            content = coerce_document_content(doc, payload.content)
+            # Same guard the web update path runs: reject content whose
+            # pdf_source marker points at another user's upload.
+            _assert_pdf_marker_upload_owned(request, content, owner, upload_handler)
+            return apply_document_update(
+                db, doc,
+                content=content,
+                summary=payload.summary,
+                force_version=payload.force_version,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(500, f"Failed to update document: {exc}")
+        finally:
+            db.close()
+
+    @router.delete("/documents/{doc_id}")
+    async def delete_terminal_document(request: Request, doc_id: str) -> dict[str, str]:
+        require_terminal_scope(request, DOCUMENT_WRITE_SCOPES)
+        owner = effective_user(request)
+        from core.database import Document as DBDocument, SessionLocal
+        from routes.document_helpers import _verify_doc_owner
+        db = SessionLocal()
+        try:
+            doc = db.query(DBDocument).filter(DBDocument.id == doc_id).first()
+            if not doc:
+                raise HTTPException(404, "Document not found")
+            _verify_doc_owner(db, doc, owner)
+            doc.is_active = False
+            try:
+                from src.agent_tools.document_tools import clear_active_document
+                clear_active_document(doc_id)
+            except Exception:
+                pass
+            db.commit()
+            return {"status": "deleted", "id": doc_id}
+        finally:
+            db.close()
+
+    @router.post("/documents/{doc_id}/archive")
+    async def archive_terminal_document(request: Request, doc_id: str, archived: bool = True) -> dict[str, Any]:
+        require_terminal_scope(request, DOCUMENT_WRITE_SCOPES)
+        owner = effective_user(request)
+        from core.database import Document as DBDocument, SessionLocal
+        from routes.document_helpers import _verify_doc_owner
+        db = SessionLocal()
+        try:
+            doc = db.query(DBDocument).filter(DBDocument.id == doc_id).first()
+            if not doc:
+                raise HTTPException(404, "Document not found")
+            _verify_doc_owner(db, doc, owner)
+            doc.archived = bool(archived)
+            db.commit()
+            return {"ok": True, "id": doc_id, "archived": doc.archived}
+        finally:
+            db.close()
+
+    @router.get("/documents/{doc_id}/versions")
+    async def list_terminal_document_versions(request: Request, doc_id: str) -> dict[str, Any]:
+        require_terminal_scope(request, DOCUMENT_READ_SCOPES)
+        owner = effective_user(request)
+        from core.database import Document as DBDocument, DocumentVersion, SessionLocal
+        from routes.document_helpers import _verify_doc_owner
+        db = SessionLocal()
+        try:
+            doc = db.query(DBDocument).filter(DBDocument.id == doc_id).first()
+            if not doc:
+                raise HTTPException(404, "Document not found")
+            _verify_doc_owner(db, doc, owner)
+            versions = (
+                db.query(DocumentVersion)
+                .filter(DocumentVersion.document_id == doc_id)
+                .order_by(DocumentVersion.version_number.desc())
+                .all()
+            )
+            return {"versions": [{
+                "id": v.id,
+                "version_number": v.version_number,
+                "content": v.content,
+                "summary": v.summary,
+                "source": v.source,
+                "created_at": v.created_at.isoformat() if v.created_at else None,
+            } for v in versions]}
+        finally:
+            db.close()
+
+    @router.post("/documents/{doc_id}/restore/{num}", response_model=DocumentOut)
+    async def restore_terminal_document_version(request: Request, doc_id: str, num: int) -> dict[str, Any]:
+        require_terminal_scope(request, DOCUMENT_WRITE_SCOPES)
+        owner = effective_user(request)
+        import uuid as _uuid
+        from core.database import Document as DBDocument, DocumentVersion, SessionLocal
+        from routes.document_helpers import _doc_to_dict, _verify_doc_owner
+        db = SessionLocal()
+        try:
+            doc = db.query(DBDocument).filter(DBDocument.id == doc_id).first()
+            if not doc:
+                raise HTTPException(404, "Document not found")
+            _verify_doc_owner(db, doc, owner)
+            old = (
+                db.query(DocumentVersion)
+                .filter(DocumentVersion.document_id == doc_id, DocumentVersion.version_number == num)
+                .first()
+            )
+            if not old:
+                raise HTTPException(404, "Version not found")
+            new_num = (doc.version_count or 1) + 1
+            db.add(DocumentVersion(
+                id=str(_uuid.uuid4()),
+                document_id=doc_id,
+                version_number=new_num,
+                content=old.content,
+                summary=f"Restored from v{num}",
+                source="user",
+            ))
+            doc.current_content = old.content
+            doc.version_count = new_num
+            db.commit()
+            db.refresh(doc)
+            return _doc_to_dict(doc)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(500, str(exc))
+        finally:
+            db.close()
+
+    @router.get("/sessions", response_model=SessionsListOut)
     async def list_sessions(request: Request) -> dict[str, Any]:
         require_terminal_scope(request, SESSION_READ_SCOPES)
         owner = effective_user(request)
@@ -656,13 +1396,27 @@ def setup_terminal_client_routes(
         sessions = list(visible.values()) if isinstance(visible, dict) else list(visible)
         return {"sessions": [session_summary(session) for session in sessions]}
 
+    @router.get("/bootstrap", response_model=BootstrapOut)
+    async def bootstrap(request: Request) -> dict[str, Any]:
+        # One request for a new frontend to render its initial UI: composes the
+        # existing typed handlers so there is no duplicated logic.
+        caps = await capabilities(request)
+        sess = await list_sessions(request)
+        mods = await list_models(request)
+        return {
+            "capabilities": caps,
+            "sessions": sess.get("sessions", []),
+            "models": mods.get("models", []),
+            "default_model": mods.get("default_model"),
+        }
+
     @router.get("/sessions/{session_id}")
     async def show_session(request: Request, session_id: str) -> dict[str, Any]:
         session = owned_session(request, session_id)
         runs = [run for run in terminal_client_runs.list_runs() if run.get("session_id") == session_id]
         return {"session": session_summary(session), "runs": runs}
 
-    @router.get("/sessions/{session_id}/history")
+    @router.get("/sessions/{session_id}/history", response_model=HistoryOut)
     async def session_history(request: Request, session_id: str) -> dict[str, Any]:
         session = owned_session(request, session_id)
         runs = [run for run in terminal_client_runs.list_runs() if run.get("session_id") == session_id]
@@ -785,16 +1539,22 @@ def setup_terminal_client_routes(
                 owner=owner,
                 access=access,
                 workspace=payload.workspace,
+                active_doc_id=payload.active_doc_id,
+                plan_mode=payload.plan_mode,
+                approved_plan=payload.approved_plan,
+                attachments=payload.attachments,
             )
         else:
             stream = _terminal_chat_stream(
                 request=request,
                 session_manager=session_manager,
                 chat_handler=chat_handler,
+                chat_processor=chat_processor,
                 session_id=session_id,
                 sess=sess,
                 message=payload.message,
                 preset_id=payload.preset_id,
+                attachments=payload.attachments,
             )
         try:
             return terminal_client_runs.create_run(
