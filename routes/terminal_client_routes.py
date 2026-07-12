@@ -9,7 +9,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -1181,6 +1181,39 @@ def setup_terminal_client_routes(
             return {"models": out, "default_model": default_model}
         finally:
             db.close()
+
+    @router.post("/uploads")
+    async def upload_attachment_terminal(
+        request: Request,
+        files: list[UploadFile] = File(...),
+        session_id: str | None = Form(None),
+    ) -> dict[str, Any]:
+        """Upload files and get attachment ids to pass to POST /runs as
+        `attachments`. Mirrors the web `/api/upload` on the terminal contract so
+        a token frontend can do multimodal without leaving the namespace."""
+        require_terminal_scope(request, CONTENT_WRITE_SCOPES)
+        if upload_handler is None:
+            raise HTTPException(503, "Uploads require the Odysseus upload handler")
+        owner = effective_user(request)
+        client_ip = request.client.host if request.client else "unknown"
+        out: list[dict[str, Any]] = []
+        for u in files:
+            try:
+                meta = upload_handler.save_upload(u, client_ip, owner=owner)
+                out.append({
+                    "id": meta["id"], "name": meta["name"], "mime": meta["mime"],
+                    "size": meta["size"], "hash": meta["hash"],
+                    "uploaded_at": meta["uploaded_at"],
+                    "width": meta.get("width"), "height": meta.get("height"),
+                })
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.error("terminal upload failed for %s: %s", getattr(u, "filename", "?"), exc)
+                continue
+        if not out:
+            raise HTTPException(500, "All file uploads failed")
+        return {"files": out}
 
     # ---- Documents: token-scoped CRUD for the writing surface ----
 
